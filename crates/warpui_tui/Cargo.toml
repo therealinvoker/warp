@@ -1,0 +1,10 @@
+[package]
+name = "warpui_tui"
+version = "0.1.0"
+edition = "2021"
+authors.workspace = true
+publish.workspace = true
+license = "MIT"
+
+[dependencies]
+warpui_core.workspace = true
