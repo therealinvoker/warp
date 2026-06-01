@@ -138,11 +138,11 @@ fn enterprise_non_admin_out_of_credits_links_to_team_settings() {
 }
 
 #[test]
-fn non_enterprise_admin_with_add_on_credits_can_add_credits() {
+fn non_enterprise_non_admin_with_add_on_credits_can_add_credits() {
     App::test((), |mut app| async move {
         let workspace = test_workspace(
             CustomerType::Build,
-            MembershipRole::Owner,
+            MembershipRole::User,
             |billing_metadata| {
                 billing_metadata.tier.purchase_add_on_credits_policy =
                     Some(PurchaseAddOnCreditsPolicy { enabled: true });
