@@ -872,6 +872,14 @@ impl ConvertAPIToolCallToAIAgentAction for api::message::ToolCall {
             api::message::tool_call::Tool::Server(_) => {
                 Ok(MaybeAIAgentAction::NoClientRepresentation)
             }
+            // QUALITY-780: `wait_for_events` is a yield signal handled
+            // specially in `BlocklistAIHistoryModel::apply_client_actions`
+            // (see client TECH §8.1), which transitions the conversation
+            // to `WaitingForEvents` rather than producing an action result.
+            // No `AIAgentAction` representation is needed here.
+            api::message::tool_call::Tool::WaitForEvents(_) => {
+                Ok(MaybeAIAgentAction::NoClientRepresentation)
+            }
             _ => Err(ToolToAIAgentActionError::UnexpectedTool),
         }
     }
