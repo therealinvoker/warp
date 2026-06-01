@@ -1452,6 +1452,22 @@ impl TryFrom<InsertReviewCommentsResult> for api::request::input::tool_call_resu
     }
 }
 
+impl TryFrom<WaitForEventsResult> for api::request::input::tool_call_result::Result {
+    type Error = ConvertToAPITypeError;
+
+    /// QUALITY-780: emit the wire form of the watchdog-timeout result so
+    /// the server receives the empty `WaitForEventsResult` and echoes it
+    /// back through the normal stream. The agent's next turn observes
+    /// the empty result and decides how to proceed.
+    fn try_from(_result: WaitForEventsResult) -> Result<Self, Self::Error> {
+        Ok(
+            api::request::input::tool_call_result::Result::WaitForEvents(
+                api::WaitForEventsResult {},
+            ),
+        )
+    }
+}
+
 #[cfg(test)]
 #[path = "convert_tests.rs"]
 mod tests;

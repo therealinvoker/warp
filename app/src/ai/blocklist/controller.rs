@@ -508,14 +508,34 @@ impl BlocklistAIController {
                         // variant.
                         ConversationStatus::Cancelled
                     };
-                    history_model.update(ctx, |history_model, ctx| {
-                        history_model.update_conversation_status(
-                            me.terminal_view_id,
-                            *conversation_id,
-                            updated_conversation_status,
-                            ctx,
-                        );
-                    });
+                    // QUALITY-780 §8.2 ordering rule: if the conversation
+                    // already transitioned to `WaitingForEvents` earlier in
+                    // this response stream (via the detection point in
+                    // `apply_client_actions`), the post-stream
+                    // "all actions succeeded → Success" transition must
+                    // not clobber it. The response stream itself still
+                    // gets marked completed successfully (response-stream
+                    // success is independent of conversation status —
+                    // `mark_response_stream_completed_successfully` is
+                    // invoked from the `Finished` event handler above);
+                    // we just skip the conversation-level
+                    // `update_conversation_status` call here.
+                    let conversation_is_waiting_for_events = history_model
+                        .as_ref(ctx)
+                        .conversation(conversation_id)
+                        .is_some_and(|conversation| conversation.status().is_waiting_for_events());
+                    if !(conversation_is_waiting_for_events
+                        && matches!(updated_conversation_status, ConversationStatus::Success))
+                    {
+                        history_model.update(ctx, |history_model, ctx| {
+                            history_model.update_conversation_status(
+                                me.terminal_view_id,
+                                *conversation_id,
+                                updated_conversation_status,
+                                ctx,
+                            );
+                        });
+                    }
                 }
                 return;
             }
@@ -2509,6 +2529,40 @@ impl BlocklistAIController {
     ) {
         self.action_model.update(ctx, |action_model, _| {
             action_model.clear_finished_action_results(conversation_id);
+        });
+    }
+
+    /// QUALITY-780 §4: emit a `WaitForEvents` tool-call-result for the
+    /// supplied unresolved `tool_call_id`. Called by the driver wave's
+    /// local watchdog when its idle timer fires before an inbound resume
+    /// input arrives.
+    ///
+    /// This helper performs the local state transition
+    /// (`WaitingForEvents` → `InProgress`) immediately by clearing the
+    /// stored unresolved id via
+    /// `BlocklistAIHistoryModel::clear_conversation_waiting_for_events_if_matches`,
+    /// so the driver / task-sync / notifications / pill-bar all observe
+    /// the resume right away. The wire form of the result
+    /// (`Request.Input.ToolCallResult.WaitForEvents`) is emitted on the
+    /// next outbound request from the driver wave; the agent's next
+    /// turn sees the empty timeout result and decides how to proceed.
+    ///
+    /// See `specs/QUALITY-780/TECH.md` §4.
+    pub fn submit_wait_for_events_timeout(
+        &mut self,
+        conversation_id: AIConversationId,
+        tool_call_id: String,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        let history_model = BlocklistAIHistoryModel::handle(ctx);
+        let terminal_view_id = self.terminal_view_id;
+        history_model.update(ctx, |history_model, ctx| {
+            history_model.clear_conversation_waiting_for_events_if_matches(
+                conversation_id,
+                &tool_call_id,
+                terminal_view_id,
+                ctx,
+            );
         });
     }
 

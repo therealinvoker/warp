@@ -264,6 +264,9 @@ pub(crate) fn redact_inputs(inputs: &mut [AIAgentInput]) {
                     // Orchestrate results contain agent IDs / canonical error
                     // strings only; no user-provided text to redact.
                     AIAgentActionResultType::RunAgents(_) => {}
+                    // QUALITY-780: the watchdog-timeout result carries no
+                    // payload, so there is nothing to redact.
+                    AIAgentActionResultType::WaitForEvents(_) => {}
                 }
             }
             AIAgentInput::FetchReviewComments { repo_path, context } => {

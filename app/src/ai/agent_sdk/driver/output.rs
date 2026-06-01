@@ -302,6 +302,9 @@ pub mod text {
                 AIAgentActionResultType::AskUserQuestion(_) => Ok(()),
                 // RunAgents is a desktop-client-only action; not used in the SDK.
                 AIAgentActionResultType::RunAgents(_) => Ok(()),
+                // QUALITY-780: the watchdog-timeout result has no
+                // user-visible payload; no SDK output to emit.
+                AIAgentActionResultType::WaitForEvents(_) => Ok(()),
             },
         }
     }

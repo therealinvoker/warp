@@ -100,6 +100,14 @@ pub enum AIAgentActionResultType {
     /// The result of an orchestrate tool call: launched (with per-agent
     /// outcomes), launch denied (Stage 2), failure, or cancelled.
     RunAgents(RunAgentsResult),
+
+    /// QUALITY-780: result emitted by the client when its local
+    /// `wait_for_events` watchdog fires before an inbound resume input
+    /// arrives. The payload is intentionally empty — the variant
+    /// identity alone tells the agent "your wait timed out" so it can
+    /// decide how to proceed on the next turn. See
+    /// `specs/QUALITY-780/TECH.md` §4 / §8.
+    WaitForEvents(WaitForEventsResult),
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -167,6 +175,7 @@ impl Display for AIAgentActionResultType {
             AIAgentActionResultType::TransferShellCommandControlToUser(result) => result.fmt(f),
             AIAgentActionResultType::AskUserQuestion(result) => result.fmt(f),
             AIAgentActionResultType::RunAgents(result) => result.fmt(f),
+            AIAgentActionResultType::WaitForEvents(result) => result.fmt(f),
             AIAgentActionResultType::OpenCodeReview | AIAgentActionResultType::InitProject => {
                 Ok(())
             }
@@ -768,6 +777,9 @@ impl AIAgentActionResultType {
             AIAgentActionResultType::RunAgents(_) => {
                 "The result of an orchestrate batch of child agents"
             }
+            AIAgentActionResultType::WaitForEvents(_) => {
+                "The local watchdog timed out while waiting for inbound events"
+            }
         }
     }
 
@@ -806,6 +818,11 @@ impl AIAgentActionResultType {
             ) => true,
             Self::AskUserQuestion(AskUserQuestionResult::Success { .. }) => true,
             Self::RunAgents(RunAgentsResult::Launched { .. }) => true,
+            // QUALITY-780: the watchdog-timeout result is a successful
+            // tool-call completion from the conversation's perspective —
+            // there is no error to surface and the agent will decide how
+            // to proceed on its next turn.
+            Self::WaitForEvents(_) => true,
             _ => false,
         }
     }
@@ -1452,5 +1469,21 @@ impl Display for AskUserQuestionResult {
                 )
             }
         }
+    }
+}
+
+/// QUALITY-780: result emitted by the client's `wait_for_events` watchdog
+/// when it fires before an inbound resume input arrives. The proto wire
+/// form (`Message::ToolCallResult.WaitForEvents`) carries no payload — the
+/// variant identity is the entire signal. The agent's next turn observes
+/// this empty result and decides how to proceed (commonly `finish_task`,
+/// but the agent may also re-yield or ask the user). See
+/// `specs/QUALITY-780/TECH.md` §4 / §8.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WaitForEventsResult;
+
+impl Display for WaitForEventsResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Wait for events timed out")
     }
 }

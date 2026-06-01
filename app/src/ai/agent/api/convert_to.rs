@@ -706,6 +706,14 @@ impl TryFrom<AIAgentActionResult> for api::request::input::user_inputs::user_inp
             AIAgentActionResultType::RunAgents(orchestrate_result) => {
                 Some(orchestrate_result.try_into()?)
             }
+            // QUALITY-780: the watchdog-timeout result is produced by the
+            // client's local `wait_for_events` watchdog (driver wave). The
+            // outbound `Request.Input.ToolCallResult.WaitForEvents` proto
+            // variant carries no payload; the agent's next turn sees the
+            // empty result and decides how to proceed.
+            AIAgentActionResultType::WaitForEvents(wait_for_events_result) => {
+                Some(wait_for_events_result.try_into()?)
+            }
         };
         Ok(
             api::request::input::user_inputs::user_input::Input::ToolCallResult(

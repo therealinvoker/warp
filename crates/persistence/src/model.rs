@@ -1075,7 +1075,10 @@ pub struct AgentConversationData {
     /// `wait_for_events` (status was `WaitingForEvents`). On restore this
     /// flag wins over the status derived from the last exchange so the
     /// driver, task sync, notifications, and pill bar all re-enter the
-    /// waiting state. See `warp/specs/QUALITY-780/TECH.md` §3.
+    /// waiting state. The unresolved `tool_call_id` is intentionally
+    /// **not** persisted — it is rebuilt at runtime by scanning the
+    /// transcript when an inbound `Cancel` / `WaitForEventsResult`
+    /// arrives post-restart. See `warp/specs/QUALITY-780/TECH.md` §3 / §8.
     #[serde(default, skip_serializing_if = "is_false")]
     pub waiting_for_events: bool,
 }

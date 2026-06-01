@@ -12,7 +12,8 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use warp_cli::agent::Harness;
 use warp_core::features::FeatureFlag;
-use warp_multi_agent_api::client_action::{Action, StartNewConversation};
+use warp_multi_agent_api as api;
+use warp_multi_agent_api::client_action::{Action, AddMessagesToTask, StartNewConversation};
 use warp_multi_agent_api::response_event::stream_finished::{
     ConversationUsageMetadata, TokenUsage,
 };
@@ -1547,6 +1548,38 @@ impl BlocklistAIHistoryModel {
                     )?;
                     current_conversation_id = new_conversation_id;
                 }
+                Some(Action::AddMessagesToTask(action)) => {
+                    // QUALITY-780 §8.1: detect the new public `WaitForEvents`
+                    // tool call (enter the waiting state) and §8.3: detect the
+                    // matching resume signals (`WaitForEventsResult` for the
+                    // watchdog-timeout path; generic `Cancel` for the
+                    // inbound-supersede path). Both leave the conversation in
+                    // `InProgress`. Detection runs **before** the call is
+                    // dispatched to `conversation.apply_client_action`, so the
+                    // status change is in place before any downstream subscriber
+                    // (driver, task-sync, pill-bar, notifications) observes the
+                    // message batch — see §8.2 for the ordering rule that
+                    // protects this transition from being clobbered by the
+                    // subsequent `Success` transition on the response stream.
+                    self.detect_wait_for_events_transitions(
+                        current_conversation_id,
+                        terminal_view_id,
+                        &action,
+                        ctx,
+                    );
+                    let conversation = self
+                        .conversations_by_id
+                        .get_mut(&current_conversation_id)
+                        .ok_or(UpdateHistoryError::ConversationNotFound(
+                        current_conversation_id,
+                    ))?;
+                    conversation.apply_client_action(
+                        response_stream_id,
+                        terminal_view_id,
+                        Action::AddMessagesToTask(action),
+                        ctx,
+                    )?;
+                }
                 Some(action) => {
                     let conversation = self
                         .conversations_by_id
@@ -1567,6 +1600,183 @@ impl BlocklistAIHistoryModel {
             }
         }
         Ok(())
+    }
+
+    /// QUALITY-780 §8.1 / §8.3: scans the messages in an
+    /// `AddMessagesToTask` action for `WaitForEvents` tool calls (enter the
+    /// waiting state) or matching resume signals (`WaitForEventsResult` or a
+    /// generic `Cancel` referencing the unresolved tool-call id), and updates
+    /// the conversation accordingly.
+    fn detect_wait_for_events_transitions(
+        &mut self,
+        conversation_id: AIConversationId,
+        terminal_view_id: EntityId,
+        action: &AddMessagesToTask,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        for message in &action.messages {
+            match message.message.as_ref() {
+                Some(api::message::Message::ToolCall(tool_call)) => {
+                    if matches!(
+                        tool_call.tool.as_ref(),
+                        Some(api::message::tool_call::Tool::WaitForEvents(_))
+                    ) {
+                        self.mark_conversation_waiting_for_events(
+                            conversation_id,
+                            tool_call.tool_call_id.clone(),
+                            terminal_view_id,
+                            ctx,
+                        );
+                    }
+                }
+                Some(api::message::Message::ToolCallResult(result)) => {
+                    match result.result.as_ref() {
+                        // The client watchdog (§4) emitted a synthetic
+                        // `WaitForEventsResult` that the server has echoed
+                        // back — the agent's next turn will observe the
+                        // empty timeout result.
+                        Some(api::message::tool_call_result::Result::WaitForEvents(_)) => {
+                            self.clear_conversation_waiting_for_events_if_matches(
+                                conversation_id,
+                                &result.tool_call_id,
+                                terminal_view_id,
+                                ctx,
+                            );
+                        }
+                        // An inbound user message / inter-agent message /
+                        // lifecycle event superseded the pending
+                        // `WaitForEvents` call; the server emitted a generic
+                        // `Cancel` tool-call result referencing that id.
+                        // Only clear when the stored id matches — unrelated
+                        // tool cancellations must not collapse the waiting
+                        // state.
+                        Some(api::message::tool_call_result::Result::Cancel(_)) => {
+                            self.clear_conversation_waiting_for_events_if_matches(
+                                conversation_id,
+                                &result.tool_call_id,
+                                terminal_view_id,
+                                ctx,
+                            );
+                        }
+                        _ => {}
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// QUALITY-780 §8.1: atomically transition the conversation to
+    /// `WaitingForEvents`, record the unresolved `tool_call_id`, persist the
+    /// new durable state, and emit an `UpdatedConversationStatus` event so
+    /// the driver / task-sync / notifications / pill-bar all re-evaluate.
+    ///
+    /// No-op if the conversation cannot be found or is already in
+    /// `WaitingForEvents` for the same `tool_call_id` (idempotent against
+    /// duplicate detection passes).
+    pub fn mark_conversation_waiting_for_events(
+        &mut self,
+        conversation_id: AIConversationId,
+        tool_call_id: String,
+        terminal_view_id: EntityId,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        let Some(conversation) = self.conversations_by_id.get_mut(&conversation_id) else {
+            log::warn!(
+                "mark_conversation_waiting_for_events: conversation {conversation_id:?} not found"
+            );
+            return;
+        };
+
+        // Idempotency: avoid emitting a duplicate status-update event if the
+        // conversation is already in the waiting state with the same id.
+        if matches!(conversation.status(), ConversationStatus::WaitingForEvents)
+            && conversation.waiting_for_events_tool_call_id() == Some(tool_call_id.as_str())
+        {
+            return;
+        }
+
+        conversation.set_waiting_for_events_tool_call_id(Some(tool_call_id));
+        // `update_status` mutates the in-memory status and emits
+        // `UpdatedConversationStatus`. Persist afterwards so the durable
+        // record reflects `waiting_for_events = true` plus the stored
+        // tool-call id.
+        conversation.update_status(ConversationStatus::WaitingForEvents, terminal_view_id, ctx);
+        conversation.write_updated_conversation_state(ctx);
+    }
+
+    /// QUALITY-780 §8.3: clear the waiting state and resume the conversation
+    /// in `InProgress`, but only when the supplied `tool_call_id` matches the
+    /// unresolved `WaitForEvents` tool call that put the conversation in the
+    /// waiting state. Unrelated cancellations (e.g. an unrelated `Cancel`
+    /// result for a different tool call) must not collapse the waiting
+    /// state.
+    ///
+    /// Matching logic:
+    /// - If the conversation has an in-memory `tool_call_id` (the runtime
+    ///   path), match against that.
+    /// - Otherwise (post-restart: see the field doc on
+    ///   `AIConversation::waiting_for_events_tool_call_id`), scan the
+    ///   restored transcript for the most recent `Tool::WaitForEvents` call
+    ///   without a matching `ToolCallResult` and check the supplied id
+    ///   against it.
+    ///
+    /// No-op if the conversation cannot be found, is not currently
+    /// `WaitingForEvents`, or no matching unresolved `WaitForEvents` call is
+    /// found.
+    pub fn clear_conversation_waiting_for_events_if_matches(
+        &mut self,
+        conversation_id: AIConversationId,
+        tool_call_id: &str,
+        terminal_view_id: EntityId,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        let Some(conversation) = self.conversations_by_id.get_mut(&conversation_id) else {
+            return;
+        };
+        if !matches!(conversation.status(), ConversationStatus::WaitingForEvents) {
+            return;
+        }
+        let matches = match conversation.waiting_for_events_tool_call_id() {
+            // Runtime path: match against the in-memory unresolved id.
+            Some(stored) => stored == tool_call_id,
+            // Post-restart path: the in-memory id is `None` because we do
+            // not persist it (see `AgentConversationData.waiting_for_events`
+            // doc). Recover the unresolved id by scanning the restored
+            // transcript for the most recent `Tool::WaitForEvents` call that
+            // has no matching `ToolCallResult`. If the incoming result's
+            // `tool_call_id` matches, treat it as a resume signal.
+            None => find_unresolved_wait_for_events_tool_call_id(conversation)
+                .is_some_and(|id| id == tool_call_id),
+        };
+        if !matches {
+            return;
+        }
+        conversation.set_waiting_for_events_tool_call_id(None);
+        conversation.update_status(ConversationStatus::InProgress, terminal_view_id, ctx);
+        conversation.write_updated_conversation_state(ctx);
+    }
+
+    /// QUALITY-780 §8.3: unconditional variant of
+    /// `clear_conversation_waiting_for_events_if_matches` for callers that
+    /// already know the wait is being cleared regardless of id (e.g. an
+    /// explicit "abort wait" path on cancel). Not currently wired from the
+    /// detection point; provided for the helper-symmetry the spec calls for.
+    pub fn clear_conversation_waiting_for_events(
+        &mut self,
+        conversation_id: AIConversationId,
+        terminal_view_id: EntityId,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        let Some(conversation) = self.conversations_by_id.get_mut(&conversation_id) else {
+            return;
+        };
+        if !matches!(conversation.status(), ConversationStatus::WaitingForEvents) {
+            return;
+        }
+        conversation.set_waiting_for_events_tool_call_id(None);
+        conversation.update_status(ConversationStatus::InProgress, terminal_view_id, ctx);
+        conversation.write_updated_conversation_state(ctx);
     }
 
     pub fn update_conversation_cost_and_usage_for_request(
@@ -2385,6 +2595,42 @@ impl BlocklistAIHistoryModel {
 /// conversation.
 fn agent_id_key(conversation: &AIConversation) -> Option<String> {
     conversation.orchestration_agent_id()
+}
+
+/// QUALITY-780 §8: scan the conversation's linearized transcript for the
+/// most recent `Tool::WaitForEvents` tool-call message that has no
+/// corresponding `ToolCallResult`, and return its `tool_call_id`.
+///
+/// Used by [`BlocklistAIHistoryModel::clear_conversation_waiting_for_events_if_matches`]
+/// as a post-restart fallback when the in-memory unresolved
+/// `tool_call_id` is `None` (it is not persisted; see the field doc on
+/// `AIConversation::waiting_for_events_tool_call_id`). Returns `None` if
+/// the transcript has no unresolved `WaitForEvents` call.
+fn find_unresolved_wait_for_events_tool_call_id(conversation: &AIConversation) -> Option<String> {
+    // Walk forward to record which tool_call_ids already have results, then
+    // pick the latest `WaitForEvents` call whose id is not in that set.
+    let messages: Vec<&api::Message> = conversation.all_linearized_messages();
+    let mut resolved_ids: HashSet<&str> = HashSet::new();
+    for message in &messages {
+        if let Some(api::message::Message::ToolCallResult(result)) = message.message.as_ref() {
+            resolved_ids.insert(result.tool_call_id.as_str());
+        }
+    }
+    messages.iter().rev().find_map(|message| {
+        let api::message::Message::ToolCall(tool_call) = message.message.as_ref()? else {
+            return None;
+        };
+        if !matches!(
+            tool_call.tool.as_ref(),
+            Some(api::message::tool_call::Tool::WaitForEvents(_))
+        ) {
+            return None;
+        }
+        if resolved_ids.contains(tool_call.tool_call_id.as_str()) {
+            return None;
+        }
+        Some(tool_call.tool_call_id.clone())
+    })
 }
 
 fn agent_id_key_from_persisted_data(conversation_data: &AgentConversationData) -> Option<&str> {

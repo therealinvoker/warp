@@ -1650,16 +1650,14 @@ pub(crate) fn convert_tool_call_result_to_input(
             log::warn!("No result present for tool call ID: {tool_call_id}");
             None
         }
-        // QUALITY-780 placeholder owned by `client-detection`. The
-        // `WaitForEvents` tool-call result is consumed by
-        // `apply_client_actions` (per client TECH §8.3) and does not
-        // surface as a restorable exchange input. Return `None` so the
-        // restore path skips it. `client-detection` will replace this if
-        // the variant needs to be rendered in restored transcripts.
-        Some(ToolCallResultType::WaitForEvents(_)) => {
-            // TODO(client-detection)
-            None
-        }
+        // QUALITY-780 §8.3: the `WaitForEvents` tool-call result is
+        // consumed by the wait-state transition in
+        // `BlocklistAIHistoryModel::apply_client_actions` and does not
+        // surface as a restorable exchange input. The agent's next turn
+        // sees the empty result through the normal message stream rather
+        // than via a synthesised `AIAgentInput::ActionResult`, so the
+        // restore path can safely skip it.
+        Some(ToolCallResultType::WaitForEvents(_)) => None,
     }
 }
 
@@ -1792,13 +1790,16 @@ fn create_cancelled_result_for_tool_call(
         }
         // These tools are deprecated.
         ToolType::SuggestCreatePlan(_) | ToolType::SuggestPlan(_) => return None,
-        // QUALITY-780 placeholder owned by `client-detection`. A cancelled
-        // `WaitForEvents` tool call doesn't surface as a restorable action
-        // result — the resume signal arrives as a separate tool-call
-        // result (`Cancel` or `WaitForEvents`) per client TECH §8.3.
-        // `client-detection` will replace this with the final behavior.
+        // QUALITY-780 §8.3: a cancelled `WaitForEvents` tool call does
+        // not surface as a restorable `AIAgentInput::ActionResult`. The
+        // resume signal is the *next* `ToolCallResult` (a generic
+        // `Cancel` for inbound supersede or a `WaitForEvents` for the
+        // watchdog timeout) referencing the same `tool_call_id`; the
+        // wait-state transition lives entirely on
+        // `BlocklistAIHistoryModel`, not on the exchange input stream.
+        // Returning `None` here keeps the restored transcript symmetric
+        // with the server-handled `Server` variant just above.
         ToolType::WaitForEvents(_) => {
-            // TODO(client-detection)
             return None;
         }
     };

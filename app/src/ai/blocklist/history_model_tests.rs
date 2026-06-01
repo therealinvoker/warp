@@ -2996,6 +2996,271 @@ fn test_fork_conversation_preserves_task_ids_when_requested() {
     });
 }
 
+// QUALITY-780 §8.1 + §8.3: helpers that drive the `WaitingForEvents`
+// transitions in `BlocklistAIHistoryModel`. The tests below exercise the
+// public API of those helpers directly; the wire-format detection that
+// invokes them (via `apply_client_actions`) is covered upstream where
+// the proto message construction lives.
+
+/// Test helper for QUALITY-780 helper tests. Sets up the minimum app
+/// state needed for `BlocklistAIHistoryModel::mark_conversation_waiting_for_events`
+/// and its sibling clear helpers to run cleanly: settings are required
+/// because `start_new_conversation` reads default autoexecute mode, and
+/// a mock `GlobalResourceHandlesProvider` is required because
+/// `write_updated_conversation_state` sends through it.
+fn setup_app_for_quality_780_tests(app: &mut App) {
+    initialize_settings_for_tests(app);
+    let (sender, _receiver) = std::sync::mpsc::sync_channel::<ModelEvent>(8);
+    let mut global_resource_handles = GlobalResourceHandles::mock(app);
+    global_resource_handles.model_event_sender = Some(sender);
+    app.add_singleton_model(|_| GlobalResourceHandlesProvider::new(global_resource_handles));
+}
+
+/// QUALITY-780 §8.1: `mark_conversation_waiting_for_events` transitions
+/// the conversation status and stores the unresolved tool-call id so the
+/// later resume signal can be matched against it.
+#[test]
+fn test_mark_conversation_waiting_for_events_sets_status_and_id() {
+    use crate::ai::agent::conversation::ConversationStatus;
+
+    App::test((), |mut app| async move {
+        setup_app_for_quality_780_tests(&mut app);
+        let history_model = app.add_singleton_model(|_| BlocklistAIHistoryModel::new_for_test());
+        let terminal_view_id = EntityId::new();
+
+        let conversation_id = history_model.update(&mut app, |model, ctx| {
+            model.start_new_conversation(terminal_view_id, false, false, false, ctx)
+        });
+
+        history_model.update(&mut app, |model, ctx| {
+            model.mark_conversation_waiting_for_events(
+                conversation_id,
+                "wait-tool-call-id-1".to_string(),
+                terminal_view_id,
+                ctx,
+            );
+        });
+
+        history_model.read(&app, |model, _| {
+            let conversation = model
+                .conversation(&conversation_id)
+                .expect("conversation should exist after start_new_conversation");
+            assert!(
+                matches!(conversation.status(), ConversationStatus::WaitingForEvents),
+                "status should be WaitingForEvents after mark helper, got {:?}",
+                conversation.status(),
+            );
+            assert_eq!(
+                conversation.waiting_for_events_tool_call_id(),
+                Some("wait-tool-call-id-1"),
+            );
+        });
+    });
+}
+
+/// QUALITY-780 §8.3: `clear_conversation_waiting_for_events_if_matches`
+/// transitions back to `InProgress` and clears the stored id when the
+/// supplied id matches the unresolved call.
+#[test]
+fn test_clear_conversation_waiting_for_events_if_matches_clears_on_match() {
+    use crate::ai::agent::conversation::ConversationStatus;
+
+    App::test((), |mut app| async move {
+        setup_app_for_quality_780_tests(&mut app);
+        let history_model = app.add_singleton_model(|_| BlocklistAIHistoryModel::new_for_test());
+        let terminal_view_id = EntityId::new();
+
+        let conversation_id = history_model.update(&mut app, |model, ctx| {
+            model.start_new_conversation(terminal_view_id, false, false, false, ctx)
+        });
+
+        history_model.update(&mut app, |model, ctx| {
+            model.mark_conversation_waiting_for_events(
+                conversation_id,
+                "wait-tool-call-id-1".to_string(),
+                terminal_view_id,
+                ctx,
+            );
+            model.clear_conversation_waiting_for_events_if_matches(
+                conversation_id,
+                "wait-tool-call-id-1",
+                terminal_view_id,
+                ctx,
+            );
+        });
+
+        history_model.read(&app, |model, _| {
+            let conversation = model
+                .conversation(&conversation_id)
+                .expect("conversation should exist after start_new_conversation");
+            assert!(
+                matches!(conversation.status(), ConversationStatus::InProgress),
+                "status should be InProgress after matching clear, got {:?}",
+                conversation.status(),
+            );
+            assert_eq!(
+                conversation.waiting_for_events_tool_call_id(),
+                None,
+                "stored unresolved id should be cleared",
+            );
+        });
+    });
+}
+
+/// QUALITY-780 §8.3: a non-matching `tool_call_id` is a no-op. Unrelated
+/// `Cancel` results (e.g. for a different tool call) must not collapse
+/// the waiting state.
+#[test]
+fn test_clear_conversation_waiting_for_events_if_matches_noop_on_mismatch() {
+    use crate::ai::agent::conversation::ConversationStatus;
+
+    App::test((), |mut app| async move {
+        setup_app_for_quality_780_tests(&mut app);
+        let history_model = app.add_singleton_model(|_| BlocklistAIHistoryModel::new_for_test());
+        let terminal_view_id = EntityId::new();
+
+        let conversation_id = history_model.update(&mut app, |model, ctx| {
+            model.start_new_conversation(terminal_view_id, false, false, false, ctx)
+        });
+
+        history_model.update(&mut app, |model, ctx| {
+            model.mark_conversation_waiting_for_events(
+                conversation_id,
+                "wait-tool-call-id-1".to_string(),
+                terminal_view_id,
+                ctx,
+            );
+            model.clear_conversation_waiting_for_events_if_matches(
+                conversation_id,
+                "some-other-tool-call-id",
+                terminal_view_id,
+                ctx,
+            );
+        });
+
+        history_model.read(&app, |model, _| {
+            let conversation = model
+                .conversation(&conversation_id)
+                .expect("conversation should exist after start_new_conversation");
+            assert!(
+                matches!(conversation.status(), ConversationStatus::WaitingForEvents),
+                "status should still be WaitingForEvents after mismatched clear, got {:?}",
+                conversation.status(),
+            );
+            assert_eq!(
+                conversation.waiting_for_events_tool_call_id(),
+                Some("wait-tool-call-id-1"),
+                "stored unresolved id should be preserved on mismatch",
+            );
+        });
+    });
+}
+
+/// QUALITY-780 §8: the unconditional
+/// `clear_conversation_waiting_for_events` helper clears the waiting
+/// state without checking the id. Provided for callers that already
+/// know the wait is being aborted (e.g. user cancel).
+#[test]
+fn test_clear_conversation_waiting_for_events_unconditional() {
+    use crate::ai::agent::conversation::ConversationStatus;
+
+    App::test((), |mut app| async move {
+        setup_app_for_quality_780_tests(&mut app);
+        let history_model = app.add_singleton_model(|_| BlocklistAIHistoryModel::new_for_test());
+        let terminal_view_id = EntityId::new();
+
+        let conversation_id = history_model.update(&mut app, |model, ctx| {
+            model.start_new_conversation(terminal_view_id, false, false, false, ctx)
+        });
+
+        history_model.update(&mut app, |model, ctx| {
+            model.mark_conversation_waiting_for_events(
+                conversation_id,
+                "wait-tool-call-id-1".to_string(),
+                terminal_view_id,
+                ctx,
+            );
+            model.clear_conversation_waiting_for_events(conversation_id, terminal_view_id, ctx);
+        });
+
+        history_model.read(&app, |model, _| {
+            let conversation = model
+                .conversation(&conversation_id)
+                .expect("conversation should exist after start_new_conversation");
+            assert!(
+                matches!(conversation.status(), ConversationStatus::InProgress),
+                "unconditional clear should always transition to InProgress",
+            );
+            assert_eq!(
+                conversation.waiting_for_events_tool_call_id(),
+                None,
+                "unconditional clear should always clear the stored id",
+            );
+        });
+    });
+}
+
+/// QUALITY-780 PRODUCT.md (31): a newly started conversation in a
+/// terminal view that previously held a `WaitingForEvents` conversation
+/// does not inherit `waiting_for_events = true`. Each fresh
+/// `start_new_conversation` begins in the default in-progress-ready
+/// state with no stored unresolved id.
+#[test]
+fn test_new_conversation_does_not_inherit_waiting_for_events() {
+    use crate::ai::agent::conversation::ConversationStatus;
+
+    App::test((), |mut app| async move {
+        setup_app_for_quality_780_tests(&mut app);
+        let history_model = app.add_singleton_model(|_| BlocklistAIHistoryModel::new_for_test());
+        let terminal_view_id = EntityId::new();
+
+        // First conversation enters the waiting state.
+        let first_id = history_model.update(&mut app, |model, ctx| {
+            let id = model.start_new_conversation(terminal_view_id, false, false, false, ctx);
+            model.mark_conversation_waiting_for_events(
+                id,
+                "wait-tool-call-id-first".to_string(),
+                terminal_view_id,
+                ctx,
+            );
+            id
+        });
+        history_model.read(&app, |model, _| {
+            let first = model.conversation(&first_id).expect("first should exist");
+            assert!(matches!(
+                first.status(),
+                ConversationStatus::WaitingForEvents
+            ));
+            assert_eq!(
+                first.waiting_for_events_tool_call_id(),
+                Some("wait-tool-call-id-first"),
+            );
+        });
+
+        // Starting a new conversation in the same terminal view must not
+        // copy the waiting state forward.
+        let second_id = history_model.update(&mut app, |model, ctx| {
+            model.start_new_conversation(terminal_view_id, false, false, false, ctx)
+        });
+        assert_ne!(
+            first_id, second_id,
+            "a fresh conversation should have a distinct id",
+        );
+        history_model.read(&app, |model, _| {
+            let second = model.conversation(&second_id).expect("second should exist");
+            assert!(
+                !matches!(second.status(), ConversationStatus::WaitingForEvents),
+                "a newly started conversation must not start in WaitingForEvents",
+            );
+            assert_eq!(
+                second.waiting_for_events_tool_call_id(),
+                None,
+                "a newly started conversation must not inherit the unresolved id",
+            );
+        });
+    });
+}
+
 #[test]
 fn test_fork_conversation_title_override_replaces_prefix() {
     use crate::ai::agent::conversation::AIConversation;

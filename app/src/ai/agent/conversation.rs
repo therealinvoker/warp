@@ -321,6 +321,18 @@ pub struct AIConversation {
     /// Whether the user has pinned this child agent in the orchestration
     /// pill bar. Persisted via `AgentConversationData.pinned`.
     pinned: bool,
+
+    /// The `tool_call_id` of the unresolved `WaitForEvents` tool call that
+    /// triggered the current waiting state. Only meaningful when `status`
+    /// is `WaitingForEvents`; cleared back to `None` when the wait is
+    /// resolved by a matching `Cancel` or `WaitForEventsResult` (see
+    /// `specs/QUALITY-780/TECH.md` §8). **Not persisted**: on restart a
+    /// `WaitingForEvents` conversation hydrates with this field `None`,
+    /// and `apply_client_actions` reconstructs the unresolved id by
+    /// scanning the restored transcript when the matching resume signal
+    /// arrives. See the comment on
+    /// `AgentConversationData.waiting_for_events` for the rationale.
+    waiting_for_events_tool_call_id: Option<String>,
 }
 
 pub(crate) fn artifact_from_fork_proto(
@@ -375,6 +387,7 @@ impl AIConversation {
             last_event_sequence: None,
             orchestration_configs: HashMap::new(),
             pinned: false,
+            waiting_for_events_tool_call_id: None,
         }
     }
 
@@ -415,6 +428,13 @@ impl AIConversation {
             .as_ref()
             .map(|data| data.waiting_for_events)
             .unwrap_or(false);
+        // QUALITY-780 §8: the unresolved `tool_call_id` is **not** persisted.
+        // On restart it starts as `None`; the watchdog (§4) skips scheduling
+        // and `apply_client_actions` reconstructs the pending id by scanning
+        // the transcript when a matching `Cancel` / `WaitForEventsResult`
+        // arrives. This matches how other unresolved tool calls are treated
+        // on restart and avoids an extra durable field.
+        let waiting_for_events_tool_call_id: Option<String> = None;
 
         let (task_store, todo_lists, status) = if tasks.is_empty() {
             // Bypass `derive_status_from_root_task`: it would return `Success`
@@ -634,6 +654,7 @@ impl AIConversation {
             last_event_sequence,
             orchestration_configs: HashMap::new(),
             pinned,
+            waiting_for_events_tool_call_id,
         })
     }
 
@@ -859,6 +880,25 @@ impl AIConversation {
     }
     pub fn status_error_message(&self) -> Option<&str> {
         self.status_error_message.as_deref()
+    }
+
+    /// Returns the `tool_call_id` of the unresolved `WaitForEvents` tool
+    /// call that produced the current waiting state, if any. Only set when
+    /// `status` is `ConversationStatus::WaitingForEvents`. See
+    /// `specs/QUALITY-780/TECH.md` §8.
+    pub fn waiting_for_events_tool_call_id(&self) -> Option<&str> {
+        self.waiting_for_events_tool_call_id.as_deref()
+    }
+
+    /// Sets (or clears) the unresolved `WaitForEvents` tool-call id
+    /// associated with the current waiting state. Used together with
+    /// `update_status(ConversationStatus::WaitingForEvents | InProgress)`
+    /// by the detection helpers in `BlocklistAIHistoryModel` to keep the
+    /// in-memory state and the visible status in sync. Not persisted; see
+    /// the field doc on `waiting_for_events_tool_call_id` for the
+    /// runtime-only semantics. See `specs/QUALITY-780/TECH.md` §8.
+    pub(crate) fn set_waiting_for_events_tool_call_id(&mut self, id: Option<String>) {
+        self.waiting_for_events_tool_call_id = id;
     }
 
     pub fn update_status(
@@ -3202,6 +3242,11 @@ impl AIConversation {
                 last_event_sequence: self.last_event_sequence,
                 pinned: self.pinned,
                 waiting_for_events: matches!(self.status, ConversationStatus::WaitingForEvents),
+                // QUALITY-780 §8: the in-memory
+                // `waiting_for_events_tool_call_id` is intentionally **not**
+                // persisted; see the field comment on `AgentConversationData`
+                // and the restore code in
+                // `new_restored_synthesizing_on_empty`.
             },
         };
         ctx.spawn(
