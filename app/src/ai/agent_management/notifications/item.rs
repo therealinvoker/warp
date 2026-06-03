@@ -90,7 +90,7 @@ pub enum NotificationActionStyle {
 pub enum NotificationActionKind {
     /// Turns on `auto_handoff_on_sleep_enabled` and dismisses the prompt.
     EnableAutoHandoffOnSleep,
-    /// Dismisses the sleep prompt and suppresses future prompts.
+    /// Dismisses the current sleep prompt without suppressing future prompts.
     DismissSleepPrompt,
 }
 
