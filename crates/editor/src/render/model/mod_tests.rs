@@ -1476,6 +1476,19 @@ fn comment_block(line: usize, height: f32) -> super::CommentBlock {
     )
 }
 
+/// A comment anchored to a removed-line slot (`Temporary { at_line, index_from_at_line }`).
+fn temporary_comment_block(at_line: usize, index: usize, height: f32) -> super::CommentBlock {
+    super::CommentBlock::new(
+        super::RenderLineLocation::Temporary {
+            at_line: LineCount(at_line),
+            index_from_at_line: index,
+        },
+        Arc::new(MockCommentItem {
+            height: height.into_pixels(),
+        }),
+    )
+}
+
 fn temporary_block() -> BlockItem {
     let paragraph = layout_paragraph("\n", &TEST_STYLES, &BufferBlockStyle::PlainText, 80.);
     BlockItem::TemporaryBlock {
@@ -1488,7 +1501,7 @@ fn temporary_block() -> BlockItem {
 fn count_comments(rs: &RenderState) -> usize {
     rs.content()
         .block_items()
-        .filter(|item| matches!(item, BlockItem::EmbeddedComment(_)))
+        .filter(|item| matches!(item, BlockItem::EmbeddedComment { .. }))
         .count()
 }
 
@@ -1509,7 +1522,7 @@ fn block_kinds_with_offsets(rs: &RenderState) -> Vec<(&'static str, Pixels)> {
     while let Some(positioned) = cursor.positioned_item() {
         let kind = match positioned.item {
             BlockItem::TemporaryBlock { .. } => "temp",
-            BlockItem::EmbeddedComment(_) => "comment",
+            BlockItem::EmbeddedComment { .. } => "comment",
             _ => "other",
         };
         out.push((kind, positioned.start_y_offset));
@@ -1656,5 +1669,200 @@ fn embedded_comment_block_survives_temporary_block_reset() {
         render_state.comment_block_position(RenderLineLocation::Current(LineCount(2))),
         Some(position_before),
         "comment anchor/position unchanged across diff refresh"
+    );
+}
+
+/// Returns the block kinds (`temp`/`comment`), in tree order, ignoring paragraph blocks.
+fn comment_and_temp_kinds(rs: &RenderState) -> Vec<&'static str> {
+    block_kinds_with_offsets(rs)
+        .into_iter()
+        .map(|(kind, _)| kind)
+        .filter(|kind| *kind != "other")
+        .collect()
+}
+
+#[test]
+fn embedded_comment_block_anchors_to_removed_line_slot() {
+    let render_state = five_line_render_state();
+
+    // A removal hunk: three removed-line temporary blocks anchored at line 2.
+    let mut temp = std::collections::HashMap::new();
+    temp.insert(
+        LineCount(2),
+        vec![temporary_block(), temporary_block(), temporary_block()],
+    );
+    render_state.reset_temporary_block(temp);
+
+    // Content-space top of each removed-line slot before the comment is inserted.
+    let temp_tops: Vec<Pixels> = block_kinds_with_offsets(&render_state)
+        .into_iter()
+        .filter(|(kind, _)| *kind == "temp")
+        .map(|(_, y)| y)
+        .collect();
+    assert_eq!(temp_tops.len(), 3, "three removed-line slots expected");
+
+    // Anchor a comment to the SECOND removed-line slot (index 1), not the current line.
+    let comment_height = 50.0;
+    render_state.apply_comment_blocks(vec![temporary_comment_block(2, 1, comment_height)]);
+
+    // It round-trips through its FULL Temporary location...
+    let position = render_state
+        .comment_block_position(RenderLineLocation::Temporary {
+            at_line: LineCount(2),
+            index_from_at_line: 1,
+        })
+        .expect("comment present at removed-line slot index 1");
+    assert_eq!(position.content_height, comment_height.into_pixels());
+
+    // ...placed immediately after the index-1 removed-line block (below earlier-index removed
+    // lines), i.e. at the slot the index-2 removed line previously occupied.
+    assert_eq!(position.start_y_offset, temp_tops[2]);
+    assert!(
+        position.start_y_offset > temp_tops[1],
+        "comment sits below the index-1 removed line"
+    );
+
+    // It must NOT resolve as the current-line anchor or a different removed-line index.
+    assert_eq!(
+        render_state.comment_block_position(RenderLineLocation::Current(LineCount(2))),
+        None,
+        "a removed-line comment is not a current-line anchor"
+    );
+    assert_eq!(
+        render_state.comment_block_position(RenderLineLocation::Temporary {
+            at_line: LineCount(2),
+            index_from_at_line: 0,
+        }),
+        None,
+        "no comment at removed-line slot index 0"
+    );
+
+    // Order: the comment sits between the index-1 and index-2 removed-line blocks.
+    assert_eq!(
+        comment_and_temp_kinds(&render_state),
+        vec!["temp", "temp", "comment", "temp"],
+    );
+    assert_eq!(count_comments(&render_state), 1);
+    assert_eq!(count_temps(&render_state), 3);
+}
+
+#[test]
+fn embedded_comment_blocks_disambiguate_same_at_line_temporary_slots() {
+    let render_state = five_line_render_state();
+
+    let mut temp = std::collections::HashMap::new();
+    temp.insert(
+        LineCount(2),
+        vec![temporary_block(), temporary_block(), temporary_block()],
+    );
+    render_state.reset_temporary_block(temp);
+
+    // Two comments share at_line == 2 but target distinct removed-line slots; they must not
+    // collide (the bug this fix addresses collapsed both onto the line-only key).
+    let first_height = 30.0;
+    let third_height = 70.0;
+    render_state.apply_comment_blocks(vec![
+        temporary_comment_block(2, 0, first_height),
+        temporary_comment_block(2, 2, third_height),
+    ]);
+
+    let first = render_state
+        .comment_block_position(RenderLineLocation::Temporary {
+            at_line: LineCount(2),
+            index_from_at_line: 0,
+        })
+        .expect("comment at removed-line slot 0");
+    let third = render_state
+        .comment_block_position(RenderLineLocation::Temporary {
+            at_line: LineCount(2),
+            index_from_at_line: 2,
+        })
+        .expect("comment at removed-line slot 2");
+
+    assert_eq!(first.content_height, first_height.into_pixels());
+    assert_eq!(third.content_height, third_height.into_pixels());
+    // Distinct slots resolve to distinct positions; slot 0 sits above slot 2.
+    assert!(
+        first.start_y_offset < third.start_y_offset,
+        "slot-0 comment must sit above the slot-2 comment"
+    );
+
+    // The empty middle slot (index 1) holds no comment.
+    assert_eq!(
+        render_state.comment_block_position(RenderLineLocation::Temporary {
+            at_line: LineCount(2),
+            index_from_at_line: 1,
+        }),
+        None,
+    );
+
+    // Order: temp0, comment(slot 0), temp1, temp2, comment(slot 2).
+    assert_eq!(
+        comment_and_temp_kinds(&render_state),
+        vec!["temp", "comment", "temp", "temp", "comment"],
+    );
+    assert_eq!(count_comments(&render_state), 2);
+    assert_eq!(count_temps(&render_state), 3);
+}
+
+#[test]
+fn embedded_comment_blocks_mix_current_and_temporary_anchors_and_survive_refresh() {
+    let render_state = five_line_render_state();
+
+    let install_temp = || {
+        let mut temp = std::collections::HashMap::new();
+        temp.insert(LineCount(2), vec![temporary_block(), temporary_block()]);
+        temp
+    };
+    render_state.reset_temporary_block(install_temp());
+
+    // A removed-line comment at slot 0 coexists with a current-line comment at line 4.
+    render_state.apply_comment_blocks(vec![
+        temporary_comment_block(2, 0, 40.0),
+        comment_block(4, 25.0),
+    ]);
+
+    let removed_location = RenderLineLocation::Temporary {
+        at_line: LineCount(2),
+        index_from_at_line: 0,
+    };
+    let current_location = RenderLineLocation::Current(LineCount(4));
+
+    let removed = render_state
+        .comment_block_position(removed_location)
+        .expect("removed-line comment present");
+    let current = render_state
+        .comment_block_position(current_location)
+        .expect("current-line comment present");
+    assert_eq!(removed.content_height, 40.0.into_pixels());
+    assert_eq!(current.content_height, 25.0.into_pixels());
+    assert!(removed.start_y_offset < current.start_y_offset);
+
+    // Both anchors survive a diff refresh that rebuilds the removed-line blocks (the comment
+    // variant is distinct, so `reset_temporary_block` never clobbers it). Re-syncing the comments
+    // (as the app does on the batch `Changed` push) restores each to its exact slot.
+    render_state.reset_temporary_block(install_temp());
+    assert_eq!(count_comments(&render_state), 2, "comments survive refresh");
+    assert_eq!(count_temps(&render_state), 2, "temporary blocks rebuilt");
+    assert!(
+        render_state
+            .comment_block_position(removed_location)
+            .is_some(),
+        "removed-line comment still resolvable by its full location after refresh"
+    );
+
+    render_state.apply_comment_blocks(vec![
+        temporary_comment_block(2, 0, 40.0),
+        comment_block(4, 25.0),
+    ]);
+    assert_eq!(
+        render_state.comment_block_position(removed_location),
+        Some(removed),
+        "removed-line comment back at its slot after re-sync"
+    );
+    assert_eq!(
+        render_state.comment_block_position(current_location),
+        Some(current),
+        "current-line comment unchanged across refresh + re-sync"
     );
 }

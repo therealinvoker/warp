@@ -823,7 +823,14 @@ pub enum BlockItem {
     /// It is intentionally a DISTINCT variant from [`BlockItem::TemporaryBlock`] so that
     /// `reset_temporary_block` (run on every diff refresh) never removes it, and so it can only
     /// ever live on a per-view [`RenderState`] — never on the shared buffer.
-    EmbeddedComment(Arc<dyn LaidOutEmbeddedItem>),
+    EmbeddedComment {
+        /// The full anchor of this comment. Carrying the location on the block (rather than
+        /// inferring it from tree position) lets `comment_block_position` match a comment by its
+        /// exact [`RenderLineLocation`] — including the `Temporary` removed-line slot index — even
+        /// after `reset_temporary_block` rebuilds the surrounding removed-line blocks.
+        location: RenderLineLocation,
+        item: Arc<dyn LaidOutEmbeddedItem>,
+    },
     HorizontalRule(HorizontalRuleConfig),
     Image {
         alt_text: String,
@@ -2636,16 +2643,19 @@ impl RenderState {
         &self,
         location: RenderLineLocation,
     ) -> Option<CommentBlockPosition> {
-        let target_line = location.line_count();
         let content = self.content.borrow();
         let mut cursor = content.cursor::<LineCount, LayoutSummary>();
         cursor.descend_to_first_item(&content, |_| true);
+        // A comment is matched by the FULL `RenderLineLocation` it carries, not by its line alone.
+        // Because the anchor (including a `Temporary` removed-line slot index) travels on the block
+        // itself, two comments sharing an `at_line` resolve unambiguously and the match holds even
+        // after `reset_temporary_block` rebuilds the surrounding removed-line blocks.
         while let Some(positioned) = cursor.positioned_item() {
-            // Comment blocks contribute no lines, so they share the cumulative line count of the
-            // content they're anchored below. That count equals the anchor line key used when the
-            // block was inserted (see `reset_comment_blocks`).
-            if matches!(positioned.item, BlockItem::EmbeddedComment(_))
-                && positioned.start_line == target_line
+            if let BlockItem::EmbeddedComment {
+                location: block_location,
+                ..
+            } = positioned.item
+                && *block_location == location
             {
                 return Some(CommentBlockPosition {
                     start_y_offset: positioned.start_y_offset,
@@ -2665,7 +2675,7 @@ impl RenderState {
         cursor.descend_to_first_item(&content, |_| true);
         let mut count = 0;
         while let Some(positioned) = cursor.positioned_item() {
-            if matches!(positioned.item, BlockItem::EmbeddedComment(_)) {
+            if matches!(positioned.item, BlockItem::EmbeddedComment { .. }) {
                 count += 1;
             }
             cursor.next();
@@ -2673,53 +2683,98 @@ impl RenderState {
         count
     }
 
-    /// Group comment blocks by anchor line and reconcile them into the content tree.
+    /// Group comment blocks by their full anchor [`RenderLineLocation`] and reconcile them into the
+    /// content tree. `Current` anchors are keyed by line; `Temporary` anchors are keyed by both the
+    /// `at_line` and the removed-line slot index, so two comments sharing an `at_line` but targeting
+    /// different removed-line slots do not collide.
     fn apply_comment_blocks(&self, blocks: Vec<CommentBlock>) {
-        let mut grouped: HashMap<LineCount, Vec<BlockItem>> = HashMap::new();
+        let mut current: HashMap<LineCount, Vec<BlockItem>> = HashMap::new();
+        let mut temporary: HashMap<(LineCount, usize), Vec<BlockItem>> = HashMap::new();
         for block in blocks {
-            grouped
-                .entry(block.location.line_count())
-                .or_default()
-                .push(BlockItem::EmbeddedComment(block.item));
+            let item = BlockItem::EmbeddedComment {
+                location: block.location,
+                item: block.item,
+            };
+            match block.location {
+                RenderLineLocation::Current(line) => {
+                    current.entry(line).or_default().push(item);
+                }
+                RenderLineLocation::Temporary {
+                    at_line,
+                    index_from_at_line,
+                } => {
+                    temporary
+                        .entry((at_line, index_from_at_line))
+                        .or_default()
+                        .push(item);
+                }
+            }
         }
-        self.reset_comment_blocks(grouped);
+        self.reset_comment_blocks(current, temporary);
     }
 
     /// Replace all [`BlockItem::EmbeddedComment`]s in the content tree with a new set, keyed by the
-    /// line each block is anchored below. Every other block (including diff removed-line
-    /// [`BlockItem::TemporaryBlock`]s) is preserved exactly. Comment blocks for a line are inserted
-    /// after any temporary blocks on that same line, so reconciling comments never displaces a
-    /// removed-line block.
-    fn reset_comment_blocks(&self, mut blocks: HashMap<LineCount, Vec<BlockItem>>) {
+    /// full [`RenderLineLocation`] each block is anchored to. Every other block (including diff
+    /// removed-line [`BlockItem::TemporaryBlock`]s) is preserved exactly.
+    ///
+    /// A `Current(line)` comment is inserted after every block on that line (so it follows any
+    /// removed-line blocks). A `Temporary { at_line, index_from_at_line: k }` comment is inserted
+    /// immediately after the `k`-th removed-line [`BlockItem::TemporaryBlock`] on `at_line`, placing
+    /// it at exactly that removed-line slot. Skipping prior comment blocks while counting temporary
+    /// blocks keeps removed-line slot indices stable regardless of how many comments are anchored.
+    fn reset_comment_blocks(
+        &self,
+        mut current: HashMap<LineCount, Vec<BlockItem>>,
+        mut temporary: HashMap<(LineCount, usize), Vec<BlockItem>>,
+    ) {
         let mut new_tree = SumTree::new();
         {
             let content = self.content.borrow();
             let mut cursor = content.cursor::<LineCount, CharOffset>();
 
             // Comments anchored before the first line of content.
-            if let Some(items) = blocks.remove(&LineCount::zero()) {
+            if let Some(items) = current.remove(&LineCount::zero()) {
                 for item in items {
                     new_tree.push(item);
                 }
             }
 
             cursor.descend_to_first_item(&content, |_| true);
+            let mut last_temp_line: Option<LineCount> = None;
+            let mut temp_index: usize = 0;
             while let Some(item) = cursor.item() {
-                if !matches!(item, BlockItem::EmbeddedComment(_)) {
+                if !matches!(item, BlockItem::EmbeddedComment { .. }) {
                     new_tree.push(item.clone());
                 }
 
                 let line_at_end = cursor.end_seek_position();
+
+                // A removed-line block defines a `Temporary` slot. Append any comment anchored to
+                // that exact (at_line, index) slot, then advance the slot index for this line.
+                if matches!(item, BlockItem::TemporaryBlock { .. }) {
+                    temp_index = if last_temp_line == Some(line_at_end) {
+                        temp_index + 1
+                    } else {
+                        0
+                    };
+                    last_temp_line = Some(line_at_end);
+                    if let Some(items) = temporary.remove(&(line_at_end, temp_index)) {
+                        for item in items {
+                            new_tree.push(item);
+                        }
+                    }
+                }
+
                 cursor.next();
 
                 // Once every (possibly zero-line) item on `line_at_end` has been pushed — detected
                 // when the next item begins a later line, or the tree ends — append that line's
-                // comment blocks. This keeps comments after any temporary blocks on the line.
+                // `Current` comment blocks. This keeps them after any temporary blocks on the line.
                 let line_complete = match cursor.item() {
                     None => true,
                     Some(_) => cursor.end_seek_position() > line_at_end,
                 };
-                if line_complete && let Some(items) = blocks.remove(&line_at_end) {
+                if line_complete && let Some(items) = current.remove(&line_at_end) {
                     for item in items {
                         new_tree.push(item);
                     }
@@ -3657,9 +3712,11 @@ impl BlockItem {
             BlockItem::HorizontalRule(config) => config.line_height.as_f32(),
             BlockItem::Image { config, .. } => config.height.as_f32(),
             BlockItem::Table(laid_out_table) => laid_out_table.height().as_f32(),
-            BlockItem::Embedded(embedded_item) | BlockItem::EmbeddedComment(embedded_item) => {
-                embedded_item.height().as_f32()
-            }
+            BlockItem::Embedded(embedded_item)
+            | BlockItem::EmbeddedComment {
+                item: embedded_item,
+                ..
+            } => embedded_item.height().as_f32(),
             BlockItem::Hidden(config) => config.height().as_f32(),
         }
     }
@@ -3683,9 +3740,11 @@ impl BlockItem {
             BlockItem::HorizontalRule(config) => config.spacing,
             BlockItem::Image { config, .. } => config.spacing,
             BlockItem::Table(laid_out_table) => laid_out_table.spacing(),
-            BlockItem::Embedded(embedded_item) | BlockItem::EmbeddedComment(embedded_item) => {
-                embedded_item.spacing()
-            }
+            BlockItem::Embedded(embedded_item)
+            | BlockItem::EmbeddedComment {
+                item: embedded_item,
+                ..
+            } => embedded_item.spacing(),
             BlockItem::Hidden { .. } => BlockSpacing::default(),
         }
     }
@@ -3718,9 +3777,11 @@ impl BlockItem {
                 }
                 height
             }
-            BlockItem::Embedded(embedded_item) | BlockItem::EmbeddedComment(embedded_item) => {
-                embedded_item.height()
-            }
+            BlockItem::Embedded(embedded_item)
+            | BlockItem::EmbeddedComment {
+                item: embedded_item,
+                ..
+            } => embedded_item.height(),
             BlockItem::HorizontalRule(rule) => rule.line_height,
             BlockItem::Image { config, .. } => config.height,
             BlockItem::Table(laid_out_table) => laid_out_table.height(),
@@ -3744,7 +3805,7 @@ impl BlockItem {
             } => paragraph_block.width(),
             BlockItem::MermaidDiagram { config, .. } => config.width,
             BlockItem::TrailingNewLine(cursor) => cursor.width,
-            BlockItem::Embedded(object) | BlockItem::EmbeddedComment(object) => {
+            BlockItem::Embedded(object) | BlockItem::EmbeddedComment { item: object, .. } => {
                 object.size().x().into_pixels()
             }
             BlockItem::HorizontalRule(rule) => rule.width,
@@ -3774,7 +3835,9 @@ impl BlockItem {
             BlockItem::RunnableCodeBlock {
                 paragraph_block, ..
             } => paragraph_block.content_length(),
-            BlockItem::TemporaryBlock { .. } | BlockItem::EmbeddedComment(_) => CharOffset::zero(),
+            BlockItem::TemporaryBlock { .. } | BlockItem::EmbeddedComment { .. } => {
+                CharOffset::zero()
+            }
             BlockItem::MermaidDiagram { content_length, .. } => *content_length,
             BlockItem::TrailingNewLine(_)
             | BlockItem::Embedded(_)
@@ -3796,7 +3859,7 @@ impl BlockItem {
             BlockItem::RunnableCodeBlock {
                 paragraph_block, ..
             } => paragraph_block.lines(),
-            BlockItem::TemporaryBlock { .. } | BlockItem::EmbeddedComment(_) => LineCount(0),
+            BlockItem::TemporaryBlock { .. } | BlockItem::EmbeddedComment { .. } => LineCount(0),
             BlockItem::MermaidDiagram { .. } => LineCount(1),
             BlockItem::TrailingNewLine(_)
             | BlockItem::Embedded(_)
@@ -3823,7 +3886,7 @@ impl BlockItem {
             BlockItem::MermaidDiagram { .. } => false,
             // Embeds, images, tables, and horizontal rules are never empty.
             BlockItem::Embedded(_)
-            | BlockItem::EmbeddedComment(_)
+            | BlockItem::EmbeddedComment { .. }
             | BlockItem::HorizontalRule(_)
             | BlockItem::Image { .. }
             | BlockItem::Table(_)
@@ -3883,7 +3946,7 @@ impl Positioned<'_, BlockItem> {
             BlockItem::MermaidDiagram { .. } => self.start_char_offset,
             BlockItem::TrailingNewLine(_)
             | BlockItem::Embedded(_)
-            | BlockItem::EmbeddedComment(_)
+            | BlockItem::EmbeddedComment { .. }
             | BlockItem::HorizontalRule(_)
             | BlockItem::Image { .. }
             | BlockItem::TemporaryBlock { .. }
@@ -3949,7 +4012,7 @@ impl Positioned<'_, BlockItem> {
             }
             BlockItem::TrailingNewLine(_)
             | BlockItem::Embedded(_)
-            | BlockItem::EmbeddedComment(_)
+            | BlockItem::EmbeddedComment { .. }
             | BlockItem::HorizontalRule(_)
             | BlockItem::Image { .. }
             | BlockItem::TemporaryBlock { .. }
@@ -4034,7 +4097,7 @@ impl Positioned<'_, BlockItem> {
                 Some(RectF::new(origin, embedded_item.size()))
             }
             BlockItem::TemporaryBlock { .. }
-            | BlockItem::EmbeddedComment(_)
+            | BlockItem::EmbeddedComment { .. }
             | BlockItem::Hidden { .. } => None,
         }
     }
@@ -4094,7 +4157,7 @@ impl Positioned<'_, BlockItem> {
                 RectF::new(origin, embedded_item.first_line_bound())
             }
             BlockItem::TemporaryBlock { .. }
-            | BlockItem::EmbeddedComment(_)
+            | BlockItem::EmbeddedComment { .. }
             | BlockItem::Hidden { .. } => return None,
         };
 
