@@ -639,6 +639,90 @@ pub fn assert_inline_composer_pushes_line_below(
     })
 }
 
+/// Assert the inline comment block anchored at `line` of `file_path` renders `expected` as its body
+/// text, resolved through the block's hosted child (not the composer handle directly).
+pub fn assert_inline_comment_block_body(
+    file_path: impl Into<String>,
+    line: usize,
+    expected: impl Into<String>,
+) -> AssertionCallback {
+    let file_path = file_path.into();
+    let expected = expected.into();
+    Box::new(move |app, window_id| {
+        let Some(view) = try_single_code_review_view(app, window_id) else {
+            return AssertionOutcome::failure("code review view not yet available".to_string());
+        };
+        view.read(app, |view, ctx| {
+            match view.inline_comment_block_body_for_test(&file_path, line, ctx) {
+                Some(body) if body == expected => AssertionOutcome::Success,
+                Some(body) => AssertionOutcome::failure(format!(
+                    "expected inline comment block body {expected:?} at line {line}, got {body:?}"
+                )),
+                None => AssertionOutcome::failure(format!(
+                    "expected an inline comment block at line {line} for {file_path:?}, none present"
+                )),
+            }
+        })
+    })
+}
+
+/// Replace the active inline composer's draft body for `file_path` (mirrors deleting/retyping
+/// lines, used to shrink the composer back down).
+pub fn set_inline_composer_body(file_path: impl Into<String>, text: impl Into<String>) -> TestStep {
+    let file_path = file_path.into();
+    let text = text.into();
+    TestStep::new("Replace inline composer body").with_action(move |app, window_id, _| {
+        let view = single_code_review_view(app, window_id);
+        view.update(app, |view, ctx| {
+            view.set_composer_body_for_test(&file_path, &text, ctx);
+        });
+    })
+}
+
+/// Assert whether the flag-OFF floating composer overlay actually painted for `file_path` and is
+/// anchored at a well-defined viewport offset (so a "composer not rendered at all" regression
+/// fails). `expected_present` is whether the overlay should be present.
+pub fn assert_floating_overlay_present(
+    file_path: impl Into<String>,
+    expected_present: bool,
+) -> AssertionCallback {
+    let file_path = file_path.into();
+    Box::new(move |app, window_id| {
+        let Some(view) = try_single_code_review_view(app, window_id) else {
+            return AssertionOutcome::failure("code review view not yet available".to_string());
+        };
+        view.read(app, |view, ctx| {
+            let present = match view.floating_overlay_present_for_test(&file_path, ctx) {
+                Some(present) => present,
+                None => {
+                    return AssertionOutcome::failure(format!(
+                        "editor for {file_path:?} not available"
+                    ))
+                }
+            };
+            if present != expected_present {
+                return AssertionOutcome::failure(format!(
+                    "expected floating overlay present == {expected_present}, got {present}"
+                ));
+            }
+            if expected_present {
+                match view.floating_overlay_offset_for_test(&file_path, ctx) {
+                    Some(offset) if offset > 0.0 => AssertionOutcome::Success,
+                    Some(offset) => AssertionOutcome::failure(format!(
+                        "expected floating overlay anchored at a positive offset, got {offset}"
+                    )),
+                    None => AssertionOutcome::failure(
+                        "expected a floating overlay anchor offset, but no composer is open"
+                            .to_string(),
+                    ),
+                }
+            } else {
+                AssertionOutcome::Success
+            }
+        })
+    })
+}
+
 const COMPOSER_BLOCK_HEIGHT_KEY: &str = "inline_composer_block_height";
 const COMPOSER_LINE_BELOW_Y_KEY: &str = "inline_composer_line_below_y";
 
@@ -707,6 +791,204 @@ pub fn assert_inline_composer_height_grew(file_path: impl Into<String>, line: us
                     if (height_delta - shift_delta).abs() > 2.0 {
                         return AssertionOutcome::failure(format!(
                             "expected line below to shift by the height delta {height_delta}, but it shifted {shift_delta}"
+                        ));
+                    }
+                    AssertionOutcome::Success
+                })
+            },
+        )
+}
+
+/// Assert the inline composer block shrank below the captured height and that the line below it
+/// shifted back UP by the same delta (within 2px) — i.e. deleting draft lines reflows the lines
+/// below back up. Pairs with a prior [`capture_inline_composer_height`].
+pub fn assert_inline_composer_height_shrank(file_path: impl Into<String>, line: usize) -> TestStep {
+    let file_path = file_path.into();
+    TestStep::new("Assert inline composer shrank and reflowed lines back up")
+        .add_named_assertion_with_data_from_prior_step(
+            "composer block height and line-below shift shrink together",
+            move |app: &mut App, window_id: WindowId, step_data: &mut StepDataMap| {
+                let Some(view) = try_single_code_review_view(app, window_id) else {
+                    return AssertionOutcome::failure(
+                        "code review view not yet available".to_string(),
+                    );
+                };
+                let Some(&prior_height) = step_data.get::<_, f32>(COMPOSER_BLOCK_HEIGHT_KEY) else {
+                    return AssertionOutcome::failure(
+                        "no captured composer height from a prior step".to_string(),
+                    );
+                };
+                let Some(&prior_line_below_y) =
+                    step_data.get::<_, f32>(COMPOSER_LINE_BELOW_Y_KEY)
+                else {
+                    return AssertionOutcome::failure(
+                        "no captured line-below Y from a prior step".to_string(),
+                    );
+                };
+                view.read(app, |view, ctx| {
+                    let Some(height) = view.comment_block_height_for_test(&file_path, line, ctx)
+                    else {
+                        return AssertionOutcome::failure("composer height not available".to_string());
+                    };
+                    let Some(line_below_y) =
+                        view.line_viewport_y_for_test(&file_path, line + 1, ctx)
+                    else {
+                        return AssertionOutcome::failure("line-below Y not available".to_string());
+                    };
+                    let height_delta = prior_height - height;
+                    let shift_delta = prior_line_below_y - line_below_y;
+                    if height_delta <= 1.0 {
+                        return AssertionOutcome::failure(format!(
+                            "expected composer block to shrink, but height went {prior_height} -> {height}"
+                        ));
+                    }
+                    if (height_delta - shift_delta).abs() > 2.0 {
+                        return AssertionOutcome::failure(format!(
+                            "expected line below to shift back up by the height delta {height_delta}, but it shifted {shift_delta}"
+                        ));
+                    }
+                    AssertionOutcome::Success
+                })
+            },
+        )
+}
+
+const COMPOSER_MAX_HEIGHT: f32 = 200.0;
+
+/// Assert the inline composer is pinned at the 200px max-height cap and is internally scrollable:
+/// the reserved block height equals the cap (within 2px), the composer reports it is at the cap,
+/// and the inner content height overflows the reserved block (so it scrolls internally rather than
+/// growing). Use a body tall enough that the inner content clearly exceeds the cap.
+pub fn assert_inline_composer_height_capped(
+    file_path: impl Into<String>,
+    line: usize,
+) -> AssertionCallback {
+    let file_path = file_path.into();
+    Box::new(move |app, window_id| {
+        let Some(view) = try_single_code_review_view(app, window_id) else {
+            return AssertionOutcome::failure("code review view not yet available".to_string());
+        };
+        view.read(app, |view, ctx| {
+            let Some(height) = view.comment_block_height_for_test(&file_path, line, ctx) else {
+                return AssertionOutcome::failure("composer height not available".to_string());
+            };
+            if (height - COMPOSER_MAX_HEIGHT).abs() > 2.0 {
+                return AssertionOutcome::failure(format!(
+                    "expected composer block height pinned at {COMPOSER_MAX_HEIGHT}px cap, got {height}"
+                ));
+            }
+            match view.composer_at_max_height_for_test(&file_path, ctx) {
+                Some(true) => {}
+                Some(false) => {
+                    return AssertionOutcome::failure(
+                        "expected composer to report it is at the max-height cap".to_string(),
+                    )
+                }
+                None => {
+                    return AssertionOutcome::failure(format!(
+                        "editor for {file_path:?} not available"
+                    ))
+                }
+            }
+            let Some(inner_height) =
+                view.composer_inner_content_height_for_test(&file_path, ctx)
+            else {
+                return AssertionOutcome::failure("composer inner height not available".to_string());
+            };
+            if inner_height <= height {
+                return AssertionOutcome::failure(format!(
+                    "expected inner content ({inner_height}) to overflow the capped block ({height}) so the composer scrolls internally"
+                ));
+            }
+            AssertionOutcome::Success
+        })
+    })
+}
+
+/// Assert the inline composer block height has NOT changed beyond 2px from the captured height —
+/// used after adding still more content past the cap to prove the height stops growing. Pairs with
+/// a prior [`capture_inline_composer_height`].
+pub fn assert_inline_composer_height_unchanged(
+    file_path: impl Into<String>,
+    line: usize,
+) -> TestStep {
+    let file_path = file_path.into();
+    TestStep::new("Assert inline composer height held at the cap")
+        .add_named_assertion_with_data_from_prior_step(
+            "composer block height unchanged past the cap",
+            move |app: &mut App, window_id: WindowId, step_data: &mut StepDataMap| {
+                let Some(view) = try_single_code_review_view(app, window_id) else {
+                    return AssertionOutcome::failure(
+                        "code review view not yet available".to_string(),
+                    );
+                };
+                let Some(&prior_height) = step_data.get::<_, f32>(COMPOSER_BLOCK_HEIGHT_KEY) else {
+                    return AssertionOutcome::failure(
+                        "no captured composer height from a prior step".to_string(),
+                    );
+                };
+                view.read(app, |view, ctx| {
+                    let Some(height) = view.comment_block_height_for_test(&file_path, line, ctx)
+                    else {
+                        return AssertionOutcome::failure("composer height not available".to_string());
+                    };
+                    if (height - prior_height).abs() > 2.0 {
+                        return AssertionOutcome::failure(format!(
+                            "expected composer block height to hold at the cap, but it went {prior_height} -> {height}"
+                        ));
+                    }
+                    AssertionOutcome::Success
+                })
+            },
+        )
+}
+
+const LINE_BELOW_BASELINE_Y_KEY: &str = "inline_composer_line_below_baseline_y";
+
+/// Capture the on-screen Y of the line below `line` of `file_path` into step data, to later assert
+/// it is unchanged (the flag-OFF floating overlay must not push lines down).
+pub fn capture_line_below_baseline(file_path: impl Into<String>, line: usize) -> TestStep {
+    let file_path = file_path.into();
+    TestStep::new("Capture line-below baseline Y").with_action(
+        move |app: &mut App, window_id: WindowId, step_data: &mut StepDataMap| {
+            let view = single_code_review_view(app, window_id);
+            view.read(app, |view, ctx| {
+                if let Some(line_below_y) = view.line_viewport_y_for_test(&file_path, line + 1, ctx)
+                {
+                    step_data.insert(LINE_BELOW_BASELINE_Y_KEY, line_below_y);
+                }
+            });
+        },
+    )
+}
+
+/// Assert the on-screen Y of the line below `line` equals the captured baseline (within 1px) — used
+/// to prove the flag-OFF floating overlay does NOT shift the lines below it down.
+pub fn assert_line_below_y_unchanged(file_path: impl Into<String>, line: usize) -> TestStep {
+    let file_path = file_path.into();
+    TestStep::new("Assert line-below Y unchanged from baseline")
+        .add_named_assertion_with_data_from_prior_step(
+            "line below the composer stays at the no-composer baseline",
+            move |app: &mut App, window_id: WindowId, step_data: &mut StepDataMap| {
+                let Some(view) = try_single_code_review_view(app, window_id) else {
+                    return AssertionOutcome::failure(
+                        "code review view not yet available".to_string(),
+                    );
+                };
+                let Some(&baseline_y) = step_data.get::<_, f32>(LINE_BELOW_BASELINE_Y_KEY) else {
+                    return AssertionOutcome::failure(
+                        "no captured line-below baseline Y from a prior step".to_string(),
+                    );
+                };
+                view.read(app, |view, ctx| {
+                    let Some(line_below_y) =
+                        view.line_viewport_y_for_test(&file_path, line + 1, ctx)
+                    else {
+                        return AssertionOutcome::failure("line-below Y not available".to_string());
+                    };
+                    if (line_below_y - baseline_y).abs() > 1.0 {
+                        return AssertionOutcome::failure(format!(
+                            "expected line below to stay at baseline {baseline_y}, but it moved to {line_below_y}"
                         ));
                     }
                     AssertionOutcome::Success

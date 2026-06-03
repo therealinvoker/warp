@@ -6,18 +6,21 @@ use command::blocking::Command;
 use warp::features::FeatureFlag;
 use warp::integration_testing::code_review::{
     assert_code_review_anchor, assert_code_review_line_text, assert_code_review_loaded,
-    assert_code_review_scroll_region, assert_general_composer_overlay_present,
+    assert_code_review_scroll_region, assert_floating_overlay_present,
+    assert_general_composer_overlay_present, assert_inline_comment_block_body,
     assert_inline_comment_block_count, assert_inline_composer_body,
     assert_inline_composer_body_contains, assert_inline_composer_closed,
-    assert_inline_composer_focused, assert_inline_composer_height_grew,
-    assert_inline_composer_open, assert_inline_composer_primary_label,
-    assert_inline_composer_pushes_line_below, assert_inline_composer_save_disabled,
-    assert_inline_composer_shows_remove, assert_saved_comment_count, cancel_inline_composer,
-    capture_inline_composer_height, cmd_enter_inline_composer, escape_inline_composer,
-    open_general_composer, open_inline_composer, remove_inline_comment,
+    assert_inline_composer_focused, assert_inline_composer_height_capped,
+    assert_inline_composer_height_grew, assert_inline_composer_height_shrank,
+    assert_inline_composer_height_unchanged, assert_inline_composer_open,
+    assert_inline_composer_primary_label, assert_inline_composer_pushes_line_below,
+    assert_inline_composer_save_disabled, assert_inline_composer_shows_remove,
+    assert_line_below_y_unchanged, assert_saved_comment_count, cancel_inline_composer,
+    capture_inline_composer_height, capture_line_below_baseline, cmd_enter_inline_composer,
+    escape_inline_composer, open_general_composer, open_inline_composer, remove_inline_comment,
     reopen_saved_inline_comment, save_inline_composer, scroll_code_review_to_deleted_range,
     scroll_code_review_to_footer, scroll_code_review_to_header, scroll_code_review_to_line,
-    type_into_inline_composer, ScrollRegion,
+    set_inline_composer_body, type_into_inline_composer, ScrollRegion,
 };
 use warp::integration_testing::terminal::wait_until_bootstrapped_single_pane_for_tab;
 use warp::integration_testing::view_getters::{single_terminal_view_for_tab, workspace_view};
@@ -946,6 +949,13 @@ pub fn test_code_review_composer_reopen_and_remove() -> Builder {
                     Some(COMPOSER_LINE),
                 ))
                 .add_assertion(assert_inline_composer_body(TEST_FILE_NAME, "original body"))
+                // The reopened inline BLOCK (resolved through its hosted child, not the composer
+                // handle) renders the saved body — proves the block hosts the prefilled editor.
+                .add_assertion(assert_inline_comment_block_body(
+                    TEST_FILE_NAME,
+                    COMPOSER_LINE,
+                    "original body",
+                ))
                 .add_assertion(assert_inline_composer_primary_label(
                     TEST_FILE_NAME,
                     "Update",
@@ -961,24 +971,53 @@ pub fn test_code_review_composer_reopen_and_remove() -> Builder {
         )
 }
 
-/// VAL-COMPOSER-011: with the flag OFF, opening the composer uses the floating overlay (no inline
-/// comment block is created in the content tree, so lines below are not pushed down).
+/// VAL-COMPOSER-011: with the flag OFF, opening the composer uses the floating overlay: NO inline
+/// comment block is created (lines below are not pushed down), the floating overlay element IS
+/// present at its expected offset, and the line below stays at the no-composer baseline. Asserting
+/// the overlay is present (not merely that no inline block exists) guards against a "composer not
+/// rendered at all" regression while the flag is off.
 pub fn test_code_review_composer_floating_when_flag_off() -> Builder {
-    composer_builder(false).with_step(
-        open_inline_composer(TEST_FILE_NAME, COMPOSER_LINE)
+    composer_builder(false)
+        // Baseline the line below BEFORE opening, so we can prove the overlay does not shift it.
+        .with_step(capture_line_below_baseline(TEST_FILE_NAME, COMPOSER_LINE))
+        .with_step(
+            open_inline_composer(TEST_FILE_NAME, COMPOSER_LINE)
+                .set_timeout(Duration::from_secs(10))
+                .set_retries(2)
+                .add_assertion(assert_inline_composer_open(
+                    TEST_FILE_NAME,
+                    Some(COMPOSER_LINE),
+                ))
+                .add_assertion(assert_inline_comment_block_count(TEST_FILE_NAME, 0)),
+        )
+        // The floating overlay must actually paint (regression guard) and not push lines down.
+        .with_step(
+            TestStep::new(
+                "Flag-off composer renders as the floating overlay without shifting lines",
+            )
             .set_timeout(Duration::from_secs(10))
             .set_retries(2)
-            .add_assertion(assert_inline_composer_open(
-                TEST_FILE_NAME,
-                Some(COMPOSER_LINE),
-            ))
-            .add_assertion(assert_inline_comment_block_count(TEST_FILE_NAME, 0)),
-    )
+            .add_assertion(assert_floating_overlay_present(TEST_FILE_NAME, true)),
+        )
+        .with_step(assert_line_below_y_unchanged(TEST_FILE_NAME, COMPOSER_LINE))
 }
 
-/// VAL-COMPOSER-016: the composer height tracks the draft; growing it reflows the line below by the
-/// same delta.
+/// VAL-COMPOSER-016: the composer height tracks the draft. Growing it reflows the line below down by
+/// the same delta; deleting lines shrinks the block and reflows the line below back UP by the same
+/// delta; and once content exceeds the 200px max-height cap the block height stops growing while the
+/// composer becomes internally scrollable.
 pub fn test_code_review_composer_height_tracks_content() -> Builder {
+    // A body tall enough that its inner content clearly overflows the 200px cap.
+    let tall_body = (1..=40)
+        .map(|i| format!("draft line {i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    // An even taller body, to prove the block height holds at the cap rather than growing further.
+    let taller_body = (1..=80)
+        .map(|i| format!("draft line {i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+
     composer_builder(true)
         .with_step(
             open_inline_composer(TEST_FILE_NAME, COMPOSER_LINE)
@@ -1001,12 +1040,55 @@ pub fn test_code_review_composer_height_tracks_content() -> Builder {
             TEST_FILE_NAME,
             COMPOSER_LINE,
         ))
+        // Grow: adding lines reflows the line below down by the height delta.
         .with_step(
             type_into_inline_composer(TEST_FILE_NAME, "\nline two\nline three\nline four")
                 .set_timeout(Duration::from_secs(10)),
         )
         .with_step(
             assert_inline_composer_height_grew(TEST_FILE_NAME, COMPOSER_LINE)
+                .set_timeout(Duration::from_secs(10))
+                .set_retries(2),
+        )
+        // Shrink: deleting back to one line reflows the line below back UP by the same delta.
+        .with_step(capture_inline_composer_height(
+            TEST_FILE_NAME,
+            COMPOSER_LINE,
+        ))
+        .with_step(
+            set_inline_composer_body(TEST_FILE_NAME, "one line")
+                .set_timeout(Duration::from_secs(10)),
+        )
+        .with_step(
+            assert_inline_composer_height_shrank(TEST_FILE_NAME, COMPOSER_LINE)
+                .set_timeout(Duration::from_secs(10))
+                .set_retries(2),
+        )
+        // Cap: content past the cap pins the block height at 200px and scrolls internally.
+        .with_step(
+            set_inline_composer_body(TEST_FILE_NAME, tall_body)
+                .set_timeout(Duration::from_secs(10)),
+        )
+        .with_step(
+            TestStep::new("Composer height pinned at the 200px cap and internally scrollable")
+                .set_timeout(Duration::from_secs(10))
+                .set_retries(2)
+                .add_assertion(assert_inline_composer_height_capped(
+                    TEST_FILE_NAME,
+                    COMPOSER_LINE,
+                )),
+        )
+        .with_step(capture_inline_composer_height(
+            TEST_FILE_NAME,
+            COMPOSER_LINE,
+        ))
+        // Cap enforced: even more content does not grow the block past the cap.
+        .with_step(
+            set_inline_composer_body(TEST_FILE_NAME, taller_body)
+                .set_timeout(Duration::from_secs(10)),
+        )
+        .with_step(
+            assert_inline_composer_height_unchanged(TEST_FILE_NAME, COMPOSER_LINE)
                 .set_timeout(Duration::from_secs(10))
                 .set_retries(2),
         )

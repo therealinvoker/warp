@@ -653,4 +653,73 @@ impl CodeReviewView {
         self.handle_edit_comment(&comment_id, ctx);
         Some(line)
     }
+
+    /// The rendered body text of the inline comment block anchored at the given 1-based current
+    /// line of `path`, resolved through the block's hosted child.
+    pub fn inline_comment_block_body_for_test(
+        &self,
+        path: &str,
+        line: usize,
+        ctx: &AppContext,
+    ) -> Option<String> {
+        self.code_editor_for_test(path, ctx)?
+            .as_ref(ctx)
+            .inline_comment_block_body_for_test(line, ctx)
+    }
+
+    /// Replace the active composer's draft body for `path` (mirrors deleting/retyping lines).
+    pub fn set_composer_body_for_test(
+        &mut self,
+        path: &str,
+        text: &str,
+        ctx: &mut ViewContext<Self>,
+    ) -> bool {
+        let Some(editor) = self.code_editor_for_test(path, ctx) else {
+            return false;
+        };
+        editor.update(ctx, |editor, ctx| {
+            editor.set_composer_body_for_test(text, ctx);
+        });
+        true
+    }
+
+    /// The active composer's inner content height for `path` (independent of the 200px cap).
+    pub fn composer_inner_content_height_for_test(
+        &self,
+        path: &str,
+        ctx: &AppContext,
+    ) -> Option<f32> {
+        Some(
+            self.code_editor_for_test(path, ctx)?
+                .as_ref(ctx)
+                .composer_inner_content_height_for_test(ctx),
+        )
+    }
+
+    /// Whether the active composer for `path` is pinned at the 200px max-height cap.
+    pub fn composer_at_max_height_for_test(&self, path: &str, ctx: &AppContext) -> Option<bool> {
+        Some(
+            self.code_editor_for_test(path, ctx)?
+                .as_ref(ctx)
+                .composer_at_max_height_for_test(ctx),
+        )
+    }
+
+    /// Whether the flag-OFF floating composer overlay actually painted for `path` on the prior
+    /// frame.
+    pub fn floating_overlay_present_for_test(&self, path: &str, ctx: &AppContext) -> Option<bool> {
+        Some(
+            self.code_editor_for_test(path, ctx)?
+                .as_ref(ctx)
+                .floating_overlay_present_for_test(ctx),
+        )
+    }
+
+    /// The viewport-space Y offset at which the flag-OFF floating composer overlay is anchored for
+    /// `path`, or `None` when no composer is open.
+    pub fn floating_overlay_offset_for_test(&self, path: &str, ctx: &AppContext) -> Option<f32> {
+        self.code_editor_for_test(path, ctx)?
+            .as_ref(ctx)
+            .floating_overlay_offset_for_test(ctx)
+    }
 }

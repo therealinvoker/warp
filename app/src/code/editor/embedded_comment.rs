@@ -133,6 +133,15 @@ impl LaidOutEmbeddedCommentSpace {
     fn comment_editor(&self, app: &AppContext) -> Option<ViewHandle<CommentEditor>> {
         app.view_with_id::<CommentEditor>(self.window_id, self.editor_entity_id)
     }
+
+    /// The rendered body text of the comment editor hosted by this inline block, resolved through
+    /// the block's hosted child (not the view's own composer handle). Returns `None` if the hosted
+    /// editor can no longer be resolved.
+    #[cfg(feature = "integration_tests")]
+    pub fn rendered_body_for_test(&self, app: &AppContext) -> Option<String> {
+        self.comment_editor(app)
+            .map(|editor| editor.read(app, |editor, app| editor.comment_text(app)))
+    }
 }
 
 impl LaidOutEmbeddedItem for LaidOutEmbeddedCommentSpace {

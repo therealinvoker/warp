@@ -244,6 +244,36 @@ impl CommentEditor {
         ctx.notify();
     }
 
+    /// Replace the entire draft body with `text` (mirrors selecting all and retyping / deleting
+    /// lines), updating the save-button state and notifying the host so the inline block
+    /// re-measures. Test-only drive helper.
+    #[cfg(feature = "integration_tests")]
+    pub fn set_body_for_test(&mut self, text: &str, ctx: &mut ViewContext<Self>) {
+        self.editor.update(ctx, |editor, ctx| {
+            editor.model().update(ctx, |model, ctx| {
+                model.reset_with_markdown(text, ctx);
+            });
+        });
+        self.update_save_button_state(ctx);
+        ctx.emit(CommentEditorEvent::ContentChanged);
+        ctx.notify();
+    }
+
+    /// The inner markdown editor's full laid-out content height (independent of the composer's
+    /// max-height cap). When this exceeds the composer's visible height the composer is internally
+    /// scrollable. Test-only accessor.
+    #[cfg(feature = "integration_tests")]
+    pub fn inner_content_height_for_test(&self, app: &AppContext) -> f32 {
+        self.inner_render_state(app).as_ref(app).height().as_f32()
+    }
+
+    /// Whether the composer's reserved inline height is pinned at the [`MAX_COMMENT_HEIGHT`] cap
+    /// (so further content scrolls internally rather than growing the block). Test-only accessor.
+    #[cfg(feature = "integration_tests")]
+    pub fn is_at_max_height_for_test(&self, app: &AppContext) -> bool {
+        self.inline_height(app).as_f32() >= MAX_COMMENT_HEIGHT - 0.5
+    }
+
     #[allow(unused)] // TODO(CODE-1464): use this
     pub fn set_laid_out_size(&self, value: Vector2F) {
         self.laid_out_size.replace(Some(value));

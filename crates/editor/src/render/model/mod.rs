@@ -2667,6 +2667,30 @@ impl RenderState {
         None
     }
 
+    /// The app-supplied hosted item of the inline comment block anchored at `location`, or `None`
+    /// if no comment block is anchored there. Lets a host resolve the block's rendered content (for
+    /// example its body text) by downcasting the returned [`LaidOutEmbeddedItem`].
+    pub fn comment_block_item(
+        &self,
+        location: RenderLineLocation,
+    ) -> Option<Arc<dyn LaidOutEmbeddedItem>> {
+        let content = self.content.borrow();
+        let mut cursor = content.cursor::<LineCount, LayoutSummary>();
+        cursor.descend_to_first_item(&content, |_| true);
+        while let Some(positioned) = cursor.positioned_item() {
+            if let BlockItem::EmbeddedComment {
+                location: block_location,
+                item,
+            } = positioned.item
+                && *block_location == location
+            {
+                return Some(item.clone());
+            }
+            cursor.next();
+        }
+        None
+    }
+
     /// Number of inline comment blocks ([`BlockItem::EmbeddedComment`]) currently in this view's
     /// content tree, across all anchor lines. Diff removed-line temporary blocks are not counted.
     pub fn comment_block_count(&self) -> usize {

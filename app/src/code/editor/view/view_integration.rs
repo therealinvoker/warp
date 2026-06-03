@@ -10,6 +10,7 @@ use warpui::{AppContext, TypedActionView, ViewContext};
 use super::{CodeEditorView, CodeEditorViewAction};
 use crate::code::editor::comment_editor::CommentEditorAction;
 use crate::code::editor::comments::PendingComment;
+use crate::code::editor::embedded_comment::LaidOutEmbeddedCommentSpace;
 use crate::code::editor::line::EditorLineLocation;
 
 fn current_line_location(line_number: usize) -> EditorLineLocation {
@@ -169,5 +170,77 @@ impl CodeEditorView {
         self.active_comment_editor.update(ctx, |composer, ctx| {
             composer.handle_action(&CommentEditorAction::RemoveComment, ctx);
         });
+    }
+
+    /// The rendered body text of the inline comment block anchored at the given 1-based current
+    /// line, resolved through the block's hosted child (not the view's composer handle directly),
+    /// or `None` if no inline comment block is anchored there. Reused by F4/F5 saved-comment tests.
+    pub fn inline_comment_block_body_for_test(
+        &self,
+        line: usize,
+        app: &AppContext,
+    ) -> Option<String> {
+        let item = self
+            .model
+            .as_ref(app)
+            .render_state()
+            .as_ref(app)
+            .comment_block_item(RenderLineLocation::Current(LineCount::from(line)))?;
+        item.as_any()
+            .downcast_ref::<LaidOutEmbeddedCommentSpace>()?
+            .rendered_body_for_test(app)
+    }
+
+    /// Replace the active composer's draft body with `text` (mirrors deleting/retyping lines).
+    pub fn set_composer_body_for_test(&mut self, text: &str, ctx: &mut ViewContext<Self>) {
+        self.active_comment_editor.update(ctx, |composer, ctx| {
+            composer.set_body_for_test(text, ctx);
+        });
+    }
+
+    /// The active composer's inner markdown editor full content height (independent of the 200px
+    /// max-height cap). Greater than the reserved block height implies internal scrolling.
+    pub fn composer_inner_content_height_for_test(&self, app: &AppContext) -> f32 {
+        self.active_comment_editor
+            .as_ref(app)
+            .inner_content_height_for_test(app)
+    }
+
+    /// Whether the active composer's reserved inline height is pinned at the 200px max-height cap.
+    pub fn composer_at_max_height_for_test(&self, app: &AppContext) -> bool {
+        self.active_comment_editor
+            .as_ref(app)
+            .is_at_max_height_for_test(app)
+    }
+
+    /// Whether the flag-OFF floating comment composer overlay actually painted on the previous
+    /// frame (its element position was recorded). This is `false` when the overlay branch did not
+    /// render at all, so it guards against a "composer not rendered" regression while the flag is
+    /// off.
+    pub fn floating_overlay_present_for_test(&self, app: &AppContext) -> bool {
+        app.element_position_by_id_at_last_frame(self.window_id, &self.comment_overlay_position_id)
+            .is_some()
+    }
+
+    /// The viewport-space Y offset at which the flag-OFF floating composer overlay is anchored
+    /// (the anchored line's offset plus one line height), or `None` when no composer is open. This
+    /// mirrors the offset `render` positions the overlay at.
+    pub fn floating_overlay_offset_for_test(&self, app: &AppContext) -> Option<f32> {
+        let line = match &self
+            .model
+            .as_ref(app)
+            .comments()
+            .as_ref(app)
+            .pending_comment
+        {
+            PendingComment::Open { line } => line.clone(),
+            PendingComment::Closed => return None,
+        };
+        let render_state = self.model.as_ref(app).render_state();
+        let render_state = render_state.as_ref(app);
+        let offset = render_state
+            .vertical_offset_at_render_location(line.into_render_line_location())?
+            + render_state.styles().base_line_height();
+        Some(offset.as_f32())
     }
 }

@@ -40,8 +40,8 @@ use warpui::elements::new_scrollable::{
 };
 use warpui::elements::{
     ChildAnchor, ChildView, Dismiss, Fill, Flex, Margin, MouseStateHandle, NewScrollable,
-    OffsetPositioning, Padding, ParentAnchor, ParentElement, ParentOffsetBounds, ScrollStateHandle,
-    Shrinkable, Stack,
+    OffsetPositioning, Padding, ParentAnchor, ParentElement, ParentOffsetBounds, SavePosition,
+    ScrollStateHandle, Shrinkable, Stack,
 };
 use warpui::event::ModifiersState;
 use warpui::keymap::Keystroke;
@@ -283,6 +283,9 @@ pub struct CodeEditorView {
     comment_locations: Vec<SavedComment>,
     /// Save position of the comment button rendered within this code editor view.
     comment_save_position_id: String,
+    /// Save position of the flag-OFF floating comment composer overlay, so its painted presence and
+    /// offset can be observed (it lives outside the content tree, unlike the inline block).
+    comment_overlay_position_id: String,
     show_comment_editor_provider: Box<dyn ShowCommentEditorProvider>,
     /// Save position of the anchor point for find references card.
     find_references_save_position_id: String,
@@ -435,6 +438,7 @@ impl CodeEditorView {
             last_search_direction: Direction::Forward,
             active_comment_editor: comment_editor,
             comment_save_position_id: format!("code_editor_comment_{}", ctx.view_id()),
+            comment_overlay_position_id: format!("code_editor_comment_overlay_{}", ctx.view_id()),
             show_comment_editor_provider: render_options.show_comment_editor_provider,
             find_references_save_position_id: format!(
                 "code_editor_find_references_{}",
@@ -2410,7 +2414,11 @@ impl View for CodeEditorView {
 
                 if should_render_comment_editor {
                     stack.add_positioned_child(
-                        ChildView::new(&self.active_comment_editor).finish(),
+                        SavePosition::new(
+                            ChildView::new(&self.active_comment_editor).finish(),
+                            &self.comment_overlay_position_id,
+                        )
+                        .finish(),
                         OffsetPositioning::offset_from_parent(
                             vec2f(0., vertical_offset.as_f32()),
                             ParentOffsetBounds::ParentByPosition,
