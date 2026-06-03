@@ -644,13 +644,70 @@ pub fn should_ignore_git_path(path: &Path) -> bool {
         && !is_tracking_state_git_file(path)
 }
 
+/// Well-known directory names that typically contain deeply nested dependency
+/// or build trees and are almost universally gitignored. Pruning these from
+/// the inotify recursive walk prevents registering hundreds of thousands of
+/// watches — the dominant source of memory growth on Linux (see Sentry issue
+/// 7259255054 where `notify::inotify::EventLoop::add_single_watch` allocated
+/// 11 GB).
+const HEAVY_DIRECTORY_NAMES: &[&str] = &[
+    "node_modules",
+    ".venv",
+    "__pycache__",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".tox",
+    ".gradle",
+    ".cache",
+];
+
+/// Returns `true` when a non-`.git` directory's *name* (final component)
+/// matches one of the known-heavy directory names that should be pruned
+/// from recursive watching. Only the leaf directory name is checked, so
+/// `repo/node_modules` is pruned but `repo/src/utils` is not.
+fn is_heavy_directory(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|name| HEAVY_DIRECTORY_NAMES.contains(&name))
+}
+
 /// Returns `true` when the directory at `path` should be registered for watching.
-/// Specifically for prefixes that lead to an allowlisted file and `false` for everything else inside `.git/`.
+/// Returns `false` for `.git/` subtrees that are not allowlisted and for
+/// well-known heavy directories (e.g. `node_modules`) that would cause
+/// excessive inotify watch count on Linux.
+/// Backward-compatible alias for [`should_watch_directory`].
+///
+/// Only checks `.git/` subtree pruning; callers that also need the
+/// heavy-directory pruning should use [`should_watch_directory`] instead.
 pub fn should_watch_directory_in_git_path(path: &Path) -> bool {
     if !is_git_internal_path(path) {
         return true;
     }
+    should_watch_directory_git_internal(path)
+}
 
+/// Returns `true` when the directory at `path` should be registered for watching.
+/// Returns `false` for `.git/` subtrees that are not allowlisted and for
+/// well-known heavy directories (e.g. `node_modules`) that would cause
+/// excessive inotify watch count on Linux.
+pub fn should_watch_directory(path: &Path) -> bool {
+    // Prune known-heavy directories before the `.git` check — they can
+    // never be inside `.git/` so the order doesn't matter for correctness,
+    // and this early-return avoids the more expensive component iteration.
+    if is_heavy_directory(path) {
+        return false;
+    }
+
+    if !is_git_internal_path(path) {
+        return true;
+    }
+    should_watch_directory_git_internal(path)
+}
+
+/// Shared helper that implements the `.git/`-subtree pruning logic.
+/// Both `should_watch_directory` and the backward-compatible
+/// `should_watch_directory_in_git_path` delegate here.
+fn should_watch_directory_git_internal(path: &Path) -> bool {
     // Worktree paths: `.git/worktrees/<name>/...` only descends along the
     // path needed to reach the allowlisted children (HEAD, index.lock,
     // config.worktree, refs/heads/*, refs/remotes/<r>/*).
@@ -717,7 +774,7 @@ fn descend_allowlist_matches(suffix: &[Component<'_>]) -> bool {
 #[cfg(feature = "local_fs")]
 pub fn repo_watch_filter() -> WatchFilter {
     WatchFilter::with_filter(
-        Arc::new(should_watch_directory_in_git_path),
+        Arc::new(should_watch_directory),
         Arc::new(|path: &Path| !should_ignore_git_path(path)),
     )
 }

@@ -443,6 +443,38 @@ fn should_watch_directory_in_git_path_prunes_non_allowlisted_subtrees() {
     )));
 }
 #[test]
+fn should_watch_directory_prunes_heavy_directories() {
+    use std::path::Path;
+
+    use super::should_watch_directory;
+
+    // Regular source directories should be watched.
+    assert!(should_watch_directory(Path::new("/repo/src")));
+    assert!(should_watch_directory(Path::new("/repo/src/utils")));
+    assert!(should_watch_directory(Path::new("/repo/lib")));
+
+    // Heavy directories should be pruned.
+    assert!(!should_watch_directory(Path::new("/repo/node_modules")));
+    assert!(!should_watch_directory(Path::new("/repo/.venv")));
+    assert!(!should_watch_directory(Path::new("/repo/__pycache__")));
+    assert!(!should_watch_directory(Path::new("/repo/.mypy_cache")));
+    assert!(!should_watch_directory(Path::new("/repo/.gradle")));
+    assert!(!should_watch_directory(Path::new("/repo/.cache")));
+
+    // Nested heavy directories should also be pruned.
+    assert!(!should_watch_directory(Path::new(
+        "/repo/packages/frontend/node_modules"
+    )));
+    assert!(!should_watch_directory(Path::new("/repo/backend/.venv")));
+
+    // Git subtrees should still be pruned by the existing logic.
+    assert!(!should_watch_directory(Path::new("/repo/.git/objects")));
+    assert!(!should_watch_directory(Path::new("/repo/.git/hooks")));
+    assert!(should_watch_directory(Path::new("/repo/.git")));
+    assert!(should_watch_directory(Path::new("/repo/.git/refs/heads")));
+}
+
+#[test]
 fn test_is_shared_git_ref() {
     use std::path::Path;
 
