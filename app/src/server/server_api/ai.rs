@@ -2687,6 +2687,10 @@ impl From<warp_graphql::queries::get_feature_model_choices::LlmInfo> for LLMInfo
             provider: value.provider.into(),
             host_configs,
             discount_percentage: value.pricing.discount_percentage.map(|v| v as f32),
+            long_context_token_threshold: value
+                .pricing
+                .long_context_token_threshold
+                .map(Into::into),
             context_window: LLMContextWindow {
                 is_configurable: value.context_window.is_configurable,
                 min: value.context_window.min.into(),
@@ -2726,6 +2730,10 @@ impl From<warp_graphql::workspace::LlmInfo> for LLMInfo {
             provider: value.provider.into(),
             host_configs,
             discount_percentage: value.pricing.discount_percentage.map(|v| v as f32),
+            long_context_token_threshold: value
+                .pricing
+                .long_context_token_threshold
+                .map(Into::into),
             context_window: LLMContextWindow {
                 is_configurable: value.context_window.is_configurable,
                 min: value.context_window.min.into(),

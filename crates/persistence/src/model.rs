@@ -1115,6 +1115,9 @@ pub struct ModelTokenUsage {
     pub byok_token_usage_by_category: HashMap<TokenUsageCategory, u32>,
     #[serde(default)]
     pub custom_endpoint_token_usage_by_category: HashMap<TokenUsageCategory, u32>,
+    /// Whether long-context pricing was used during the conversation.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub long_context_used: bool,
 }
 
 impl ModelTokenUsage {
@@ -1136,6 +1139,7 @@ impl ModelTokenUsage {
                     .iter()
                     .map(|(cat, tokens)| (cat.clone(), *tokens))
                     .collect(),
+                long_context_used: self.long_context_used,
             },
         ))
     }
@@ -1164,6 +1168,7 @@ impl ModelTokenUsage {
                     .iter()
                     .map(|(cat, tokens)| (cat.clone(), *tokens))
                     .collect(),
+                long_context_used: false,
             },
         ))
     }
@@ -1182,6 +1187,7 @@ impl ModelTokenUsage {
                     *acc.entry(cat.clone()).or_insert(0) += tokens;
                     acc
                 }),
+            long_context_used: self.long_context_used,
         }
     }
 }

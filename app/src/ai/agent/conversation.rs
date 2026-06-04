@@ -109,6 +109,7 @@ fn footer_model_token_usage(
                 ..Default::default()
             });
         entry.warp_tokens += usage.total_tokens;
+        entry.long_context_used |= usage.long_context_used;
         for (category, tokens) in &usage.token_usage_by_category {
             *entry
                 .warp_token_usage_by_category
@@ -124,6 +125,7 @@ fn footer_model_token_usage(
                 ..Default::default()
             });
         entry.byok_tokens += usage.total_tokens;
+        entry.long_context_used |= usage.long_context_used;
         for (category, tokens) in &usage.token_usage_by_category {
             *entry
                 .byok_token_usage_by_category

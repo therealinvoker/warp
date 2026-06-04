@@ -202,9 +202,12 @@ fn render_info_section(
         .finish();
     Container::new(description).with_margin_bottom(12.).finish()
 }
-fn render_long_context_pricing_warning(appearance: &Appearance) -> Box<dyn Element> {
+fn render_long_context_pricing_warning(
+    threshold_tokens: u32,
+    appearance: &Appearance,
+) -> Box<dyn Element> {
     render_warning_box(
-        WarningBoxConfig::formatted_title(long_context_pricing_warning_title()),
+        WarningBoxConfig::formatted_title(long_context_pricing_warning_title(threshold_tokens)),
         appearance,
     )
 }
@@ -426,11 +429,14 @@ fn render_context_window_row(
     let mut column = Flex::column()
         .with_child(Container::new(label_desc).with_margin_bottom(4.).finish())
         .with_child(slider_row);
-    if BlocklistAIPermissions::as_ref(app)
+    if let Some(threshold_tokens) = BlocklistAIPermissions::as_ref(app)
         .permissions_profile_for_id(app, view.profile_id())
-        .should_show_long_context_pricing_warning(view.dragged_context_window_value, app)
+        .long_context_pricing_warning_threshold(view.dragged_context_window_value, app)
     {
-        column.add_child(render_long_context_pricing_warning(appearance));
+        column.add_child(render_long_context_pricing_warning(
+            threshold_tokens,
+            appearance,
+        ));
     }
 
     Some(

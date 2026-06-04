@@ -300,6 +300,7 @@ fn model_token_usage_replays_custom_endpoint_usage_by_model_id() {
     assert_eq!(proto.model_id, "Friendly alias");
     assert_eq!(proto.total_tokens, 6);
     assert_eq!(proto.token_usage_by_category.get("primary_agent"), Some(&6));
+    assert!(!proto.long_context_used);
 }
 
 #[allow(deprecated)]
@@ -311,4 +312,43 @@ fn model_token_usage_replay_skips_non_custom_endpoint_entries() {
         ..Default::default()
     };
     assert!(warp_only.to_proto_custom_endpoint_usage().is_none());
+}
+
+#[test]
+fn model_token_usage_legacy_payload_defaults_long_context_used_to_false() {
+    let usage: ModelTokenUsage =
+        serde_json::from_str(r#"{"model_id":"warp-model"}"#).expect("deserialize legacy usage");
+
+    assert!(!usage.long_context_used);
+}
+
+#[test]
+fn model_token_usage_roundtrips_long_context_used() {
+    let usage = ModelTokenUsage {
+        model_id: "warp-model".to_string(),
+        long_context_used: true,
+        ..Default::default()
+    };
+
+    let json = serde_json::to_string(&usage).expect("serialize");
+    let roundtripped: ModelTokenUsage = serde_json::from_str(&json).expect("deserialize");
+
+    assert!(roundtripped.long_context_used);
+}
+
+#[allow(deprecated)]
+#[test]
+fn model_token_usage_replays_long_context_used_for_visible_models() {
+    let usage = ModelTokenUsage {
+        model_id: "warp-model".to_string(),
+        warp_tokens: 4,
+        long_context_used: true,
+        ..Default::default()
+    };
+
+    let (_, proto) = usage
+        .to_proto_warp_usage()
+        .expect("warp usage should serialize for replay");
+
+    assert!(proto.long_context_used);
 }

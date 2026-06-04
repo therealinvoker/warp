@@ -127,8 +127,34 @@ fn custom_endpoint_usage_metadata(
                 model_id: config_key.to_string(),
                 total_tokens,
                 token_usage_by_category: HashMap::from([(category, total_tokens)]),
+                long_context_used: false,
             },
         )]),
+    }
+}
+
+#[allow(deprecated)]
+fn visible_model_usage_metadata(
+    long_context_used: bool,
+) -> api::response_event::stream_finished::ConversationUsageMetadata {
+    api::response_event::stream_finished::ConversationUsageMetadata {
+        context_window_usage: 0.0,
+        credits_spent: 0.0,
+        platform_credits_spent: 0.0,
+        summarized: false,
+        token_usage: vec![],
+        tool_usage_metadata: None,
+        warp_token_usage: HashMap::from([(
+            "visible-model".to_string(),
+            api::response_event::stream_finished::ModelTokenUsage {
+                model_id: "visible-model".to_string(),
+                total_tokens: 4,
+                token_usage_by_category: HashMap::new(),
+                long_context_used,
+            },
+        )]),
+        byok_token_usage: HashMap::new(),
+        custom_endpoint_token_usage: HashMap::new(),
     }
 }
 
@@ -200,6 +226,18 @@ fn child_conversation_detection_uses_parent_agent_id() {
 
     assert!(conversation.is_child_agent_conversation());
     assert_eq!(conversation.parent_conversation_id(), None);
+}
+
+#[test]
+fn restored_conversation_uses_persisted_long_context_usage() {
+    let conversation_data: AgentConversationData = serde_json::from_str(
+        r#"{"server_conversation_token":null,"conversation_usage_metadata":{"was_summarized":false,"context_window_usage":0.0,"credits_spent":0.0,"token_usage":[{"model_id":"visible-model","long_context_used":true}]}}"#,
+    )
+    .unwrap();
+
+    let conversation = restored_conversation(Some(conversation_data));
+
+    assert!(conversation.token_usage()[0].long_context_used);
 }
 
 /// When the persisted task list is empty (e.g. a child conversation persisted
@@ -311,6 +349,79 @@ fn update_cost_and_usage_uses_fallback_label_for_unknown_custom_endpoint() {
     });
 }
 
+#[test]
+fn update_cost_and_usage_ingests_visible_model_long_context_usage() {
+    App::test((), |mut app| async move {
+        initialize_custom_endpoint_usage_test_app(&mut app);
+        app.add_singleton_model(LLMPreferences::new);
+
+        let mut conversation = AIConversation::new(false, false);
+        app.read(|ctx| {
+            conversation
+                .update_cost_and_usage_for_request(
+                    None,
+                    vec![],
+                    Some(visible_model_usage_metadata(true)),
+                    false,
+                    ctx,
+                )
+                .expect("visible model usage should update");
+        });
+
+        assert!(conversation.token_usage()[0].long_context_used);
+    });
+}
+
+#[test]
+fn update_cost_and_usage_ignores_custom_endpoint_long_context_usage() {
+    App::test((), |mut app| async move {
+        initialize_custom_endpoint_usage_test_app(&mut app);
+        app.add_singleton_model(LLMPreferences::new);
+
+        let mut usage_metadata = custom_endpoint_usage_metadata("missing-config-key", 9);
+        usage_metadata
+            .custom_endpoint_token_usage
+            .get_mut("missing-config-key")
+            .unwrap()
+            .long_context_used = true;
+
+        let mut conversation = AIConversation::new(false, false);
+        app.read(|ctx| {
+            conversation
+                .update_cost_and_usage_for_request(None, vec![], Some(usage_metadata), false, ctx)
+                .expect("custom endpoint usage should update");
+        });
+
+        assert!(!conversation.token_usage()[0].long_context_used);
+    });
+}
+
+#[allow(deprecated)]
+#[test]
+fn footer_model_token_usage_merges_visible_model_long_context_usage_with_or() {
+    App::test((), |mut app| async move {
+        initialize_custom_endpoint_usage_test_app(&mut app);
+        app.add_singleton_model(LLMPreferences::new);
+
+        let mut usage_metadata = visible_model_usage_metadata(false);
+        usage_metadata.byok_token_usage.insert(
+            "visible-model".to_string(),
+            api::response_event::stream_finished::ModelTokenUsage {
+                model_id: "visible-model".to_string(),
+                total_tokens: 6,
+                token_usage_by_category: HashMap::new(),
+                long_context_used: true,
+            },
+        );
+
+        let model_usage =
+            app.read(|ctx| footer_model_token_usage(&usage_metadata, LLMPreferences::as_ref(ctx)));
+
+        assert_eq!(model_usage.len(), 1);
+        assert!(model_usage[0].long_context_used);
+    });
+}
+
 #[allow(deprecated)]
 #[test]
 fn footer_model_token_usage_keeps_custom_endpoint_usage_distinct_from_same_labeled_models() {
@@ -347,6 +458,7 @@ fn footer_model_token_usage_keeps_custom_endpoint_usage_distinct_from_same_label
                     model_id: "Resolved custom".to_string(),
                     total_tokens: 4,
                     token_usage_by_category: HashMap::from([(category.clone(), 4)]),
+                    long_context_used: true,
                 },
             )]),
             custom_endpoint_token_usage: HashMap::from([(
@@ -355,6 +467,7 @@ fn footer_model_token_usage_keeps_custom_endpoint_usage_distinct_from_same_label
                     model_id: "config-key".to_string(),
                     total_tokens: 6,
                     token_usage_by_category: HashMap::from([(category.clone(), 6)]),
+                    long_context_used: true,
                 },
             )]),
         };
@@ -384,6 +497,8 @@ fn footer_model_token_usage_keeps_custom_endpoint_usage_distinct_from_same_label
         assert_eq!(byok_usage.warp_tokens, 0);
         assert_eq!(custom_usage.warp_tokens, 0);
         assert_eq!(custom_usage.byok_tokens, 0);
+        assert!(byok_usage.long_context_used);
+        assert!(!custom_usage.long_context_used);
     });
 }
 
@@ -411,6 +526,7 @@ fn footer_model_token_usage_preserves_unresolved_custom_endpoint_usage_with_fall
                     model_id: "missing-config-key".to_string(),
                     total_tokens: 9,
                     token_usage_by_category: HashMap::from([(category.clone(), 9)]),
+                    long_context_used: true,
                 },
             )]),
         };
@@ -432,6 +548,7 @@ fn footer_model_token_usage_preserves_unresolved_custom_endpoint_usage_with_fall
             Some(&9)
         );
         assert_eq!(custom_usage.warp_tokens, 0);
+        assert!(!custom_usage.long_context_used);
     });
 }
 

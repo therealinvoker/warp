@@ -4918,11 +4918,13 @@ impl AgentsWidget {
             .finish();
 
         let mut column = Flex::column().with_child(label).with_child(row);
-        if AISettingsPageView::active_profile_data(app)
-            .should_show_long_context_pricing_warning(view.dragged_context_window_value, app)
+        if let Some(threshold_tokens) = AISettingsPageView::active_profile_data(app)
+            .long_context_pricing_warning_threshold(view.dragged_context_window_value, app)
         {
             column.add_child(render_warning_box(
-                WarningBoxConfig::formatted_title(long_context_pricing_warning_title()),
+                WarningBoxConfig::formatted_title(long_context_pricing_warning_title(
+                    threshold_tokens,
+                )),
                 appearance,
             ));
         }

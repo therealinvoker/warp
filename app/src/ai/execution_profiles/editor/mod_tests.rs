@@ -1,12 +1,11 @@
 use std::collections::HashMap;
 
-use warp_core::features::FeatureFlag;
 use warpui::App;
 
 use super::ui_helpers::context_window_snap_values;
 use crate::ai::execution_profiles::profiles::AIExecutionProfilesModel;
 use crate::ai::execution_profiles::{
-    has_configurable_context_window, should_show_long_context_pricing_warning, AIExecutionProfile,
+    has_configurable_context_window, long_context_pricing_warning_threshold, AIExecutionProfile,
     AIExecutionProfileAppExt as _,
 };
 use crate::ai::llms::{
@@ -42,6 +41,7 @@ fn configurable_model(provider: LLMProvider) -> LLMInfo {
         provider,
         host_configs: HashMap::new(),
         discount_percentage: None,
+        long_context_token_threshold: Some(272_000),
         context_window: LLMContextWindow {
             is_configurable: true,
             min: 200_000,
@@ -54,14 +54,10 @@ fn configurable_model(provider: LLMProvider) -> LLMInfo {
 fn assert_context_window_limit_for_request(
     model: &LLMInfo,
     selected_limit: Option<u32>,
-    gpt_configurable_context_window_enabled: bool,
     expected: Option<u32>,
 ) {
     let model = model.clone();
     App::test((), move |mut app| async move {
-        let _flag = FeatureFlag::GPTConfigurableContextWindow
-            .override_enabled(gpt_configurable_context_window_enabled);
-
         initialize_settings_for_tests(&mut app);
         app.add_singleton_model(|_| ServerApiProvider::new_for_test());
         app.add_singleton_model(|_| AuthStateProvider::new_for_test());
@@ -188,21 +184,18 @@ fn snap_values_keep_count_reasonable_for_huge_range() {
 fn openai_long_context_warning_starts_above_threshold() {
     let model = configurable_model(LLMProvider::OpenAI);
 
-    assert!(!should_show_long_context_pricing_warning(
-        &model,
-        Some(200_000),
-        true
-    ));
-    assert!(!should_show_long_context_pricing_warning(
-        &model,
-        Some(272_000),
-        true
-    ));
-    assert!(should_show_long_context_pricing_warning(
-        &model,
-        Some(272_001),
-        true
-    ));
+    assert_eq!(
+        long_context_pricing_warning_threshold(&model, Some(200_000)),
+        None
+    );
+    assert_eq!(
+        long_context_pricing_warning_threshold(&model, Some(272_000)),
+        None
+    );
+    assert_eq!(
+        long_context_pricing_warning_threshold(&model, Some(272_001)),
+        Some(272_000)
+    );
 }
 
 #[test]
@@ -210,24 +203,34 @@ fn openai_long_context_warning_clamps_stale_override_to_lowered_model_max() {
     let mut model = configurable_model(LLMProvider::OpenAI);
     model.context_window.max = 272_000;
 
-    assert!(!should_show_long_context_pricing_warning(
-        &model,
-        Some(1_000_000),
-        true
-    ));
+    assert_eq!(
+        long_context_pricing_warning_threshold(&model, Some(1_000_000)),
+        None
+    );
+}
+
+#[test]
+fn openai_configurable_context_without_server_threshold_does_not_warn() {
+    let mut model = configurable_model(LLMProvider::OpenAI);
+    model.long_context_token_threshold = None;
+
+    assert_eq!(
+        long_context_pricing_warning_threshold(&model, Some(1_000_000)),
+        None
+    );
 }
 
 #[test]
 fn openai_request_limit_is_clamped_when_configurable_context_is_available() {
     let model = configurable_model(LLMProvider::OpenAI);
-    assert_context_window_limit_for_request(&model, Some(1_500_000), true, Some(1_000_000));
+    assert_context_window_limit_for_request(&model, Some(1_500_000), Some(1_000_000));
 }
 
 #[test]
 fn openai_request_limit_remains_unset_without_a_selected_override() {
     let model = configurable_model(LLMProvider::OpenAI);
 
-    assert_context_window_limit_for_request(&model, None, true, None);
+    assert_context_window_limit_for_request(&model, None, None);
 }
 
 #[test]
@@ -235,26 +238,24 @@ fn custom_endpoint_fixed_context_does_not_expose_control_or_warning() {
     let mut model = configurable_model(LLMProvider::Unknown);
     model.context_window.is_configurable = false;
     model.context_window.max = 200_000;
-    assert!(!has_configurable_context_window(&model, false));
-    assert_context_window_limit_for_request(&model, Some(1_000_000), false, None);
-    assert!(!should_show_long_context_pricing_warning(
-        &model,
-        Some(1_000_000),
-        false
-    ));
+    assert!(!has_configurable_context_window(&model));
+    assert_context_window_limit_for_request(&model, Some(1_000_000), None);
+    assert_eq!(
+        long_context_pricing_warning_threshold(&model, Some(1_000_000)),
+        None
+    );
 }
 
 #[test]
 fn openai_configurable_context_uses_server_metadata_without_model_or_host_allowlist() {
     let mut model = configurable_model(LLMProvider::OpenAI);
     model.base_model_name = "new-server-configurable-model".to_string();
-    assert!(has_configurable_context_window(&model, true));
-    assert_context_window_limit_for_request(&model, Some(1_000_000), true, Some(1_000_000));
-    assert!(should_show_long_context_pricing_warning(
-        &model,
-        Some(1_000_000),
-        true
-    ));
+    assert!(has_configurable_context_window(&model));
+    assert_context_window_limit_for_request(&model, Some(1_000_000), Some(1_000_000));
+    assert_eq!(
+        long_context_pricing_warning_threshold(&model, Some(1_000_000)),
+        Some(272_000)
+    );
 }
 
 #[test]
@@ -266,50 +267,34 @@ fn openai_fixed_context_metadata_does_not_expose_control_or_warning() {
         max: 272_000,
         default_max: 272_000,
     };
-    assert!(!has_configurable_context_window(&model, true));
-    assert_context_window_limit_for_request(&model, Some(1_000_000), true, None);
-    assert!(!should_show_long_context_pricing_warning(
-        &model,
-        Some(1_000_000),
-        true
-    ));
+    assert!(!has_configurable_context_window(&model));
+    assert_context_window_limit_for_request(&model, Some(1_000_000), None);
+    assert_eq!(
+        long_context_pricing_warning_threshold(&model, Some(1_000_000)),
+        None
+    );
 }
 
 #[test]
 fn openai_configurable_context_does_not_require_direct_host_metadata() {
     let model = configurable_model(LLMProvider::OpenAI);
 
-    assert!(has_configurable_context_window(&model, true));
-    assert_context_window_limit_for_request(&model, Some(1_000_000), true, Some(1_000_000));
-    assert!(should_show_long_context_pricing_warning(
-        &model,
-        Some(1_000_000),
-        true
-    ));
+    assert!(has_configurable_context_window(&model));
+    assert_context_window_limit_for_request(&model, Some(1_000_000), Some(1_000_000));
+    assert_eq!(
+        long_context_pricing_warning_threshold(&model, Some(1_000_000)),
+        Some(272_000)
+    );
 }
 
 #[test]
-fn openai_expanded_context_is_hidden_while_feature_flag_is_off() {
-    let model = configurable_model(LLMProvider::OpenAI);
-
-    assert!(!has_configurable_context_window(&model, false));
-    assert_context_window_limit_for_request(&model, Some(1_000_000), false, None);
-    assert!(!should_show_long_context_pricing_warning(
-        &model,
-        Some(1_000_000),
-        false
-    ));
-}
-
-#[test]
-fn non_openai_configurable_context_ignores_gpt_flag_and_does_not_show_openai_warning() {
+fn non_openai_configurable_context_does_not_show_openai_warning() {
     let model = configurable_model(LLMProvider::Anthropic);
 
-    assert!(has_configurable_context_window(&model, false));
-    assert_context_window_limit_for_request(&model, Some(1_000_000), false, Some(1_000_000));
-    assert!(!should_show_long_context_pricing_warning(
-        &model,
-        Some(1_000_000),
-        false
-    ));
+    assert!(has_configurable_context_window(&model));
+    assert_context_window_limit_for_request(&model, Some(1_000_000), Some(1_000_000));
+    assert_eq!(
+        long_context_pricing_warning_threshold(&model, Some(1_000_000)),
+        None
+    );
 }
