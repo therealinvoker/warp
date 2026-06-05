@@ -6,7 +6,7 @@ use pathfinder_geometry::vector::Vector2F;
 use warp_core::ui::theme::Fill;
 use warp_editor::render::model::RenderState;
 use warpui::elements::{
-    ChildView, ConstrainedBox, Container, CornerRadius, CrossAxisAlignment, Flex,
+    Border, ChildView, ConstrainedBox, Container, CornerRadius, CrossAxisAlignment, Flex,
     MainAxisAlignment, ParentElement, Radius, Shrinkable, Text,
 };
 use warpui::text_layout::ClipConfig;
@@ -17,11 +17,11 @@ use warpui::{
 };
 
 use crate::appearance::Appearance;
+use crate::code::editor::EditorReviewComment;
 use crate::code::editor::comment_editor::{
-    create_readonly_comment_markdown_editor, DEFAULT_COMMENT_MAX_WIDTH,
+    DEFAULT_COMMENT_MAX_WIDTH, create_readonly_comment_markdown_editor,
 };
 use crate::code::editor::line::EditorLineLocation;
-use crate::code::editor::EditorReviewComment;
 use crate::code_review::comments::{CommentId, CommentOrigin};
 use crate::notebooks::editor::view::RichTextEditorView;
 use crate::ui_components::blended_colors;
@@ -246,7 +246,8 @@ impl View for InlineCommentView {
     fn render(&self, ctx: &AppContext) -> Box<dyn Element> {
         let appearance = Appearance::as_ref(ctx);
         let theme = appearance.theme();
-        let background = blended_colors::neutral_1(theme);
+        let background = blended_colors::neutral_2(theme);
+        let border_color = blended_colors::neutral_4(theme);
 
         let column = Flex::column()
             .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
@@ -254,11 +255,15 @@ impl View for InlineCommentView {
             .with_child(self.render_metadata_row(appearance, background))
             .with_child(ChildView::new(&self.body_editor).finish())
             .finish();
-
-        Container::new(column)
-            .with_uniform_padding(8.)
-            .with_background_color(background)
-            .with_corner_radius(CornerRadius::with_all(Radius::Pixels(8.)))
-            .finish()
+        ConstrainedBox::new(
+            Container::new(column)
+                .with_uniform_padding(8.)
+                .with_background_color(background)
+                .with_corner_radius(CornerRadius::with_all(Radius::Pixels(8.)))
+                .with_border(Border::all(1.).with_border_fill(border_color))
+                .finish(),
+        )
+        .with_max_width(DEFAULT_COMMENT_MAX_WIDTH)
+        .finish()
     }
 }

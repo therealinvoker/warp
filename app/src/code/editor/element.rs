@@ -1,22 +1,23 @@
 mod gutter_button;
 use std::ops::Range;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 pub use gutter_button::{AddAsContextButton, CommentButton, RevertHunkButton};
 use parking_lot::Mutex;
 use pathfinder_color::ColorU;
 use pathfinder_geometry::rect::RectF;
-use pathfinder_geometry::vector::{vec2f, Vector2F};
+use pathfinder_geometry::vector::{Vector2F, vec2f};
 use warp_core::features::FeatureFlag;
 use warp_core::ui::appearance::Appearance;
-use warp_core::ui::theme::color::internal_colors;
 use warp_core::ui::theme::Fill;
+use warp_core::ui::theme::color::internal_colors;
 use warp_editor::editor::EditorView;
 use warp_editor::render::element::lens_element::RichTextElementLens;
 use warp_editor::render::element::{RenderableBlock, RichTextElement, VerticalExpansionBehavior};
 use warp_editor::render::model::{
-    gutter_expansion_button_types, BlockLocation, ExpansionType, LineCount, RenderState,
+    BlockItem, BlockLocation, ExpansionType, LineCount, RenderLineLocation, RenderState,
+    gutter_expansion_button_types,
 };
 use warpui::elements::new_scrollable::{NewScrollableElement, ScrollableAxis};
 use warpui::elements::{
@@ -854,7 +855,28 @@ impl<V: EditorView> EditorWrapper<V> {
             }
             if block.is_embedded_comment() {
                 let height = block.viewport_item().content_size.y();
-                let diff_range = if is_removal {
+                let embedded_comment_location = model
+                    .content()
+                    .block_at_height(block.viewport_item().height())
+                    .and_then(|positioned| match positioned.item {
+                        BlockItem::EmbeddedComment { location, .. } => Some(*location),
+                        _ => None,
+                    });
+                let is_removed_comment = matches!(
+                    embedded_comment_location,
+                    Some(RenderLineLocation::Temporary { .. })
+                );
+                let diff_hunk = if is_removed_comment {
+                    match diff_hunk {
+                        Some(DiffHunkDisplay::Replacement { remove_color, .. }) => {
+                            Some(DiffHunkDisplay::Remove(remove_color))
+                        }
+                        diff_hunk => diff_hunk,
+                    }
+                } else {
+                    diff_hunk
+                };
+                let diff_range = if is_removed_comment || is_removal {
                     self.diff_status.removed_diff_range(line_count)
                 } else {
                     self.diff_status.added_diff_range(line_count)
@@ -888,7 +910,7 @@ impl<V: EditorView> EditorWrapper<V> {
                     line,
                     element_type: GutterElementType::DiffHunk {
                         hunk: diff_hunk,
-                        change_type: if is_removal {
+                        change_type: if is_removed_comment || is_removal {
                             ChangeType::Remove
                         } else {
                             ChangeType::Add
