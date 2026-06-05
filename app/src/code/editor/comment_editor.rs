@@ -41,11 +41,33 @@ pub(crate) const DEFAULT_COMMENT_MAX_WIDTH: f32 = 750.0;
 /// internally instead of growing further.
 pub(crate) const MAX_COMMENT_HEIGHT: f32 = 200.0;
 
-/// Fixed vertical chrome around the inner comment editor: the editor area's top/bottom padding
-/// (8 + 4), the footer's vertical padding and top border (8 + 1), the footer button row
-/// (`ButtonSize::Small` is 24px tall), and the outer container's top/bottom border (2).
+// ── Comment-shell layout constants ───────────────────────────────────────────
+// These values mirror the padding/border used in `render_inline_comment_shell`.
+// Keeping them as named constants means `COMMENT_CHROME_HEIGHT` stays in sync
+// with the shell's visual layout automatically.
+
+/// Top padding of the body area inside the comment shell.
+const COMMENT_BODY_TOP_PADDING: f32 = 8.0;
+/// Bottom padding of the body area inside the comment shell.
+const COMMENT_BODY_BOTTOM_PADDING: f32 = 4.0;
+/// Vertical padding of the footer row (top + bottom).
+const COMMENT_FOOTER_VERTICAL_PADDING: f32 = 4.0 * 2.0;
+/// Top border separating body from footer.
+const COMMENT_FOOTER_BORDER: f32 = 1.0;
+/// Outer container border (top + bottom).
+const COMMENT_OUTER_BORDER: f32 = 1.0 * 2.0;
+/// Height of the footer button row (`ButtonSize::Small` at default appearance).
+const COMMENT_BUTTON_ROW_HEIGHT: f32 = 24.0;
+
+/// Fixed vertical chrome around the inner comment editor.
 /// Slightly generous so the reserved inline block is never shorter than the painted shell.
-pub(crate) const COMMENT_CHROME_HEIGHT: f32 = 48.0;
+pub(crate) const COMMENT_CHROME_HEIGHT: f32 = COMMENT_BODY_TOP_PADDING
+    + COMMENT_BODY_BOTTOM_PADDING
+    + COMMENT_FOOTER_VERTICAL_PADDING
+    + COMMENT_FOOTER_BORDER
+    + COMMENT_BUTTON_ROW_HEIGHT
+    + COMMENT_OUTER_BORDER
+    + 1.0; // extra pixel of tolerance
 
 pub(crate) fn inline_comment_background(appearance: &Appearance) -> ColorU {
     blended_colors::neutral_2(appearance.theme())
@@ -66,8 +88,8 @@ pub(crate) fn render_inline_comment_shell(
     let border_color = inline_comment_border_color(appearance);
 
     let body = Container::new(Clipped::new(body).finish())
-        .with_padding_bottom(4.)
-        .with_padding_top(8.)
+        .with_padding_bottom(COMMENT_BODY_BOTTOM_PADDING)
+        .with_padding_top(COMMENT_BODY_TOP_PADDING)
         .with_horizontal_padding(12.)
         .finish();
     let body = if max_height.is_some() {
@@ -80,9 +102,9 @@ pub(crate) fn render_inline_comment_shell(
         .with_child(body)
         .with_child(
             Container::new(footer_row)
-                .with_vertical_padding(4.)
+                .with_vertical_padding(COMMENT_FOOTER_VERTICAL_PADDING / 2.0)
                 .with_horizontal_padding(footer_horizontal_padding)
-                .with_border(Border::top(1.).with_border_fill(border_color))
+                .with_border(Border::top(COMMENT_FOOTER_BORDER).with_border_fill(border_color))
                 .finish(),
         )
         .finish();
@@ -95,7 +117,7 @@ pub(crate) fn render_inline_comment_shell(
     Container::new(constrained.finish())
         .with_corner_radius(CornerRadius::with_all(Radius::Pixels(8.)))
         .with_background_color(background)
-        .with_border(Border::all(1.).with_border_fill(border_color))
+        .with_border(Border::all(COMMENT_OUTER_BORDER / 2.0).with_border_fill(border_color))
         .finish()
 }
 

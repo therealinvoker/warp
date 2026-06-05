@@ -32,6 +32,10 @@ use crate::code_review::comments::CommentId;
 /// the whole comment is visible/scrollable inline; this is just a generous layout constraint.
 const UNBOUNDED_COMMENT_HEIGHT: f32 = 100_000.0;
 
+/// Height of the first visible line used for `first_line_bound` in inline comment blocks.
+/// Matches `ButtonSize::Small.button_height()` at the default appearance (24px).
+const INLINE_COMMENT_FIRST_LINE_HEIGHT: f32 = 24.0;
+
 const COMMENT_ID_MAPPING_KEY: &str = "comment_id";
 const ENTITY_ID_MAPPING_KEY: &str = "entity_id";
 const WINDOW_ID_MAPPING_KEY: &str = "window_id";
@@ -167,7 +171,7 @@ impl LaidOutEmbeddedItem for LaidOutEmbeddedCommentSpace {
     }
 
     fn first_line_bound(&self) -> Vector2F {
-        vec2f(self.size.x(), 24.0)
+        vec2f(self.size.x(), INLINE_COMMENT_FIRST_LINE_HEIGHT)
     }
 
     fn element(
@@ -375,7 +379,7 @@ impl LaidOutEmbeddedItem for LaidOutInlineSavedComment {
     }
 
     fn first_line_bound(&self) -> Vector2F {
-        vec2f(self.size.x(), 24.0)
+        vec2f(self.size.x(), INLINE_COMMENT_FIRST_LINE_HEIGHT)
     }
 
     fn element(

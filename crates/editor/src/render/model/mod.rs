@@ -2804,6 +2804,14 @@ impl RenderState {
                 }
             }
         }
+        if !current.is_empty() || !temporary.is_empty() {
+            log::debug!(
+                "reset_comment_blocks: {} current and {} temporary comment blocks had no matching \
+                 anchor line and were dropped",
+                current.len(),
+                temporary.len(),
+            );
+        }
         self.has_final_trailing_newline
             .set(Self::tree_ends_with_trailing_newline(&new_tree));
         *self.content.borrow_mut() = new_tree;
@@ -2909,8 +2917,11 @@ impl RenderState {
             sub_tree_cursor.descend_to_first_item(&sub_tree, |_| true);
 
             while let Some(item) = sub_tree_cursor.item() {
-                // Do not remove the temporary blocks within the replaced range.
-                if matches!(item, BlockItem::TemporaryBlock { .. }) {
+                // Do not remove the temporary or comment blocks within the replaced range.
+                if matches!(
+                    item,
+                    BlockItem::TemporaryBlock { .. } | BlockItem::EmbeddedComment { .. }
+                ) {
                     new_tree.push(item.clone());
                 }
 
@@ -2944,10 +2955,12 @@ impl RenderState {
                 // exclusive, we can't otherwise represent "before the first block".
                 if effective_end > CharOffset::zero() {
                     if let Some(item) = cursor.item() {
-                        // Do not remove the temporary blocks within the replaced range.
-                        if matches!(item, BlockItem::TemporaryBlock { .. })
-                            || (cursor.end() > effective_end
-                                && matches!(item, BlockItem::Hidden(_)))
+                        // Do not remove the temporary or comment blocks within the replaced range.
+                        if matches!(
+                            item,
+                            BlockItem::TemporaryBlock { .. } | BlockItem::EmbeddedComment { .. }
+                        ) || (cursor.end() > effective_end
+                            && matches!(item, BlockItem::Hidden(_)))
                         {
                             new_tree.push(item.clone());
                         }

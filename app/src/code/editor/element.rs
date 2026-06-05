@@ -52,6 +52,7 @@ fn highlight_element(appearance: &Appearance) -> Box<dyn Element> {
         .with_border(Border::all(2.).with_border_fill(border_color))
         .finish()
 }
+
 fn should_hide_comment_gutter_icons(
     has_attached_comment: bool,
     has_open_comment_box: bool,
@@ -603,10 +604,13 @@ impl<V: EditorView> EditorWrapper<V> {
         // Inline comment blocks are inserted immediately after their anchor line, so a block that
         // belongs to this decoration starts at the decoration's current bottom edge. Allow a small
         // tolerance for float-to-pixel conversions and for zero-height intermediate items.
+        const DECORATION_TOLERANCE: f32 = 0.5;
         let position_start = position.start_y_offset.as_f32();
         let decoration_start = decoration_start_y.as_f32();
         let decoration_end = decoration_end_y.as_f32();
-        if position_start + 0.5 < decoration_start || position_start - 0.5 > decoration_end {
+        if position_start + DECORATION_TOLERANCE < decoration_start
+            || position_start - DECORATION_TOLERANCE > decoration_end
+        {
             return;
         }
 
