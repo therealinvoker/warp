@@ -1,4 +1,4 @@
-use std::io::{self, Write};
+use std::io::{self, BufWriter, Write};
 
 use crossterm::cursor;
 use crossterm::execute;
@@ -6,7 +6,7 @@ use crossterm::queue;
 use crossterm::style::{
     Attribute, Color as CtColor, Print, SetAttribute, SetBackgroundColor, SetForegroundColor,
 };
-use crossterm::terminal::{self, ClearType};
+use crossterm::terminal;
 
 use crate::cell::{Cell, CellAttr, CellFlags, Color};
 
@@ -86,11 +86,9 @@ fn compute_layout(frame: &Frame) -> Layout {
 }
 
 pub fn render(frame: &Frame) -> anyhow::Result<()> {
-    let mut stdout = io::stdout();
+    let mut stdout = BufWriter::with_capacity(65536, io::stdout().lock());
     let layout = compute_layout(frame);
     let cols = frame.total_cols as usize;
-
-    queue!(stdout, terminal::Clear(ClearType::All))?;
 
     // --- Scrollback region (pinned to top) ---
     let mut next_row: u16 = 0;
@@ -133,6 +131,14 @@ pub fn render(frame: &Frame) -> anyhow::Result<()> {
     if let Some((buf, cursor_pos)) = frame.agent_input {
         queue!(stdout, cursor::MoveTo(0, next_row))?;
         render_agent_input(&mut stdout, buf, cursor_pos, cols)?;
+        next_row += 1;
+    }
+
+    // --- Blank stale rows between content and status bar ---
+    while next_row < layout.status_bar_row {
+        queue!(stdout, cursor::MoveTo(0, next_row))?;
+        render_blank_row(&mut stdout, cols)?;
+        next_row += 1;
     }
 
     // --- Status bar ---
@@ -179,7 +185,7 @@ fn cell_bg(color: Color) -> CtColor {
     }
 }
 
-fn render_cell_row(stdout: &mut io::Stdout, row: &[Cell], cols: usize) -> anyhow::Result<()> {
+fn render_cell_row(stdout: &mut impl Write, row: &[Cell], cols: usize) -> anyhow::Result<()> {
     let mut prev_attr: Option<CellAttr> = None;
 
     for (i, cell) in row.iter().enumerate().take(cols) {
@@ -216,7 +222,7 @@ fn render_cell_row(stdout: &mut io::Stdout, row: &[Cell], cols: usize) -> anyhow
     Ok(())
 }
 
-fn apply_cell_attr(stdout: &mut io::Stdout, attr: &CellAttr) -> anyhow::Result<()> {
+fn apply_cell_attr(stdout: &mut impl Write, attr: &CellAttr) -> anyhow::Result<()> {
     queue!(stdout, SetAttribute(Attribute::Reset))?;
 
     let (fg, bg) = if attr.flags.contains(CellFlags::INVERSE) {
@@ -250,7 +256,7 @@ fn apply_cell_attr(stdout: &mut io::Stdout, attr: &CellAttr) -> anyhow::Result<(
     Ok(())
 }
 
-fn render_blank_row(stdout: &mut io::Stdout, cols: usize) -> anyhow::Result<()> {
+fn render_blank_row(stdout: &mut impl Write, cols: usize) -> anyhow::Result<()> {
     queue!(
         stdout,
         SetAttribute(Attribute::Reset),
@@ -264,7 +270,7 @@ fn render_blank_row(stdout: &mut io::Stdout, cols: usize) -> anyhow::Result<()> 
 }
 
 fn render_agent_status(
-    stdout: &mut io::Stdout,
+    stdout: &mut impl Write,
     text: &str,
     cols: usize,
 ) -> anyhow::Result<()> {
@@ -286,7 +292,7 @@ fn render_agent_status(
 }
 
 fn render_agent_input(
-    stdout: &mut io::Stdout,
+    stdout: &mut impl Write,
     buf: &str,
     cursor_pos: usize,
     cols: usize,
@@ -343,7 +349,7 @@ fn format_status_bar_content(mode: &str, model: &str, hint: &str, width: usize) 
 }
 
 fn render_status_bar_row(
-    stdout: &mut io::Stdout,
+    stdout: &mut impl Write,
     sb: &StatusBar<'_>,
     cols: usize,
 ) -> anyhow::Result<()> {
