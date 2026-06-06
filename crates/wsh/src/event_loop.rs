@@ -510,8 +510,11 @@ impl Wsh {
         let mut rows = self.miniterm.take_scrolled_out();
         rows.extend(self.miniterm.grid().iter().cloned());
         self.blocks.add_block(rows);
-        let usable = self.rows.saturating_sub(1);
-        self.miniterm.resize(self.cols, usable);
+        // Reset rather than resize: resize preserves content, which causes
+        // the same grid to be re-captured on every subsequent PromptStart
+        // (duplicate blocks) and keeps a stale cursor position that inflates
+        // active_height, starving the scrollback region of display rows.
+        self.miniterm.reset();
     }
 
     fn drain_pty(&mut self, buf: &mut [u8]) {
