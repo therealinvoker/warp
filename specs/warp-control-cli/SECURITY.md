@@ -1,7 +1,7 @@
 # warpctrl security architecture
 `warpctrl` is a local-control CLI for an already-running Warp app instance. The design is external-only: all callers are same-user processes. There is no inside-Warp/outside-Warp distinction, no verified-terminal invocation context, and no authenticated-user identity layer.
 The security architecture has five layers:
-1. **Protected enablement:** A single Scripting setting (disabled by default, enabled by the user) stored in protected local storage.
+1. **Protected enablement:** A single Scripting setting (enabled by default, disableable by the user) stored in protected local storage.
 2. **Owner-only discovery:** Per-user filesystem discovery with owner-only permissions finds compatible instances without granting control authority.
 3. **Same-user credential broker:** A Unix-domain socket authenticates the OS user through kernel peer credentials and issues short-lived exact-action credentials. The broker authenticates the OS user, not the calling application.
 4. **Loopback HTTP transport:** An instance-local listener on `127.0.0.1` carries typed requests with broker-issued credentials.
@@ -56,8 +56,8 @@ A hostile same-user process that can automate the Warp UI, read local state, or 
 - Remote control over network transports (requires a separate security design).
 ## Protected enablement
 Scripting has a single setting:
-- **Disabled** (default): no credentials are issued, no control requests are accepted, discovery records contain no actionable endpoint.
-- **Enabled**: same-user processes may request exact-action credentials and send control requests.
+- **Enabled** (default): same-user processes may request exact-action credentials and send control requests.
+- **Disabled**: no credentials are issued, no control requests are accepted, discovery records contain no actionable endpoint.
 The authoritative value is stored in the most secure local storage available:
 - **macOS:** Keychain, constrained to Warp-signed code where the platform supports it.
 - **Linux:** Platform secret service where available; owner-only file fallback with the weaker same-user protection explicitly documented.
@@ -65,7 +65,7 @@ The setting is:
 - Local-only: never synced through Settings Sync, Warp Drive, or server-backed preferences.
 - Private: never appears in `settings.toml`, generated schemas, or any user-editable settings surface.
 - App-controlled: only the running Warp app through Settings > Scripting can change it. `warpctrl`, shell scripts, config files, registry edits, `defaults write`, and direct protocol requests cannot enable or change it.
-- Fail-closed: when no valid protected value is available, defaults to disabled.
+- Default-enabled: when no valid protected value is available, defaults to enabled.
 Disabling Scripting immediately prevents new credential issuance and invalidates outstanding credentials. The control listener rejects all requests with `local_control_disabled`.
 ## Discovery registry
 Each enabled Warp process writes a discovery record in a secure per-user directory.
@@ -116,7 +116,7 @@ Three destructive actions (`window.close`, `tab.close`, `pane.close`) require on
 1. After credential verification, the bridge checks if the action requires confirmation.
 2. The bridge presents a brief in-app confirmation to the user.
 3. If approved, the bridge proceeds with handler dispatch.
-4. If declined or ignored, the bridge returns `confirmation_declined`.
+4. If declined, the bridge returns `user_confirmation_denied`. If the confirmation times out, the bridge returns `user_confirmation_expired`.
 The confirmation is per-invocation. There is no persistent "always allow" option. All other 72 actions execute immediately after credential verification.
 ### Confused-deputy mitigation
 The broker authenticates the OS user, not the calling application. Any same-user process can request credentials. Mitigations:
@@ -146,7 +146,7 @@ The bridge:
 2. Parses the typed request envelope.
 3. Verifies protocol version compatibility.
 4. Compares the requested action to the granted action. Rejects mismatches with `insufficient_permissions`.
-5. For close actions: presents one-shot confirmation. Rejects with `confirmation_declined` if declined.
+5. For close actions: presents one-shot confirmation. Rejects with `user_confirmation_denied` if declined or `user_confirmation_expired` if timed out.
 6. Resolves targets deterministically. Rejects ambiguous, missing, or stale targets with structured errors.
 7. Invokes only the allowlisted typed handler.
 ## Target scoping
@@ -174,7 +174,9 @@ Structured errors are part of the security contract:
 - `local_control_disabled` — Scripting is disabled.
 - `unauthorized_local_client` — missing, malformed, expired, or invalid credential.
 - `insufficient_permissions` — credential grants a different action.
-- `confirmation_declined` — user declined one-shot close confirmation.
+- `user_confirmation_required` — action requires one-shot confirmation that has not been presented yet.
+- `user_confirmation_denied` — user declined one-shot close confirmation.
+- `user_confirmation_expired` — one-shot confirmation timed out without a response.
 - `ambiguous_instance` — multiple instances, no unambiguous selection.
 - `ambiguous_target` — multiple matching targets.
 - `stale_target` — explicit target ID no longer exists.
