@@ -13,7 +13,7 @@ The design is external-only: all callers are same-user processes. There is no in
 ## Proposed changes
 ### 0. Security architecture dependency
 Before implementing any local-control listener, CLI command, credential path, or action handler, the implementation must be checked against `SECURITY.md`. Required security gates:
-- Scripting has a single setting: disabled (default) or enabled.
+- Scripting has a single setting: enabled (default) or disabled.
 - The authoritative value lives in protected local storage, not ordinary preferences.
 - When disabled, no credentials are issued, no control requests are accepted, and discovery records contain no actionable endpoint.
 - When enabled, same-user processes may request exact-action credentials from the broker.
@@ -69,7 +69,7 @@ Error response:
   }
 }
 ```
-Error codes include: `local_control_disabled`, `unauthorized_local_client`, `insufficient_permissions`, `confirmation_declined`, `ambiguous_instance`, `ambiguous_target`, `stale_target`, `missing_target`, `invalid_request`, `invalid_selector`, `invalid_params`, `unsupported_action`, `not_allowlisted`, `target_state_conflict`, `no_instance`.
+Error codes include: `local_control_disabled`, `unauthorized_local_client`, `insufficient_permissions`, `user_confirmation_required`, `user_confirmation_denied`, `user_confirmation_expired`, `ambiguous_instance`, `ambiguous_target`, `stale_target`, `missing_target`, `invalid_request`, `invalid_selector`, `invalid_params`, `unsupported_action`, `not_allowlisted`, `target_state_conflict`, `no_instance`.
 ### 2. Per-process discovery
 Keep the existing fixed-port `9277` HTTP behavior intact. Add a separate local-control listener per process.
 Design:
@@ -123,7 +123,7 @@ HTTP handler (Tokio thread)
 
 LocalControlBridge::handle_request (main thread)
   ├─ verify the credential grants the exact requested action
-  ├─ for close actions: present one-shot confirmation, fail with confirmation_declined if declined
+  ├─ for close actions: present one-shot confirmation, fail with user_confirmation_denied/expired if not approved
   ├─ match request.action.kind
   │   └─ ActionKind::TabCreate
   │       ├─ resolve window: active window, or sole window, or missing_target/ambiguous_target
@@ -154,7 +154,7 @@ Target resolution happens after credential authentication and exact-action verif
 The 3 close actions (`window.close`, `tab.close`, `pane.close`) have a confirmation gate in the bridge:
 1. After exact-action credential verification, the bridge checks if the action requires confirmation.
 2. If so, the bridge presents a brief in-app confirmation dialog to the user.
-3. The user must approve. If declined or ignored, the bridge returns `confirmation_declined`.
+3. The user must approve. If declined, the bridge returns `user_confirmation_denied`. If the confirmation times out, the bridge returns `user_confirmation_expired`.
 4. If approved, the bridge proceeds with target resolution and handler dispatch.
 The confirmation is per-invocation. There is no "always allow" setting. All other 72 actions skip this step.
 ### 8. CLI parsing and output
@@ -184,7 +184,7 @@ The first implementation slice proves the end-to-end architecture:
 - Shared protocol types and error envelopes.
 - `FeatureFlag::WarpControlCli` and Cargo feature.
 - Settings > Scripting page with enabled/disabled toggle.
-- Protected local-only mode storage (defaults disabled).
+- Protected local-only mode storage (defaults enabled).
 - Discovery registry and CLI instance selection.
 - `warpctrl` wrapper entrypoint with `--warpctrl` control-mode dispatch.
 - Per-process credential broker (Unix socket, peer credential check).
@@ -238,7 +238,7 @@ sequenceDiagram
 - **Catalog invariant:** Every `ActionKind` with `Implemented` status has a parseable `warpctrl` CLI route, generated help/completion coverage, and an app-side bridge handler.
 - **Scripting gate:** Disabled state rejects all credential requests and control requests. Enabled state allows them. Toggling invalidates outstanding credentials.
 - **Credential model:** Raw credentials never appear in discovery records. Credentials are instance-bound, action-bound, and short-lived. A credential for one action fails with `insufficient_permissions` for any other action.
-- **One-shot confirmation:** Close actions fail with `confirmation_declined` when declined. Non-close actions skip confirmation.
+- **One-shot confirmation:** Close actions fail with `user_confirmation_denied` when declined and `user_confirmation_expired` when timed out. Non-close actions skip confirmation.
 - **Selector resolution:** Tests for active, explicit ID, index, stale target, ambiguous target, missing target, and target-state-conflict cases.
 - **Input staging:** Input commands stage text only. No `input.run` exists. Tests prove no buffer submission occurs.
 - **block.list absent:** The catalog does not contain `block.list`. Requesting it returns `not_allowlisted`.

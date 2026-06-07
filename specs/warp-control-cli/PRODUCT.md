@@ -47,16 +47,16 @@ Warp has rich interactive actions reachable through UI, keybindings, menus, and 
 13. The protocol is command-oriented: each action has a named command, validated parameters, and defined target scope.
 ## Scripting setting
 Warp adds a new top-level Settings pane page named **Scripting**. The page contains a single toggle for local control:
-- **Disabled** (default): no same-user process can receive local-control credentials. The control listener does not accept requests. Discovery records contain no actionable endpoint.
-- **Enabled**: same-user processes may request exact-action credentials from the broker and send control requests to the loopback listener. The user understands that any process running under their OS account can control Warp through `warpctrl`.
+- **Enabled** (default): same-user processes may request exact-action credentials from the broker and send control requests to the loopback listener. The user understands that any process running under their OS account can control Warp through `warpctrl`.
+- **Disabled**: no same-user process can receive local-control credentials. The control listener does not accept requests. Discovery records contain no actionable endpoint.
 The authoritative value is stored in protected local storage (macOS Keychain, or owner-only secure storage on Linux). It is never synced, never appears in `settings.toml` or generated schemas, and cannot be changed by `warpctrl`, config files, or direct protocol requests. Only the Warp app through Settings > Scripting can change it.
-Disabling Scripting immediately prevents new credential issuance and invalidates outstanding credentials.
+The authoritative default is enabled. Disabling Scripting immediately prevents new credential issuance and invalidates outstanding credentials.
 ## One-shot close confirmation
 Three destructive actions require one-shot in-app confirmation before executing:
 - `window.close`
 - `tab.close`
 - `pane.close`
-When the app bridge receives one of these actions, it presents a brief in-app confirmation to the user. The user must approve the close before it executes. If the user dismisses or ignores the confirmation, the action fails with `confirmation_declined`. The confirmation is per-invocation; there is no persistent "always allow" option for close actions.
+When the app bridge receives one of these actions, it presents a brief in-app confirmation to the user. The user must approve the close before it executes. If the user dismisses the confirmation, the action fails with `user_confirmation_denied`. If the confirmation times out without a response, the action fails with `user_confirmation_expired`. The confirmation is per-invocation; there is no persistent "always allow" option for close actions.
 All other 72 actions execute immediately once the credential is validated.
 ## Input staging
 Input commands (`input.insert`, `input.replace`, `input.clear`) only stage or edit text in the terminal input buffer. They never submit the buffer, press Enter, or execute a command. There is no `input.run` action in the catalog. Terminal command execution is not part of this product surface.
@@ -202,7 +202,9 @@ Every protocol or runtime failure identifies a stable machine-readable error cod
 - `local_control_disabled` — Scripting is disabled.
 - `unauthorized_local_client` — missing, malformed, expired, or invalid credential.
 - `insufficient_permissions` — credential grants a different action.
-- `confirmation_declined` — user declined one-shot close confirmation.
+- `user_confirmation_required` — action requires one-shot confirmation that has not been presented yet.
+- `user_confirmation_denied` — user declined one-shot close confirmation.
+- `user_confirmation_expired` — one-shot confirmation timed out without a response.
 - `ambiguous_instance` — multiple instances, no unambiguous selection.
 - `ambiguous_target` — multiple matching targets.
 - `stale_target` — explicit target ID no longer exists.
