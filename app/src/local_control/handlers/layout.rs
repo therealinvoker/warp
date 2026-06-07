@@ -2,13 +2,19 @@
 #[cfg(test)]
 #[path = "layout_tests.rs"]
 mod tests;
-use ::local_control::protocol::TargetSelector;
+use ::local_control::protocol::{TabCreateParams, TabType, TargetSelector};
 use ::local_control::{ActionKind, ControlError, ErrorCode, InstanceId};
 use serde::Serialize;
+#[cfg(feature = "local_tty")]
+use warpui::SingletonEntity;
 use warpui::{ModelContext, TypedActionView};
 
 use crate::local_control::resolver::{target_window_id_for_target, validate_tab_create_target};
 use crate::local_control::LocalControlBridge;
+use crate::server::telemetry::AddTabWithShellSource;
+use crate::terminal::available_shells::AvailableShell;
+#[cfg(feature = "local_tty")]
+use crate::terminal::available_shells::AvailableShells;
 use crate::workspace::{Workspace, WorkspaceAction};
 #[derive(Serialize)]
 struct TabCreateResponse<'a> {
@@ -33,8 +39,9 @@ struct TabCountsResponse {
     active_index: usize,
 }
 
-pub(crate) fn create_terminal_tab(
+pub(crate) fn create_tab(
     instance_id: &Option<InstanceId>,
+    params: &serde_json::Value,
     target: &TargetSelector,
     ctx: &mut ModelContext<LocalControlBridge>,
 ) -> Result<serde_json::Value, ControlError> {
@@ -49,15 +56,11 @@ pub(crate) fn create_terminal_tab(
                 "tab.create requires a workspace in the target window",
             )
         })?;
+    let action = tab_create_action(params, ctx)?;
     let (tab_id, previous_tab_count, tab_count, active_tab_index) =
         workspace.update(ctx, |workspace, ctx| {
             let previous_tab_count = workspace.tab_count();
-            workspace.handle_action(
-                &WorkspaceAction::AddTerminalTab {
-                    hide_homepage: false,
-                },
-                ctx,
-            );
+            workspace.handle_action(&action, ctx);
             let tab_id = workspace
                 .get_pane_group_view(workspace.active_tab_index())
                 .map(|tab| tab.id().to_string())
@@ -96,4 +99,68 @@ pub(crate) fn create_terminal_tab(
             err.to_string(),
         )
     })
+}
+
+fn tab_create_action(
+    params: &serde_json::Value,
+    ctx: &ModelContext<LocalControlBridge>,
+) -> Result<WorkspaceAction, ControlError> {
+    let params = tab_create_params(params)?;
+    if let Some(shell_name) = params.shell.as_deref() {
+        if matches!(params.tab_type, Some(TabType::Agent | TabType::CloudAgent)) {
+            return Err(ControlError::new(
+                ErrorCode::InvalidParams,
+                "tab.create cannot combine an agent tab type with a shell",
+            ));
+        }
+        return Ok(WorkspaceAction::AddTabWithShell {
+            shell: resolve_shell(shell_name, ctx)?,
+            source: AddTabWithShellSource::CommandPalette,
+        });
+    }
+    match params.tab_type {
+        None | Some(TabType::Terminal) => Ok(WorkspaceAction::AddTerminalTab {
+            hide_homepage: false,
+        }),
+        Some(TabType::Agent) => Ok(WorkspaceAction::AddAgentTab),
+        Some(TabType::Default) => Ok(WorkspaceAction::AddDefaultTab),
+        Some(TabType::CloudAgent) => Err(ControlError::new(
+            ErrorCode::UnsupportedAction,
+            "tab.create does not support cloud-agent tabs",
+        )),
+    }
+}
+
+fn tab_create_params(params: &serde_json::Value) -> Result<TabCreateParams, ControlError> {
+    serde_json::from_value(params.clone()).map_err(|err| {
+        ControlError::with_details(
+            ErrorCode::InvalidParams,
+            "failed to decode tab.create parameters",
+            err.to_string(),
+        )
+    })
+}
+
+#[cfg_attr(not(feature = "local_tty"), allow(unused_variables))]
+pub(super) fn resolve_shell(
+    name: &str,
+    ctx: &ModelContext<LocalControlBridge>,
+) -> Result<AvailableShell, ControlError> {
+    #[cfg(feature = "local_tty")]
+    {
+        AvailableShells::as_ref(ctx)
+            .find_by_command_name(name)
+            .or_else(|| AvailableShell::try_from(name).ok())
+            .ok_or_else(|| {
+                ControlError::new(
+                    ErrorCode::InvalidParams,
+                    format!("cannot resolve requested shell {name:?}"),
+                )
+            })
+    }
+    #[cfg(not(feature = "local_tty"))]
+    Err(ControlError::new(
+        ErrorCode::UnsupportedAction,
+        format!("shell selection is unavailable for requested shell {name:?}"),
+    ))
 }

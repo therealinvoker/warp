@@ -59,6 +59,7 @@ use serde_json;
 use session_sharing_protocol::common::SessionId as SharedSessionId;
 #[cfg(target_family = "wasm")]
 use url::Url;
+use uuid::Uuid;
 use warp_cli::agent::Harness;
 use warp_core::context_flag::ContextFlag;
 use warp_core::execution_mode::AppExecutionMode;
@@ -262,6 +263,9 @@ use crate::env_vars::CloudEnvVarCollection;
 use crate::experiments::{BlockOnboarding, Experiment};
 use crate::launch_configs::launch_config::WindowTemplate;
 use crate::launch_configs::save_modal::{LaunchConfigModalEvent, LaunchConfigSaveModal};
+use crate::local_control::confirmation_dialog::{
+    LocalControlConfirmationDialog, LocalControlConfirmationPrompt,
+};
 use crate::menu::{Event as MenuEvent, Menu, MenuItem, MenuItemFields, MenuSelectionSource};
 use crate::modal::{Modal, ModalEvent, ModalViewState};
 use crate::network::{NetworkStatus, NetworkStatusEvent};
@@ -1001,6 +1005,7 @@ pub struct Workspace {
         Option<PendingSessionConfigTabConfigChipTutorial>,
     new_worktree_modal: ModalViewState<Modal<NewWorktreeModal>>,
     close_session_confirmation_dialog: ViewHandle<CloseSessionConfirmationDialog>,
+    local_control_confirmation_dialog: ViewHandle<LocalControlConfirmationDialog>,
     rewind_confirmation_dialog: ViewHandle<RewindConfirmationDialog>,
     delete_conversation_confirmation_dialog: ViewHandle<DeleteConversationConfirmationDialog>,
     resource_center_view: ViewHandle<ResourceCenterView>,
@@ -1839,6 +1844,30 @@ impl Workspace {
         );
 
         close_session_confirmation_dialog
+    }
+    pub(crate) fn show_local_control_confirmation(
+        &mut self,
+        prompt: LocalControlConfirmationPrompt,
+        ctx: &mut ViewContext<Self>,
+    ) -> bool {
+        let shown = self
+            .local_control_confirmation_dialog
+            .update(ctx, |dialog, ctx| dialog.show(prompt, ctx));
+        if shown {
+            ctx.focus(&self.local_control_confirmation_dialog);
+            ctx.notify();
+        }
+        shown
+    }
+
+    pub(crate) fn dismiss_local_control_confirmation(
+        &mut self,
+        confirmation_id: Uuid,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        self.local_control_confirmation_dialog
+            .update(ctx, |dialog, ctx| dialog.dismiss(confirmation_id, ctx));
+        ctx.notify();
     }
 
     fn build_rewind_confirmation_dialog(
@@ -2862,6 +2891,8 @@ impl Workspace {
         let enable_auto_reload_modal = Self::build_enable_auto_reload_modal(ctx);
 
         let close_session_confirmation_dialog = Self::build_close_session_confirmation_dialog(ctx);
+        let local_control_confirmation_dialog =
+            ctx.add_typed_action_view(LocalControlConfirmationDialog::new);
         let rewind_confirmation_dialog = Self::build_rewind_confirmation_dialog(ctx);
         let delete_conversation_confirmation_dialog =
             Self::build_delete_conversation_confirmation_dialog(ctx);
@@ -3244,6 +3275,7 @@ impl Workspace {
             pending_session_config_tab_config_chip_tutorial: None,
             new_worktree_modal,
             close_session_confirmation_dialog,
+            local_control_confirmation_dialog,
             rewind_confirmation_dialog,
             delete_conversation_confirmation_dialog,
             resource_center_view,
@@ -11475,6 +11507,34 @@ impl Workspace {
                 ctx
             );
         }
+    }
+    pub(crate) fn close_local_control_tabs(
+        &mut self,
+        tab_ids: &[String],
+        ctx: &mut ViewContext<Self>,
+    ) -> bool {
+        if tab_ids.is_empty() {
+            return true;
+        }
+        let tab_indices = tab_ids
+            .iter()
+            .map(|tab_id| {
+                self.tab_views()
+                    .position(|tab| tab.id().to_string() == *tab_id)
+            })
+            .collect::<Option<Vec<_>>>();
+        let Some(tab_indices) = tab_indices else {
+            return false;
+        };
+        self.close_tabs(
+            tab_indices.iter().copied(),
+            OpenDialogSource::CloseTab {
+                tab_index: tab_indices[0],
+            },
+            true,
+            true,
+            ctx,
+        )
     }
 
     /// Opens a confirmation dialog if necessary, or closes immediately if not.
@@ -25504,6 +25564,21 @@ impl View for Workspace {
             );
         }
 
+        if self
+            .local_control_confirmation_dialog
+            .as_ref(app)
+            .is_visible()
+        {
+            stack.add_positioned_overlay_child(
+                ChildView::new(&self.local_control_confirmation_dialog).finish(),
+                OffsetPositioning::offset_from_parent(
+                    Vector2F::zero(),
+                    ParentOffsetBounds::WindowByPosition,
+                    ParentAnchor::Center,
+                    ChildAnchor::Center,
+                ),
+            );
+        }
         if self
             .current_workspace_state
             .is_delete_conversation_confirmation_dialog_open

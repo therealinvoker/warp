@@ -59,6 +59,7 @@ use crate::context_chips::prompt_snapshot::PromptSnapshot;
 use crate::context_chips::prompt_type::PromptType;
 use crate::editor::CrdtOperation;
 use crate::features::FeatureFlag;
+use crate::local_control::{LocalControlServer, TerminalSessionRevocation};
 use crate::network::{NetworkStatusEvent, NetworkStatusKind};
 use crate::pane_group::TerminalViewResources;
 use crate::persistence::ModelEvent;
@@ -172,6 +173,7 @@ pub struct TerminalManager {
     /// connection ongoing.
     #[allow(dead_code)]
     session_sharer: Rc<RefCell<Option<ModelHandle<Network>>>>,
+    local_control_session_revocation: Option<TerminalSessionRevocation>,
 }
 
 impl Drop for TerminalManager {
@@ -815,6 +817,7 @@ impl TerminalManager {
 
             inactive_pty_reads_rx,
             session_sharer,
+            local_control_session_revocation: None,
         };
 
         let terminal_manager_model = ctx.add_model(|ctx| {
@@ -863,7 +866,7 @@ impl TerminalManager {
     fn on_shell_determined(
         &mut self,
         startup_directory: Option<PathBuf>,
-        env_vars: HashMap<OsString, OsString>,
+        mut env_vars: HashMap<OsString, OsString>,
         user_default_shell_unsupported_banner_model_handle: ModelHandle<BannerState>,
         #[cfg(windows)] event_loop_tx: mio_channel::Sender<Message>,
         event_loop_rx: mio_channel::Receiver<Message>,
@@ -948,6 +951,26 @@ impl TerminalManager {
         self.model()
             .lock()
             .set_pending_shell_launch_data(shell_launch_data.clone());
+        if FeatureFlag::WarpControlCli.is_enabled() {
+            let terminal_session_id = self
+                .model()
+                .lock()
+                .pending_session_id()
+                .map(|session_id| session_id.as_u64().to_string());
+            if let Some(terminal_session_id) = terminal_session_id {
+                if let Ok(environment) = LocalControlServer::handle(ctx).update(ctx, |server, _| {
+                    server.terminal_environment(terminal_session_id)
+                }) {
+                    env_vars.extend(
+                        environment
+                            .env_vars
+                            .into_iter()
+                            .map(|(key, value)| (OsString::from(key), OsString::from(value))),
+                    );
+                    self.local_control_session_revocation = Some(environment.revocation);
+                }
+            }
+        }
 
         // Enqueue the init shell script (for shells that need it), then create
         // the PTY and start its corresponding event loop.

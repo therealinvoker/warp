@@ -1,5 +1,5 @@
-//! Permission checks that map invocation context onto local settings.
-use ::local_control::{ActionKind, ControlError, ErrorCode, InvocationContext, PROTOCOL_VERSION};
+//! Permission checks for verified Warp-terminal local control.
+use ::local_control::{ActionKind, ControlError, ErrorCode, PROTOCOL_VERSION};
 use warpui::{ModelContext, SingletonEntity};
 
 use crate::features::FeatureFlag;
@@ -30,9 +30,24 @@ pub(super) fn ensure_feature_enabled() -> Result<(), ControlError> {
     ))
 }
 
-#[cfg(test)]
-pub(crate) fn outside_warp_control_enabled_for_settings(settings: &LocalControlSettings) -> bool {
-    settings.outside_warp_control_enabled()
+pub(super) fn ensure_action_allowed(
+    action: ActionKind,
+    ctx: &mut ModelContext<LocalControlBridge>,
+) -> Result<(), ControlError> {
+    ensure_settings_allow_action(LocalControlSettings::as_ref(ctx), action)
+}
+
+pub(crate) fn ensure_settings_allow_action(
+    settings: &LocalControlSettings,
+    action: ActionKind,
+) -> Result<(), ControlError> {
+    if !settings.is_enabled() {
+        return Err(ControlError::new(
+            ErrorCode::LocalControlDisabled,
+            format!("{} is disabled for local control", action.as_str()),
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -41,52 +56,4 @@ pub(crate) fn capabilities() -> Vec<ActionKind> {
         .into_iter()
         .map(|metadata| metadata.kind)
         .collect()
-}
-
-pub(super) fn ensure_action_allowed(
-    context: InvocationContext,
-    action: ActionKind,
-    ctx: &mut ModelContext<LocalControlBridge>,
-) -> Result<(), ControlError> {
-    let settings = LocalControlSettings::as_ref(ctx);
-    ensure_settings_allow_action(settings, context, action)
-}
-
-pub(crate) fn ensure_settings_allow_action(
-    settings: &LocalControlSettings,
-    context: InvocationContext,
-    action: ActionKind,
-) -> Result<(), ControlError> {
-    match context {
-        InvocationContext::InsideWarp => {
-            if !settings.inside_warp_control_enabled() {
-                return Err(ControlError::new(
-                    ErrorCode::LocalControlDisabled,
-                    format!(
-                        "{} is disabled for inside-Warp local control",
-                        action.as_str()
-                    ),
-                ));
-            }
-            Err(ControlError::new(
-                ErrorCode::ExecutionContextNotAllowed,
-                format!(
-                    "{} cannot run from inside-Warp local control until verified terminal proofs are implemented",
-                    action.as_str()
-                ),
-            ))
-        }
-        InvocationContext::OutsideWarp => {
-            if !settings.outside_warp_control_enabled() {
-                return Err(ControlError::new(
-                    ErrorCode::LocalControlDisabled,
-                    format!(
-                        "{} is disabled for outside-Warp local control",
-                        action.as_str()
-                    ),
-                ));
-            }
-            Ok(())
-        }
-    }
 }

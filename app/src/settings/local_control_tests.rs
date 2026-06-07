@@ -58,13 +58,12 @@ fn default_settings() -> LocalControlSettings {
 }
 
 #[test]
-fn defaults_disable_warp_control() {
+fn defaults_enable_warp_control() {
     let settings = default_settings();
 
-    assert_eq!(LocalControlMode::default(), LocalControlMode::Disabled);
-    assert_eq!(settings.mode(), LocalControlMode::Disabled);
-    assert!(!settings.inside_warp_control_enabled());
-    assert!(!settings.outside_warp_control_enabled());
+    assert_eq!(LocalControlMode::default(), LocalControlMode::Enabled);
+    assert_eq!(settings.mode(), LocalControlMode::Enabled);
+    assert!(settings.is_enabled());
 }
 
 #[test]
@@ -92,7 +91,7 @@ fn mode_is_persisted_to_secure_storage() {
             LocalControlSettings::handle(ctx).update(ctx, |settings, ctx| {
                 settings
                     .local_control_mode
-                    .set_value(LocalControlMode::EnabledEverywhere, ctx)
+                    .set_value(LocalControlMode::Enabled, ctx)
             })
         })
         .expect("setting update should succeed");
@@ -104,7 +103,7 @@ fn mode_is_persisted_to_secure_storage() {
                 .expect("local-control mode should be stored securely");
             let mode = serde_json::from_str::<LocalControlMode>(&stored)
                 .expect("stored local-control mode should deserialize");
-            assert_eq!(mode, LocalControlMode::EnabledEverywhere);
+            assert_eq!(mode, LocalControlMode::Enabled);
 
             let private_value = LocalControlModeSetting::preferences_for_setting(ctx)
                 .read_value(LocalControlModeSetting::storage_key())
@@ -135,8 +134,7 @@ fn mode_does_not_migrate_from_private_preferences() {
             LocalControlModeSetting::preferences_for_setting(ctx)
                 .write_value(
                     LocalControlModeSetting::storage_key(),
-                    serde_json::to_string(&LocalControlMode::EnabledEverywhere)
-                        .expect("mode serializes"),
+                    serde_json::to_string(&LocalControlMode::Enabled).expect("mode serializes"),
                 )
                 .expect("private preference is writable");
             LocalControlSettings::register(ctx);
@@ -145,7 +143,7 @@ fn mode_does_not_migrate_from_private_preferences() {
         app.read(|ctx| {
             assert_eq!(
                 LocalControlSettings::as_ref(ctx).mode(),
-                LocalControlMode::Disabled
+                LocalControlMode::Enabled
             );
             let private_value = LocalControlModeSetting::preferences_for_setting(ctx)
                 .read_value(LocalControlModeSetting::storage_key())
@@ -161,7 +159,7 @@ fn mode_is_private_and_never_cloud_synced() {
 }
 
 #[test]
-fn cloud_sync_cannot_enable_local_control() {
+fn cloud_sync_cannot_disable_local_control() {
     warpui::App::test((), |mut app| async move {
         app.update(|ctx| {
             ctx.add_singleton_model(|_| {
@@ -185,14 +183,14 @@ fn cloud_sync_cannot_enable_local_control() {
             LocalControlSettings::handle(ctx).update(ctx, |settings, ctx| {
                 settings
                     .local_control_mode
-                    .set_value_from_cloud_sync(LocalControlMode::EnabledEverywhere, ctx)
+                    .set_value_from_cloud_sync(LocalControlMode::Disabled, ctx)
             })
         })
         .expect("cloud sync update should be ignored without error");
 
         app.read(|ctx| {
             let settings = LocalControlSettings::as_ref(ctx);
-            assert_eq!(settings.mode(), LocalControlMode::Disabled);
+            assert_eq!(settings.mode(), LocalControlMode::Enabled);
             let stored = ctx
                 .secure_storage()
                 .read_value(LocalControlModeSetting::storage_key());

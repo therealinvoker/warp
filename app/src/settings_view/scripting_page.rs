@@ -146,7 +146,7 @@ impl SettingsWidget for LocalControlModeWidget {
     type View = ScriptingSettingsPageView;
 
     fn search_terms(&self) -> &str {
-        "scripting warp control automation warpctrl local cli inside warp outside warp external scripts disabled enabled"
+        "scripting warp control automation warpctrl local cli verified warp terminal disabled enabled"
     }
 
     fn render(
@@ -167,7 +167,10 @@ impl SettingsWidget for LocalControlModeWidget {
             ToggleState::Enabled,
             appearance,
             ChildView::new(&view.local_control_mode_dropdown).finish(),
-            Some("warpctrl allows for scripting Warp's UI.  Use with care.'".to_owned()),
+            Some(
+                "warpctrl allows verified live Warp terminals to script Warp's UI. Use with care."
+                    .to_owned(),
+            ),
         )
     }
 }

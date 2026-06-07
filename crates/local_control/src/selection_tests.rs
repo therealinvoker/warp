@@ -1,7 +1,6 @@
 use chrono::Utc;
 
 use super::*;
-use crate::discovery::{ControlEndpoint, CredentialBrokerReference};
 use crate::protocol::{ActionKind, PROTOCOL_VERSION};
 
 fn record(id: &str, pid: u32) -> InstanceRecord {
@@ -14,11 +13,6 @@ fn record(id: &str, pid: u32) -> InstanceRecord {
         app_version: None,
         started_at: Utc::now(),
         executable_path: None,
-        endpoint: Some(ControlEndpoint::localhost(4000)),
-        credential_broker: Some(CredentialBrokerReference {
-            socket_path: format!("{id}.broker.sock").into(),
-        }),
-        outside_warp_control_enabled: true,
         actions: vec![ActionKind::TabCreate.metadata()],
     }
 }
@@ -34,12 +28,12 @@ fn selects_instance_by_id() {
 #[test]
 fn active_selector_rejects_ambiguity() {
     let records = vec![record("one", 1), record("two", 2)];
-    let err = select_instance(&records, &InstanceSelector::Active).expect_err("ambiguous");
-    assert_eq!(err.code, ErrorCode::AmbiguousInstance);
+    let error = select_instance(&records, &InstanceSelector::Active).expect_err("ambiguous");
+    assert_eq!(error.code, ErrorCode::AmbiguousInstance);
 }
 
 #[test]
 fn active_selector_rejects_no_instances() {
-    let err = select_instance(&[], &InstanceSelector::Active).expect_err("no instance");
-    assert_eq!(err.code, ErrorCode::NoInstance);
+    let error = select_instance(&[], &InstanceSelector::Active).expect_err("no instance");
+    assert_eq!(error.code, ErrorCode::NoInstance);
 }

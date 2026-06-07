@@ -1,81 +1,18 @@
-//! Running app-side server for local Warp control requests.
-//!
-//! This module owns the in-process listener, discovery registration, credential
-//! broker socket, and request handoff from Axum into the WarpUI model graph.
-//! It complements `crates/local_control/src/discovery.rs`: that shared module
-//! defines how clients find and validate candidate instances, while this module
-//! creates the app-owned endpoints and publishes their routing metadata through
-//! `RegisteredInstance`.
-//!
-//! A client uses all three transports in order. It reads the filesystem record
-//! to find an instance, connects to that instance's Unix socket to obtain
-//! temporary authority, and presents that authority to the instance's loopback
-//! HTTP endpoint with one typed action. The filesystem and socket are therefore
-//! complementary parts of discovery and credential bootstrap, not competing
-//! discovery mechanisms.
-//!
-//! Credential broker security flow:
-//!
-//! ```text
-//! owner-only discovery record
-//! (loopback endpoint + broker path; never a token)
-//!                 |
-//!                 v
-//! CLI client -- instance-bound Unix socket --> credential broker
-//!                 [0600 socket + kernel-reported peer UID]
-//!                                             |
-//!                                             v
-//!                           feature flag + Settings > Scripting gate
-//!                           + protocol + action metadata
-//!                           + invocation context + required proof
-//!                                             |
-//!                                             v
-//!                           short-lived, instance-bound, action-scoped
-//!                           bearer grant stored only in process memory
-//!                                             |
-//!                                             v
-//! CLI client -- loopback HTTP + bearer --> /v1/control
-//!                 [reject browser Origin + require exact Host
-//!                  + validate grant existence, expiry, instance, and scope]
-//!                                             |
-//!                                             v
-//!                           typed allowlisted action
-//!                                             |
-//!                                             v
-//!                           main-thread LocalControlBridge
-//!                           [re-check current settings before dispatch]
-//! ```
-//!
-//! These boundaries prevent browser-origin clients, other OS users,
-//! unauthenticated clients that only obtain or guess the HTTP endpoint, stale
-//! or wrong-instance credentials, and accidentally over-scoped credentials from
-//! invoking actions. The broker authenticates the OS account, not the calling
-//! application: malicious software already running as the same user remains
-//! outside this boundary. Verified inside-Warp terminal credentials remain
-//! future work until the app-issued proof broker is implemented.
-//!
-//! The Settings > Scripting gates used here are local-only settings backed by
-//! Warp's secure storage provider.
-//!
-//! Discovery records never include raw bearer tokens: discovery only exposes
-//! endpoint metadata and credential broker references when outside-Warp control
-//! is enabled.
+//! Running app-side server for verified Warp-terminal local control requests.
 mod bridge;
+pub(crate) mod confirmation_dialog;
 mod handlers;
 mod permissions;
 mod resolver;
 
 use std::collections::HashMap;
-#[cfg(unix)]
-use std::fs::Permissions;
 use std::net::SocketAddr;
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt as _;
 use std::sync::{Arc, Mutex};
+use std::time::Duration as StdDuration;
 
-use ::local_control::auth::CredentialGrant;
-#[cfg(any(unix, test))]
-use ::local_control::auth::{CredentialRequest, ScopedCredential};
+use ::local_control::auth::{
+    CredentialGrant, CredentialRequest, ScopedCredential, TerminalSessionProofRegistry,
+};
 use ::local_control::{
     ActionKind, AuthToken, ControlEndpoint, ControlError, ControlResponse, ErrorCode,
     ErrorResponseEnvelope, InstanceId, InstanceRecord, RegisteredInstance, RequestEnvelope,
@@ -89,39 +26,99 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
 pub use bridge::LocalControlBridge;
-#[cfg(any(unix, test))]
 use chrono::Duration;
-use permissions::ensure_feature_enabled;
-#[cfg(any(unix, test))]
-use permissions::{ensure_action_allowed, ensure_protocol_version};
-#[cfg(unix)]
-use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+use futures::channel::oneshot;
+use permissions::{ensure_action_allowed, ensure_feature_enabled, ensure_protocol_version};
+use tokio::sync::broadcast;
 use warp_core::channel::ChannelState;
 use warpui::{Entity, ModelContext, ModelSpawner, SingletonEntity};
-#[cfg(any(unix, test))]
+
 const MAX_ACTIVE_CREDENTIALS: usize = 128;
 
-/// App-owned authority shared by one instance's broker and HTTP listener.
-///
-/// Broker-issued bearer tokens map to grants only in this process-local state.
-/// Knowing the endpoint from discovery is therefore insufficient to authenticate
-/// an HTTP request.
 #[derive(Clone)]
 struct ControlServerState {
     bridge_spawner: ModelSpawner<LocalControlBridge>,
     instance_id: InstanceId,
     expected_host: String,
     credentials: Arc<Mutex<HashMap<String, CredentialGrant>>>,
+    terminal_proofs: Arc<Mutex<TerminalSessionProofRegistry>>,
+    terminal_revocations: broadcast::Sender<String>,
 }
-/// Process-local publisher, credential broker, and HTTP server for one Warp instance.
-///
-/// Holding the runtime and registration keeps both listeners and the discovery
-/// route alive. Dropping them stops request handling and removes the app's
-/// published record and broker socket.
+
+async fn wait_for_confirmation(
+    mut decision_receiver: oneshot::Receiver<Result<bridge::ApprovedClose, ControlError>>,
+    terminal_revocations: &mut broadcast::Receiver<String>,
+    terminal_session_id: &str,
+) -> Result<bridge::ApprovedClose, ControlError> {
+    let timeout = tokio::time::sleep(StdDuration::from_secs(60));
+    tokio::pin!(timeout);
+    loop {
+        tokio::select! {
+            decision = &mut decision_receiver => {
+                return decision.map_err(|_| {
+                    ControlError::new(
+                        ErrorCode::UserConfirmationExpired,
+                        "local-control confirmation was cancelled",
+                    )
+                })?;
+            }
+            revoked = terminal_revocations.recv() => {
+                match revoked {
+                    Ok(revoked_session) if revoked_session == terminal_session_id => {
+                        return Err(ControlError::new(
+                            ErrorCode::InvalidTerminalProof,
+                            "the requesting Warp terminal closed before confirmation",
+                        ));
+                    }
+                    Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(broadcast::error::RecvError::Closed) => {
+                        return Err(ControlError::new(
+                            ErrorCode::UserConfirmationExpired,
+                            "local-control confirmation was cancelled",
+                        ));
+                    }
+                }
+            }
+            _ = &mut timeout => {
+                return Err(ControlError::new(
+                    ErrorCode::UserConfirmationExpired,
+                    "local-control confirmation expired",
+                ));
+            }
+        }
+    }
+}
+pub(crate) struct TerminalControlEnvironment {
+    pub env_vars: Vec<(String, String)>,
+    pub revocation: TerminalSessionRevocation,
+}
+
+pub(crate) struct TerminalSessionRevocation {
+    credentials: Arc<Mutex<HashMap<String, CredentialGrant>>>,
+    terminal_proofs: Arc<Mutex<TerminalSessionProofRegistry>>,
+    terminal_revocations: broadcast::Sender<String>,
+    terminal_session_id: String,
+}
+
+impl Drop for TerminalSessionRevocation {
+    fn drop(&mut self) {
+        if let Ok(mut credentials) = self.credentials.lock() {
+            credentials.retain(|_, grant| grant.terminal_session_id != self.terminal_session_id);
+        }
+        if let Ok(mut terminal_proofs) = self.terminal_proofs.lock() {
+            terminal_proofs.revoke_session(&self.terminal_session_id);
+        }
+        let _ = self
+            .terminal_revocations
+            .send(self.terminal_session_id.clone());
+    }
+}
+
 pub struct LocalControlServer {
     _runtime: Option<tokio::runtime::Runtime>,
     control_endpoint: Option<ControlEndpoint>,
     registered_instance: Option<RegisteredInstance>,
+    state: Option<ControlServerState>,
 }
 
 impl Entity for LocalControlServer {
@@ -136,6 +133,7 @@ impl LocalControlServer {
             _runtime: None,
             control_endpoint: None,
             registered_instance: None,
+            state: None,
         };
         if let Err(error) = server.refresh_for_settings(ctx) {
             log::warn!("Failed to refresh local-control server state: {error:#}");
@@ -143,6 +141,10 @@ impl LocalControlServer {
         ctx.subscribe_to_model(
             &crate::settings::LocalControlSettings::handle(ctx),
             |server, _, ctx| {
+                LocalControlBridge::handle(ctx).update(ctx, |bridge, ctx| {
+                    bridge.cancel_all_confirmations(ctx);
+                });
+                server.invalidate_all_grants();
                 if let Err(error) = server.refresh_for_settings(ctx) {
                     log::warn!("Failed to refresh local-control server state: {error:#}");
                 }
@@ -151,40 +153,30 @@ impl LocalControlServer {
         server
     }
 
-    /// Starts, refreshes, or removes all outside-Warp publication as settings change.
     fn refresh_for_settings(&mut self, ctx: &mut ModelContext<Self>) -> Result<(), ControlError> {
-        if !permissions::warp_control_cli_enabled() {
-            self.stop();
-            return Ok(());
-        }
-        if !outside_warp_publication_supported() {
-            self.stop();
-            return Ok(());
-        }
-        let outside_warp_control_enabled =
-            crate::settings::LocalControlSettings::as_ref(ctx).outside_warp_control_enabled();
-        if !outside_warp_control_enabled {
-            self.stop();
+        if !permissions::warp_control_cli_enabled()
+            || !crate::settings::LocalControlSettings::as_ref(ctx).is_enabled()
+        {
+            self.stop(ctx);
             return Ok(());
         }
         if self._runtime.is_some() {
-            return self.refresh_discovery_record(ctx);
+            return self.refresh_discovery_record();
         }
         self.start(ctx)
     }
 
-    /// Stops both listeners and removes the discovery record and broker socket.
-    fn stop(&mut self) {
+    fn stop(&mut self, ctx: &mut ModelContext<Self>) {
+        LocalControlBridge::handle(ctx).update(ctx, |bridge, ctx| {
+            bridge.cancel_all_confirmations(ctx);
+        });
+        self.invalidate_all_grants();
+        self.state = None;
         self.registered_instance = None;
         self.control_endpoint = None;
         self._runtime = None;
     }
 
-    /// Binds both transports and publishes the routing record that connects them.
-    ///
-    /// Startup first binds an ephemeral loopback HTTP port, publishes that port
-    /// plus the instance-derived broker filename, binds the broker socket, and
-    /// then serves credential issuance and typed control requests concurrently.
     fn start(&mut self, ctx: &mut ModelContext<Self>) -> Result<(), ControlError> {
         if self._runtime.is_some() {
             return Err(ControlError::new(
@@ -193,24 +185,15 @@ impl LocalControlServer {
             ));
         }
         ensure_feature_enabled()?;
-        if !outside_warp_publication_supported() {
-            return Err(ControlError::new(
-                ErrorCode::LocalControlDisabled,
-                "outside-Warp local control is disabled until this platform enforces discovery-record ACLs",
-            ));
-        }
-        if !crate::settings::LocalControlSettings::as_ref(ctx).outside_warp_control_enabled() {
-            return Ok(());
-        }
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(1)
             .enable_io()
             .build()
-            .map_err(|err| {
+            .map_err(|error| {
                 ControlError::with_details(
                     ErrorCode::Internal,
                     "failed to create local-control runtime",
-                    err.to_string(),
+                    error.to_string(),
                 )
             })?;
         let listener = runtime
@@ -218,89 +201,139 @@ impl LocalControlServer {
                 [127, 0, 0, 1],
                 0,
             ))))
-            .map_err(|err| {
+            .map_err(|error| {
                 ControlError::with_details(
                     ErrorCode::Internal,
                     "failed to bind local-control listener",
-                    err.to_string(),
+                    error.to_string(),
                 )
             })?;
-        let port = listener.local_addr().map_err(|err| {
+        let address = listener.local_addr().map_err(|error| {
             ControlError::with_details(
                 ErrorCode::Internal,
                 "failed to read local-control listener address",
-                err.to_string(),
+                error.to_string(),
             )
         })?;
-        let control_endpoint = ControlEndpoint::localhost(port.port());
-        let record = discovery_record_for_settings(ctx, control_endpoint.clone());
+        let control_endpoint = ControlEndpoint::localhost(address.port());
+        let record = discovery_record();
         let instance_id = record.instance_id.clone();
         let bridge_spawner = LocalControlBridge::handle(ctx).update(ctx, |bridge, ctx| {
             bridge.set_instance_id(instance_id.clone());
             ctx.spawner()
         });
         let registered_instance = RegisteredInstance::register(record)?;
-        #[cfg(unix)]
-        let broker_listener = {
-            let runtime_guard = runtime.enter();
-            let listener = bind_credential_broker(registered_instance.record())?;
-            drop(runtime_guard);
-            listener
-        };
+        let (terminal_revocations, _) = broadcast::channel(128);
         let state = ControlServerState {
             bridge_spawner,
             instance_id,
             expected_host: format!("{}:{}", control_endpoint.host, control_endpoint.port),
             credentials: Arc::default(),
+            terminal_proofs: Arc::default(),
+            terminal_revocations,
         };
         let router = Router::new()
             .route("/v1/control", post(handle_control_request))
+            .route("/v1/control/credentials", post(handle_credential_request))
             .with_state(state.clone());
         runtime.spawn(async move {
-            if let Err(err) = axum::serve(listener, router).await {
-                log::warn!("local-control listener stopped: {err:#}");
+            if let Err(error) = axum::serve(listener, router).await {
+                log::warn!("local-control listener stopped: {error:#}");
             }
         });
-        #[cfg(unix)]
-        runtime.spawn(run_credential_broker(broker_listener, state));
-        let endpoint_url = control_endpoint.url();
         self._runtime = Some(runtime);
         self.control_endpoint = Some(control_endpoint);
         self.registered_instance = Some(registered_instance);
-        log::info!("local-control server started at {endpoint_url}");
+        self.state = Some(state);
         Ok(())
     }
 
-    fn refresh_discovery_record(
-        &mut self,
-        ctx: &mut ModelContext<Self>,
-    ) -> Result<(), ControlError> {
-        let Some(control_endpoint) = self.control_endpoint.clone() else {
-            return Ok(());
-        };
+    pub(crate) fn terminal_environment(
+        &self,
+        terminal_session_id: impl Into<String>,
+    ) -> Result<TerminalControlEnvironment, ControlError> {
+        let terminal_session_id = terminal_session_id.into();
+        let state = self.state.as_ref().ok_or_else(|| {
+            ControlError::new(
+                ErrorCode::LocalControlDisabled,
+                "local-control server is not running",
+            )
+        })?;
+        let proof = state
+            .terminal_proofs
+            .lock()
+            .map_err(|_| {
+                ControlError::new(
+                    ErrorCode::Internal,
+                    "local-control terminal proof registry is unavailable",
+                )
+            })?
+            .issue(
+                state.instance_id.clone(),
+                terminal_session_id.clone(),
+                Duration::minutes(10),
+            );
+        let endpoint = self.control_endpoint.as_ref().ok_or_else(|| {
+            ControlError::new(
+                ErrorCode::LocalControlDisabled,
+                "local-control server is not running",
+            )
+        })?;
+        Ok(TerminalControlEnvironment {
+            env_vars: vec![
+                (
+                    ::local_control::client::CONTROL_PORT_ENV.to_owned(),
+                    endpoint.port.to_string(),
+                ),
+                (
+                    ::local_control::client::INSTANCE_ID_ENV.to_owned(),
+                    state.instance_id.0.clone(),
+                ),
+                (
+                    ::local_control::client::TERMINAL_PROOF_ID_ENV.to_owned(),
+                    proof.proof_id,
+                ),
+                (
+                    ::local_control::client::TERMINAL_SESSION_ID_ENV.to_owned(),
+                    proof.terminal_session_id,
+                ),
+                (
+                    ::local_control::client::TERMINAL_PROOF_SECRET_ENV.to_owned(),
+                    proof.proof_secret,
+                ),
+            ],
+            revocation: TerminalSessionRevocation {
+                credentials: Arc::clone(&state.credentials),
+                terminal_proofs: Arc::clone(&state.terminal_proofs),
+                terminal_revocations: state.terminal_revocations.clone(),
+                terminal_session_id,
+            },
+        })
+    }
+
+    pub(crate) fn invalidate_all_grants(&self) {
+        if let Some(state) = &self.state {
+            if let Ok(mut credentials) = state.credentials.lock() {
+                credentials.clear();
+            }
+            if let Ok(mut terminal_proofs) = state.terminal_proofs.lock() {
+                terminal_proofs.invalidate_all();
+            }
+        }
+    }
+
+    fn refresh_discovery_record(&mut self) -> Result<(), ControlError> {
         let Some(registered_instance) = &mut self.registered_instance else {
             return Ok(());
         };
-        let mut record = discovery_record_for_settings(ctx, control_endpoint);
+        let mut record = discovery_record();
         record.instance_id = registered_instance.record().instance_id.clone();
-        record.credential_broker = registered_instance.record().credential_broker.clone();
         registered_instance.update(record)
     }
 }
 
-/// Builds routing metadata without embedding any bearer credential or secret.
-///
-/// The endpoint and derived broker reference are published only while the
-/// protected outside-Warp setting permits clients to use them.
-fn discovery_record_for_settings(
-    ctx: &ModelContext<LocalControlServer>,
-    control_endpoint: ControlEndpoint,
-) -> InstanceRecord {
-    let outside_warp_control_enabled =
-        crate::settings::LocalControlSettings::as_ref(ctx).outside_warp_control_enabled();
-    let endpoint = outside_warp_control_enabled.then_some(control_endpoint);
+fn discovery_record() -> InstanceRecord {
     InstanceRecord::for_current_process(
-        endpoint,
         ChannelState::channel().to_string(),
         ChannelState::app_id().to_string(),
         ChannelState::app_version().map(str::to_owned),
@@ -308,157 +341,12 @@ fn discovery_record_for_settings(
     )
 }
 
-/// Binds the instance's credential-bootstrap socket and restricts it to the owning user.
-///
-/// Any stale socket at the instance-specific path is removed before binding, and
-/// the new socket is set to owner-only permissions before it accepts clients.
-/// The path came from a validated instance-derived discovery reference, so a
-/// record cannot redirect credential requests to an arbitrary socket.
-#[cfg(unix)]
-fn bind_credential_broker(
-    record: &InstanceRecord,
-) -> Result<tokio::net::UnixListener, ControlError> {
-    let socket_path = record.broker_socket_path()?;
-    if socket_path.exists() {
-        std::fs::remove_file(&socket_path).map_err(|err| {
-            ControlError::with_details(
-                ErrorCode::Internal,
-                "failed to remove stale local-control credential broker socket",
-                err.to_string(),
-            )
-        })?;
-    }
-    let listener = tokio::net::UnixListener::bind(&socket_path).map_err(|err| {
-        ControlError::with_details(
-            ErrorCode::Internal,
-            "failed to bind owner-authenticated local-control credential broker",
-            err.to_string(),
-        )
-    })?;
-    std::fs::set_permissions(&socket_path, Permissions::from_mode(0o600)).map_err(|err| {
-        ControlError::with_details(
-            ErrorCode::Internal,
-            "failed to protect local-control credential broker socket",
-            err.to_string(),
-        )
-    })?;
-    Ok(listener)
-}
-
-#[cfg(unix)]
-/// Accepts same-user credential requests independently from the HTTP listener.
-async fn run_credential_broker(listener: tokio::net::UnixListener, state: ControlServerState) {
-    loop {
-        let Ok((stream, _)) = listener.accept().await else {
-            return;
-        };
-        let state = state.clone();
-        tokio::spawn(async move {
-            if let Err(err) = handle_credential_broker_connection(stream, state).await {
-                log::warn!("local-control credential broker connection failed: {err:#}");
-            }
-        });
-    }
-}
-
-#[cfg(unix)]
-/// Authenticates the socket peer before decoding and evaluating its request.
-///
-/// This ordering makes the kernel-reported OS user, rather than any field in
-/// caller-controlled JSON, the credential broker's client-identity boundary.
-async fn handle_credential_broker_connection(
-    mut stream: tokio::net::UnixStream,
-    state: ControlServerState,
-) -> Result<(), ControlError> {
-    let response = match ensure_same_user_peer(&stream) {
-        Ok(()) => {
-            let mut bytes = Vec::new();
-            stream.read_to_end(&mut bytes).await.map_err(|err| {
-                ControlError::with_details(
-                    ErrorCode::InvalidRequest,
-                    "failed to read local-control credential request",
-                    err.to_string(),
-                )
-            })?;
-            match serde_json::from_slice::<CredentialRequest>(&bytes) {
-                Ok(request) => issue_credential(&state, request)
-                    .await
-                    .and_then(|credential| serialize_credential_broker_response(&credential)),
-                Err(err) => Err(ControlError::with_details(
-                    ErrorCode::InvalidRequest,
-                    "failed to decode local-control credential request",
-                    err.to_string(),
-                )),
-            }
-        }
-        Err(error) => Err(error),
-    };
-    let bytes = match response {
-        Ok(bytes) => bytes,
-        Err(error) => serialize_credential_broker_response(&ErrorResponseEnvelope::new(error))?,
-    };
-    stream.write_all(&bytes).await.map_err(|err| {
-        ControlError::with_details(
-            ErrorCode::TransportUnavailable,
-            "failed to write local-control credential response",
-            err.to_string(),
-        )
-    })
-}
-
-#[cfg(unix)]
-/// Requires the kernel-reported peer UID to match Warp's effective UID.
-///
-/// This excludes other OS users but does not distinguish trusted Warp code from
-/// arbitrary processes already running as the same user.
-fn ensure_same_user_peer(stream: &tokio::net::UnixStream) -> Result<(), ControlError> {
-    ensure_peer_uid(stream, unsafe { libc::geteuid() })
-}
-
-#[cfg(unix)]
-/// Verifies a socket peer against an expected UID obtained outside request data.
-fn ensure_peer_uid(stream: &tokio::net::UnixStream, expected_uid: u32) -> Result<(), ControlError> {
-    let peer = stream.peer_cred().map_err(|err| {
-        ControlError::with_details(
-            ErrorCode::UnauthorizedLocalClient,
-            "failed to identify local-control credential broker peer",
-            err.to_string(),
-        )
-    })?;
-    if peer.uid() != expected_uid {
-        return Err(ControlError::new(
-            ErrorCode::UnauthorizedLocalClient,
-            "local-control credential broker peer belongs to a different OS user",
-        ));
-    }
-    Ok(())
-}
-
-#[cfg(unix)]
-fn serialize_credential_broker_response(
-    response: &impl serde::Serialize,
-) -> Result<Vec<u8>, ControlError> {
-    serde_json::to_vec(response).map_err(|err| {
-        ControlError::with_details(
-            ErrorCode::Internal,
-            "failed to serialize local-control credential response",
-            err.to_string(),
-        )
-    })
-}
-
-/// Evaluates current action policy and mints one short-lived exact-action grant.
-///
-/// The bearer secret and its grant are retained only in the running instance's
-/// process-local map; neither is written back into the discovery registry.
-#[cfg(any(unix, test))]
 async fn issue_credential(
     state: &ControlServerState,
     request: CredentialRequest,
 ) -> Result<ScopedCredential, ControlError> {
     ensure_feature_enabled()?;
     ensure_protocol_version(request.protocol_version)?;
-    let metadata = request.action.metadata();
     if !request.action.is_implemented() {
         return Err(ControlError::new(
             ErrorCode::UnsupportedAction,
@@ -468,25 +356,20 @@ async fn issue_credential(
             ),
         ));
     }
-    if !metadata
-        .allowed_invocation_contexts
-        .contains(&request.invocation_context)
     {
-        return Err(ControlError::new(
-            ErrorCode::ExecutionContextNotAllowed,
-            format!(
-                "{} cannot run from the requested invocation context",
-                request.action.as_str()
-            ),
-        ));
+        let terminal_proofs = state.terminal_proofs.lock().map_err(|_| {
+            ControlError::new(
+                ErrorCode::Internal,
+                "local-control terminal proof registry is unavailable",
+            )
+        })?;
+        request.verify_terminal_proof(&state.instance_id, &terminal_proofs)?;
     }
-    request.verify_execution_context_proof()?;
     state
         .bridge_spawner
         .spawn({
             let action = request.action;
-            let invocation_context = request.invocation_context;
-            move |_, ctx| ensure_action_allowed(invocation_context, action, ctx)
+            move |_, ctx| ensure_action_allowed(action, ctx)
         })
         .await
         .map_err(|_| {
@@ -499,13 +382,13 @@ async fn issue_credential(
     let grant = CredentialGrant::new(
         state.instance_id.clone(),
         request.action,
-        request.invocation_context,
+        request.terminal_proof.terminal_session_id,
         Duration::minutes(5),
     );
     let mut credentials = state.credentials.lock().map_err(|_| {
         ControlError::new(
             ErrorCode::Internal,
-            "local-control credential broker is unavailable",
+            "local-control credential registry is unavailable",
         )
     })?;
     insert_credential(
@@ -519,12 +402,28 @@ async fn issue_credential(
     })
 }
 
-/// Authenticates and hands one typed HTTP request to the app bridge.
-///
-/// Header hardening rejects browser-origin and wrong-endpoint requests. The
-/// process-local credential lookup authenticates the transport, after which the
-/// bridge revalidates current settings and exact-action authority before
-/// resolving targets or dispatching a handler.
+async fn handle_credential_request(
+    State(state): State<ControlServerState>,
+    headers: HeaderMap,
+    Json(request): Json<CredentialRequest>,
+) -> Response {
+    if let Err(error) = validate_loopback_headers(&headers, &state.expected_host) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponseEnvelope::new(error)),
+        )
+            .into_response();
+    }
+    match issue_credential(&state, request).await {
+        Ok(credential) => (StatusCode::OK, Json(credential)).into_response(),
+        Err(error) => (
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponseEnvelope::new(error)),
+        )
+            .into_response(),
+    }
+}
+
 async fn handle_control_request(
     State(state): State<ControlServerState>,
     headers: HeaderMap,
@@ -559,16 +458,10 @@ async fn handle_control_request(
     };
     let grant = match state.credentials.lock() {
         Ok(mut credentials) => lookup_credential(&mut credentials, &auth_token, &state.instance_id),
-        Err(_) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponseEnvelope::new(ControlError::new(
-                    ErrorCode::Internal,
-                    "local-control credential broker is unavailable",
-                ))),
-            )
-                .into_response();
-        }
+        Err(_) => Err(ControlError::new(
+            ErrorCode::Internal,
+            "local-control credential registry is unavailable",
+        )),
     };
     let grant = match grant {
         Ok(grant) => grant,
@@ -580,24 +473,166 @@ async fn handle_control_request(
                 .into_response();
         }
     };
+    let proof_session = state
+        .terminal_proofs
+        .lock()
+        .map_err(|_| {
+            ControlError::new(
+                ErrorCode::Internal,
+                "local-control terminal proof registry is unavailable",
+            )
+        })
+        .and_then(|terminal_proofs| {
+            terminal_proofs.verify_session(&state.instance_id, &grant.terminal_session_id)
+        });
+    if let Err(error) = proof_session {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(ErrorResponseEnvelope::new(error)),
+        )
+            .into_response();
+    }
     let request = match serde_json::from_slice::<RequestEnvelope>(&payload) {
         Ok(request) => request,
-        Err(err) => {
+        Err(error) => {
             return (
                 StatusCode::BAD_REQUEST,
                 Json(ErrorResponseEnvelope::new(ControlError::with_details(
                     ErrorCode::InvalidRequest,
                     "failed to decode local-control request",
-                    err.to_string(),
+                    error.to_string(),
                 ))),
             )
                 .into_response();
         }
     };
     let request_id = request.request_id;
-    let response = match state
+    let response = if request.action.kind.metadata().requires_user_confirmation {
+        handle_confirmed_control_request(request, grant, auth_token, &state).await
+    } else {
+        match state
+            .bridge_spawner
+            .spawn(move |bridge, ctx| bridge.handle_request(request, grant, ctx))
+            .await
+        {
+            Ok(response) => response,
+            Err(_) => ResponseEnvelope::error(
+                request_id,
+                ControlError::new(
+                    ErrorCode::BridgeUnavailable,
+                    "local-control app bridge is unavailable",
+                ),
+            ),
+        }
+    };
+    response_from_envelope(response)
+}
+
+async fn handle_confirmed_control_request(
+    request: RequestEnvelope,
+    grant: CredentialGrant,
+    auth_token: AuthToken,
+    state: &ControlServerState,
+) -> ResponseEnvelope {
+    let request_id = request.request_id;
+    let terminal_session_id = grant.terminal_session_id.clone();
+    let mut terminal_revocations = state.terminal_revocations.subscribe();
+    let proof_session = state
+        .terminal_proofs
+        .lock()
+        .map_err(|_| {
+            ControlError::new(
+                ErrorCode::Internal,
+                "local-control terminal proof registry is unavailable",
+            )
+        })
+        .and_then(|terminal_proofs| {
+            terminal_proofs.verify_session(&state.instance_id, &terminal_session_id)
+        });
+    if let Err(error) = proof_session {
+        return ResponseEnvelope::error(request_id, error);
+    }
+    let pending = match state
         .bridge_spawner
-        .spawn(move |bridge, ctx| bridge.handle_request(request, grant, ctx))
+        .spawn(move |bridge, ctx| bridge.prepare_close_confirmation(request, grant, ctx))
+        .await
+    {
+        Ok(Ok(pending)) => pending,
+        Ok(Err(error)) => return ResponseEnvelope::error(request_id, error),
+        Err(_) => {
+            return ResponseEnvelope::error(
+                request_id,
+                ControlError::new(
+                    ErrorCode::BridgeUnavailable,
+                    "local-control app bridge is unavailable",
+                ),
+            );
+        }
+    };
+    let confirmation_id = pending.confirmation_id;
+    let approval = match wait_for_confirmation(
+        pending.decision_receiver,
+        &mut terminal_revocations,
+        &terminal_session_id,
+    )
+    .await
+    {
+        Ok(approval) => approval,
+        Err(error) => {
+            let _ = state
+                .bridge_spawner
+                .spawn(move |bridge, ctx| bridge.cancel_confirmation(confirmation_id, ctx))
+                .await;
+            return ResponseEnvelope::error(request_id, error);
+        }
+    };
+    let live_grant = match state.credentials.lock() {
+        Ok(mut credentials) => lookup_credential(&mut credentials, &auth_token, &state.instance_id),
+        Err(_) => Err(ControlError::new(
+            ErrorCode::Internal,
+            "local-control credential registry is unavailable",
+        )),
+    };
+    let live_grant = match live_grant {
+        Ok(live_grant) => live_grant,
+        Err(error) => return ResponseEnvelope::error(request_id, error),
+    };
+    if live_grant.credential_id != approval.credential_id() {
+        return ResponseEnvelope::error(
+            request_id,
+            ControlError::new(
+                ErrorCode::UnauthorizedLocalClient,
+                "the approved local-control credential changed before execution",
+            ),
+        );
+    }
+    let proof_session = state
+        .terminal_proofs
+        .lock()
+        .map_err(|_| {
+            ControlError::new(
+                ErrorCode::Internal,
+                "local-control terminal proof registry is unavailable",
+            )
+        })
+        .and_then(|terminal_proofs| {
+            terminal_proofs.verify_session(&state.instance_id, approval.terminal_session_id())
+        });
+    if let Err(error) = proof_session {
+        return ResponseEnvelope::error(request_id, error);
+    }
+    if live_grant.action != approval.action_kind() {
+        return ResponseEnvelope::error(
+            request_id,
+            ControlError::new(
+                ErrorCode::InsufficientPermissions,
+                "the approved local-control action no longer matches the credential",
+            ),
+        );
+    }
+    match state
+        .bridge_spawner
+        .spawn(move |bridge, ctx| bridge.execute_approved_close(approval, ctx))
         .await
     {
         Ok(response) => response,
@@ -608,7 +643,10 @@ async fn handle_control_request(
                 "local-control app bridge is unavailable",
             ),
         ),
-    };
+    }
+}
+
+fn response_from_envelope(response: ResponseEnvelope) -> Response {
     let status = match &response.response {
         ControlResponse::Ok { .. } => StatusCode::OK,
         ControlResponse::Error { .. } => StatusCode::BAD_REQUEST,
@@ -616,7 +654,6 @@ async fn handle_control_request(
     (status, Json(response)).into_response()
 }
 
-#[cfg(any(unix, test))]
 fn insert_credential(
     credentials: &mut HashMap<String, CredentialGrant>,
     secret: String,
@@ -635,7 +672,6 @@ fn insert_credential(
     credentials.insert(secret, grant);
 }
 
-/// Resolves an unexpired bearer token issued by this exact running instance.
 fn lookup_credential(
     credentials: &mut HashMap<String, CredentialGrant>,
     auth_token: &AuthToken,
@@ -659,16 +695,7 @@ fn lookup_credential(
     grant.verify_for_action(instance_id, grant.action)?;
     Ok(grant)
 }
-fn outside_warp_publication_supported() -> bool {
-    cfg!(not(target_os = "windows"))
-}
 
-/// Performs browser-origin hardening for local-control endpoints.
-///
-/// These checks intentionally reject browser-style `Origin` requests and stale
-/// endpoint selections, but they are not an authorization boundary. Scoped
-/// bearer credentials and grant validation remain the authority for control
-/// requests.
 pub(crate) fn validate_loopback_headers(
     headers: &HeaderMap,
     expected_host: &str,
@@ -700,9 +727,7 @@ pub(crate) fn validate_loopback_headers(
 #[cfg(test)]
 pub(crate) use bridge::validate_request_authority;
 #[cfg(test)]
-pub(crate) use permissions::{
-    capabilities, ensure_settings_allow_action, outside_warp_control_enabled_for_settings,
-};
+pub(crate) use permissions::{capabilities, ensure_settings_allow_action};
 #[cfg(test)]
 pub(crate) use resolver::{
     require_active_window_id, resolve_index_from_ids, resolve_title_from_matches,

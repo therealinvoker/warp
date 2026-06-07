@@ -1,4 +1,4 @@
-//! Secure local setting that gates local-control invocation contexts.
+//! Secure local setting that gates verified Warp-terminal local control.
 //!
 //! This setting is local-only, kept out of the user-visible settings file, and
 //! persisted through Warp's secure storage provider. It is the authoritative
@@ -12,7 +12,7 @@ use warpui_extras::secure_storage;
 
 const LOCAL_CONTROL_MODE_STORAGE_KEY: &str = "LocalControlMode";
 
-/// User-selected local-control availability.
+/// User-selected local-control availability for verified live Warp terminals.
 #[derive(
     Clone,
     Copy,
@@ -26,36 +26,26 @@ const LOCAL_CONTROL_MODE_STORAGE_KEY: &str = "LocalControlMode";
     settings_value::SettingsValue,
 )]
 #[schemars(
-    description = "Which local-control invocation contexts are allowed.",
+    description = "Whether verified live Warp terminals can use local control.",
     rename_all = "snake_case"
 )]
 pub enum LocalControlMode {
-    #[default]
     Disabled,
-    EnabledWithinWarp,
-    EnabledEverywhere,
+    #[default]
+    Enabled,
 }
 
 impl LocalControlMode {
-    pub const ALL: [Self; 3] = [
-        Self::Disabled,
-        Self::EnabledWithinWarp,
-        Self::EnabledEverywhere,
-    ];
+    pub const ALL: [Self; 2] = [Self::Disabled, Self::Enabled];
 
-    pub fn allows_inside_warp(self) -> bool {
-        matches!(self, Self::EnabledWithinWarp | Self::EnabledEverywhere)
-    }
-
-    pub fn allows_outside_warp(self) -> bool {
-        matches!(self, Self::EnabledEverywhere)
+    pub fn is_enabled(self) -> bool {
+        matches!(self, Self::Enabled)
     }
 
     pub fn as_dropdown_label(self) -> &'static str {
         match self {
             Self::Disabled => "Disabled",
-            Self::EnabledWithinWarp => "Enabled within Warp",
-            Self::EnabledEverywhere => "Enabled everywhere, including outside Warp",
+            Self::Enabled => "Enabled",
         }
     }
 }
@@ -177,7 +167,7 @@ impl Setting for LocalControlModeSetting {
     }
 
     fn default_value() -> Self::Value {
-        LocalControlMode::Disabled
+        LocalControlMode::Enabled
     }
 
     fn new_from_storage(ctx: &mut AppContext) -> Self {
@@ -206,12 +196,8 @@ impl LocalControlSettings {
         *self.local_control_mode
     }
 
-    pub fn inside_warp_control_enabled(&self) -> bool {
-        self.mode().allows_inside_warp()
-    }
-
-    pub fn outside_warp_control_enabled(&self) -> bool {
-        self.mode().allows_outside_warp()
+    pub fn is_enabled(&self) -> bool {
+        self.mode().is_enabled()
     }
 }
 
