@@ -8,22 +8,22 @@ The security architecture has five layers:
 5. **App-side enforcement:** The running Warp app verifies the exact granted action, resolves targets deterministically, and enforces one-shot confirmation for close actions.
 Exact-action credentials are safety and intent mechanisms. They let a script or agent request only the specific operation it intends to perform so authority for a harmless UI action cannot accidentally be reused for a destructive close. They are not a hard security boundary against malicious same-user software.
 ## Security goals
-- Allow same-user processes to control a running Warp instance through a typed, allowlisted interface when the user explicitly enables Scripting.
+- Allow same-user processes to control a running Warp instance through a typed, allowlisted interface when Scripting is enabled.
 - Prevent unauthenticated localhost clients from invoking control actions.
 - Prevent browser-origin JavaScript from becoming an ambient localhost control client.
 - Prevent other OS users from controlling a Warp instance they do not own.
 - Support multiple running Warp processes without a shared global port or credential.
 - Separate discovery metadata from control authority.
-- Require explicit in-app user enablement before any control requests are accepted.
+- Require Scripting to be enabled (the default) before any control requests are accepted.
 - Keep credentials out of plaintext discovery records and mint them only in memory.
 - Authorize every action by its exact typed identity in the app bridge.
 - Require one-shot in-app confirmation for the 3 destructive close actions (`window.close`, `tab.close`, `pane.close`).
-- Ensure input-staging commands never submit the buffer. No `input.run` action exists.
-- Keep the action surface at exactly 75 allowlisted actions. `block.list` is absent.
+- Ensure the two input-staging commands (`input.insert`, `input.replace`) never submit the buffer. No other input actions exist.
+- Keep the action surface at exactly 75 allowlisted actions. The Block, Auth, Drive, and History families are entirely absent.
 - Fail closed on platforms without owner-only discovery and authenticated broker transport.
 - Preserve deterministic targeting so a request never silently mutates or reads the wrong target.
 ## Honest same-user limitations
-The broker authenticates the connecting process's OS user through kernel peer credentials. It does not prove that the caller is the official `warpctrl` binary, Warp-signed code, or a human-approved invocation. Once the user enables Scripting, any process running as the same OS user can:
+The broker authenticates the connecting process's OS user through kernel peer credentials. It does not prove that the caller is the official `warpctrl` binary, Warp-signed code, or a human-approved invocation. When Scripting is enabled (the default), any process running as the same OS user can:
 - Connect to the broker socket and request credentials for any of the 72 default-authorized actions.
 - Request credentials for the 3 close actions (though the user must still approve each one-shot confirmation in the app).
 - Invoke `warpctrl` as a confused deputy.
@@ -158,14 +158,16 @@ Rules:
 - Index selectors resolve to concrete IDs before execution.
 - Session-scoped requests against non-terminal panes return `target_state_conflict`.
 ## Input staging safety
-Input commands (`input.insert`, `input.replace`, `input.clear`, `input.get`, `input.mode_set`) only read or stage text in the input buffer. They never submit the buffer, press Enter, or execute a command. There is no `input.run` action in the 75-action catalog. Tests must prove no submission occurs through any input action.
+The two input commands (`input.insert`, `input.replace`) only stage text in the terminal input buffer. They never submit the buffer, press Enter, or execute a command. No other input actions (`input.get`, `input.clear`, `input.mode.set`, `input.run`) exist in the 75-action catalog. Tests must prove no submission occurs.
 ## Catalog boundary
-The catalog contains exactly 75 actions. `block.list` is intentionally absent. The following are excluded:
-- `input.run` or any form of terminal command execution.
+The catalog contains exactly 75 actions. The following families and actions are entirely absent:
+- The entire Block family (`block.list`, `block.inspect`, `block.output`).
+- The entire Auth family (`auth.status`, `auth.login`).
+- The entire Drive family (all `drive.*` actions).
+- The entire History family (`history.list`).
+- `input.get`, `input.clear`, `input.mode.set`, `input.run`, and any form of terminal command execution.
+- `file.list` and any local file content operations beyond the `file.open` app-state intent.
 - Accepted-command submission and agent-prompt submission.
-- Warp Drive data mutations or content reads.
-- Any action requiring authenticated-user identity or cloud-backed state.
-- Local file content operations beyond the `file.open` app-state intent.
 - Debug, crash, heap-dump, token-copying, and developer-only helpers.
 - Arbitrary internal view dispatch by string.
 Adding a new action requires extending the catalog, implementing validation, adding a handler, and adding tests for credential denial and success behavior.
@@ -225,5 +227,5 @@ Before shipping each action family:
 - Input actions never submit the buffer.
 - Tests cover the allowed path and the wrong-action-credential denial path.
 - Logs and errors do not expose credentials, terminal contents, or sensitive settings.
-- `block.list` remains absent from the catalog.
+- The Block, Auth, Drive, and History families remain absent from the catalog.
 - The catalog contains exactly 75 actions with 72 default-authorized and 3 confirmation-required.

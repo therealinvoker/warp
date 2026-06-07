@@ -47,10 +47,9 @@ Warp has rich interactive actions reachable through UI, keybindings, menus, and 
 13. The protocol is command-oriented: each action has a named command, validated parameters, and defined target scope.
 ## Scripting setting
 Warp adds a new top-level Settings pane page named **Scripting**. The page contains a single toggle for local control:
-- **Enabled** (default): same-user processes may request exact-action credentials from the broker and send control requests to the loopback listener. The user understands that any process running under their OS account can control Warp through `warpctrl`.
+- **Enabled** (default): same-user processes may request exact-action credentials from the broker and send control requests to the loopback listener.
 - **Disabled**: no same-user process can receive local-control credentials. The control listener does not accept requests. Discovery records contain no actionable endpoint.
-The authoritative value is stored in protected local storage (macOS Keychain, or owner-only secure storage on Linux). It is never synced, never appears in `settings.toml` or generated schemas, and cannot be changed by `warpctrl`, config files, or direct protocol requests. Only the Warp app through Settings > Scripting can change it.
-The authoritative default is enabled. Disabling Scripting immediately prevents new credential issuance and invalidates outstanding credentials.
+The authoritative value is stored in protected local storage (macOS Keychain, or owner-only secure storage on Linux). It is never synced, never appears in `settings.toml` or generated schemas, and cannot be changed by `warpctrl`, config files, or direct protocol requests. Only the Warp app through Settings > Scripting can change it. The default is enabled. Disabling Scripting immediately prevents new credential issuance and invalidates outstanding credentials.
 ## One-shot close confirmation
 Three destructive actions require one-shot in-app confirmation before executing:
 - `window.close`
@@ -59,18 +58,23 @@ Three destructive actions require one-shot in-app confirmation before executing:
 When the app bridge receives one of these actions, it presents a brief in-app confirmation to the user. The user must approve the close before it executes. If the user dismisses the confirmation, the action fails with `user_confirmation_denied`. If the confirmation times out without a response, the action fails with `user_confirmation_expired`. The confirmation is per-invocation; there is no persistent "always allow" option for close actions.
 All other 72 actions execute immediately once the credential is validated.
 ## Input staging
-Input commands (`input.insert`, `input.replace`, `input.clear`) only stage or edit text in the terminal input buffer. They never submit the buffer, press Enter, or execute a command. There is no `input.run` action in the catalog. Terminal command execution is not part of this product surface.
+The two input commands (`input.insert`, `input.replace`) only stage or edit text in the terminal input buffer. They never submit the buffer, press Enter, or execute a command. There is no `input.run`, `input.get`, `input.clear`, or `input.mode.set` action in the catalog. Terminal command execution is not part of this product surface.
 ## Action catalog
-The public catalog contains exactly 75 actions. `block.list` is intentionally absent. Actions are organized by noun.
-### Discovery and app (7 actions)
+The public catalog contains exactly 75 actions. The Block, Auth, Drive, and History families are entirely absent. Input is limited to `input.insert` and `input.replace`. Actions are organized by noun and use the exact dotted names from the authoritative `ActionKind` catalog.
+### Instance (2 actions)
 All default-authorized.
 - `instance.list` — list reachable Warp app processes.
 - `instance.inspect` — metadata for one instance.
+### App (4 actions)
+All default-authorized.
 - `app.ping` — health check for the selected instance.
 - `app.version` — build/channel/version metadata.
 - `app.active` — the active instance/window/tab/pane/session chain.
 - `app.focus` — bring the selected Warp app to the foreground.
-- `action.list` — list all 75 catalog actions with implementation status.
+### Capability (2 actions)
+All default-authorized.
+- `capability.list` — list capabilities supported by the selected instance.
+- `capability.inspect` — metadata for one capability.
 ### Window (5 actions)
 4 default-authorized, 1 one-shot confirmation.
 - `window.list` — list windows in the selected instance.
@@ -78,23 +82,18 @@ All default-authorized.
 - `window.create` — create a new window.
 - `window.focus` — focus a target window.
 - `window.close` — close a target window. **Requires one-shot confirmation.**
-### Tab (15 actions)
-14 default-authorized, 1 one-shot confirmation.
+### Tab (10 actions)
+9 default-authorized, 1 one-shot confirmation.
 - `tab.list` — list tabs in the selected window.
 - `tab.inspect` — metadata for one tab.
 - `tab.create` — create a new terminal tab.
 - `tab.activate` — activate a target tab.
-- `tab.activate_previous` — activate the previous tab.
-- `tab.activate_next` — activate the next tab.
-- `tab.activate_last` — activate the last-used tab.
 - `tab.move` — move a tab left or right.
+- `tab.close` — close a target tab. **Requires one-shot confirmation.**
 - `tab.rename` — rename a tab.
 - `tab.reset_name` — reset a tab title to the default.
-- `tab.color_set` — set the active-tab color.
-- `tab.color_clear` — clear the active-tab color.
-- `tab.close` — close a target tab. **Requires one-shot confirmation.**
-- `tab.close_others` — close all tabs except the target.
-- `tab.close_right` — close all tabs to the right of the target.
+- `tab.color.set` — set the active-tab color.
+- `tab.color.clear` — clear the active-tab color.
 ### Pane (11 actions)
 10 default-authorized, 1 one-shot confirmation.
 - `pane.list` — list panes in the selected tab.
@@ -116,59 +115,67 @@ All default-authorized.
 - `session.previous` — cycle to the previous session.
 - `session.next` — cycle to the next session.
 - `session.reopen_closed` — reopen the last closed session.
-### Input (5 actions)
+### Input (2 actions)
 All default-authorized. **Input commands stage text only and never submit.**
-- `input.get` — read the current input buffer contents.
 - `input.insert` — insert text into the input buffer without executing.
 - `input.replace` — replace the input buffer contents without executing.
-- `input.clear` — clear the input buffer.
-- `input.mode_set` — switch input mode (terminal/agent) where valid.
-### Block (2 actions)
-All default-authorized. `block.list` is intentionally absent.
-- `block.inspect` — metadata for a specific block by ID.
-- `block.output` — read output of a specific block by ID.
-### Appearance (13 actions)
+### Theme (6 actions)
 All default-authorized.
 - `theme.list` — list available themes.
 - `theme.get` — get the current theme.
 - `theme.set` — set the current fixed theme.
-- `theme.system_set` — toggle or set "follow system theme."
-- `theme.light_set` — set the light-mode theme.
-- `theme.dark_set` — set the dark-mode theme.
+- `theme.system.set` — toggle or set "follow system theme."
+- `theme.light.set` — set the light-mode theme.
+- `theme.dark.set` — set the dark-mode theme.
+### Appearance (7 actions)
+All default-authorized.
 - `appearance.get` — get current appearance state (font size, zoom).
-- `appearance.font_size_increase` — increase font size.
-- `appearance.font_size_decrease` — decrease font size.
-- `appearance.font_size_reset` — reset font size to default.
-- `appearance.zoom_increase` — increase UI zoom.
-- `appearance.zoom_decrease` — decrease UI zoom.
-- `appearance.zoom_reset` — reset UI zoom to default.
-### Settings (4 actions)
+- `appearance.font_size.increase` — increase font size.
+- `appearance.font_size.decrease` — decrease font size.
+- `appearance.font_size.reset` — reset font size to default.
+- `appearance.zoom.increase` — increase UI zoom.
+- `appearance.zoom.decrease` — decrease UI zoom.
+- `appearance.zoom.reset` — reset UI zoom to default.
+### Setting (4 actions)
 All default-authorized.
 - `setting.list` — list allowlisted user-facing settings.
 - `setting.get` — read an allowlisted setting value.
 - `setting.set` — set an allowlisted setting to a validated value.
 - `setting.toggle` — toggle an allowlisted boolean setting.
 Private, debug-only, derived, and non-allowlisted settings are rejected with structured errors.
-### Surfaces (6 actions)
+### Keybinding (2 actions)
 All default-authorized.
-- `surface.settings_open` — open the settings surface, optionally to a specific page or search query.
-- `surface.command_palette_open` — open or toggle the command palette with an optional initial query.
-- `surface.command_search_open` — open or toggle command search.
-- `surface.warp_drive_toggle` — toggle the Warp Drive panel.
-- `surface.ai_assistant_toggle` — toggle the AI assistant panel.
-- `surface.left_panel_toggle` — toggle the left panel.
+- `keybinding.list` — list keybindings.
+- `keybinding.get` — get a specific keybinding.
+### Action (2 actions)
+All default-authorized.
+- `action.list` — list all 75 catalog actions with implementation status.
+- `action.inspect` — metadata for one action.
+### Surface (11 actions)
+All default-authorized.
+- `surface.settings.open` — open the settings surface, optionally to a specific page or search query.
+- `surface.command_palette.open` — open or toggle the command palette with an optional initial query.
+- `surface.command_search.open` — open or toggle command search.
+- `surface.warp_drive.open` — open the Warp Drive panel.
+- `surface.warp_drive.toggle` — toggle the Warp Drive panel.
+- `surface.resource_center.toggle` — toggle the resource center.
+- `surface.ai_assistant.toggle` — toggle the AI assistant panel.
+- `surface.code_review.toggle` — toggle the code review panel.
+- `surface.left_panel.toggle` — toggle the left panel.
+- `surface.right_panel.toggle` — toggle the right panel.
+- `surface.vertical_tabs.toggle` — toggle vertical tabs.
 ### File (1 action)
 Default-authorized.
 - `file.open` — open a file path in a Warp editor tab, optionally at a specific line and column. This is an app-state intent, not a filesystem-content operation.
 ### Excluded from the catalog
-The following are intentionally excluded even when internal implementations exist:
-- `block.list` — absent from the public catalog.
-- `input.run` or any form of terminal command execution or submission.
+The following families and actions are entirely absent even when internal implementations exist:
+- The entire Block family (`block.list`, `block.inspect`, `block.output`).
+- The entire Auth family (`auth.status`, `auth.login`).
+- The entire Drive family (all `drive.*` actions).
+- The entire History family (`history.list`).
+- `input.get`, `input.clear`, `input.mode.set`, `input.run`, and any form of terminal command execution or submission.
+- `file.list` and any local file content reads, writes, or filesystem-content mutations.
 - Accepted-command submission and agent-prompt submission.
-- Warp Drive data mutations (create, update, delete, share).
-- Warp Drive content reads or metadata listings.
-- Any action requiring authenticated-user identity or cloud-backed state.
-- Local file content reads, writes, appends, or filesystem-content mutations.
 - Crash, panic, heap-dump, token-copying, debug-reset, and developer/debug helpers.
 - Arbitrary internal view dispatch by string.
 - Arbitrary settings outside the allowlist.
