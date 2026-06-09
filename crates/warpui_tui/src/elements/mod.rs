@@ -13,6 +13,18 @@ use warpui_core::{AppContext, EntityId, Event};
 
 use crate::{TuiBuffer, TuiConstraint, TuiEventContext, TuiRect, TuiSize};
 
+mod child_view;
+mod column;
+mod container;
+mod event_handler;
+mod text;
+
+pub use child_view::TuiChildView;
+pub use column::TuiColumn;
+pub use container::TuiContainer;
+pub use event_handler::TuiEventHandler;
+pub use text::TuiText;
+
 /// What a [`TuiView`](warpui_core::TuiView) renders to.
 ///
 /// A view sets `type RenderOutput = TuiRenderOutput` and returns a boxed
