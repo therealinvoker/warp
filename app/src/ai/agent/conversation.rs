@@ -672,6 +672,9 @@ impl AIConversation {
     pub fn context_window_usage(&self) -> f32 {
         self.conversation_usage_metadata.context_window_usage
     }
+    pub fn long_context_used(&self) -> bool {
+        self.conversation_usage_metadata.long_context_used
+    }
 
     /// The per-segment breakdown of the context window (e.g. system prompt,
     /// tool definitions, conversation history). Scaled so the segments sum to
@@ -1968,13 +1971,7 @@ impl AIConversation {
         if let Some(usage_metadata) = usage_metadata {
             self.conversation_usage_metadata.context_window_usage =
                 usage_metadata.context_window_usage;
-            // 0 means the turn had no chargeable primary-agent call (e.g. a
-            // failed or custom-endpoint-only request, or an old server);
-            // keep the previous value, matching server-side merge semantics.
-            if usage_metadata.total_input_tokens != 0 {
-                self.conversation_usage_metadata.total_input_tokens =
-                    usage_metadata.total_input_tokens;
-            }
+            self.conversation_usage_metadata.long_context_used = usage_metadata.long_context_used;
             self.conversation_usage_metadata.credits_spent = usage_metadata.credits_spent;
             self.conversation_usage_metadata.platform_credits_spent =
                 usage_metadata.platform_credits_spent;

@@ -24,7 +24,7 @@ query GetConversationUsage(
           lastUpdated
           usageMetadata {
             contextWindowUsage
-            totalInputTokens
+            longContextUsed
             creditsSpent
             platformCreditsSpent
             summarized
@@ -115,6 +115,7 @@ pub struct ConversationUsage {
 #[derive(cynic::QueryFragment, Debug, Clone)]
 pub struct ConversationUsageMetadata {
     pub context_window_usage: f64,
+    pub long_context_used: bool,
     pub context_window_segments: Vec<ContextWindowSegment>,
     pub credits_spent: f64,
     pub platform_credits_spent: f64,
@@ -190,7 +191,7 @@ impl From<&ConversationUsageMetadata> for persistence::model::ConversationUsageM
         Self {
             was_summarized: gql.summarized,
             context_window_usage: gql.context_window_usage as f32,
-            total_input_tokens: u32::try_from(gql.total_input_tokens).unwrap_or_default(),
+            long_context_used: gql.long_context_used,
             credits_spent: gql.credits_spent as f32,
             platform_credits_spent: gql.platform_credits_spent as f32,
             credits_spent_for_last_block: None,

@@ -3286,7 +3286,7 @@ fn convert_conversation_format(
 fn convert_usage_metadata(
     summarized: bool,
     context_window_usage: f64,
-    total_input_tokens: i32,
+    long_context_used: bool,
     credits_spent: f64,
     platform_credits_spent: f64,
     context_window_segments: &[warp_graphql::ai::ContextWindowSegment],
@@ -3294,7 +3294,7 @@ fn convert_usage_metadata(
     ConversationUsageMetadata {
         was_summarized: summarized,
         context_window_usage: context_window_usage as f32,
-        total_input_tokens: u32::try_from(total_input_tokens).unwrap_or_default(),
+        long_context_used,
         credits_spent: credits_spent as f32,
         platform_credits_spent: platform_credits_spent as f32,
         credits_spent_for_last_block: None,
@@ -3311,7 +3311,7 @@ impl TryFrom<warp_graphql::ai::AIConversation> for ServerAIConversationMetadata 
         let usage = convert_usage_metadata(
             value.usage.usage_metadata.summarized,
             value.usage.usage_metadata.context_window_usage,
-            value.usage.usage_metadata.total_input_tokens,
+            value.usage.usage_metadata.long_context_used,
             value.usage.usage_metadata.credits_spent,
             value.usage.usage_metadata.platform_credits_spent,
             &value.usage.usage_metadata.context_window_segments,
@@ -3359,7 +3359,7 @@ impl TryFrom<warp_graphql::queries::list_ai_conversations::AIConversationMetadat
         let usage = convert_usage_metadata(
             value.usage.usage_metadata.summarized,
             value.usage.usage_metadata.context_window_usage,
-            value.usage.usage_metadata.total_input_tokens,
+            value.usage.usage_metadata.long_context_used,
             value.usage.usage_metadata.credits_spent,
             value.usage.usage_metadata.platform_credits_spent,
             &value.usage.usage_metadata.context_window_segments,

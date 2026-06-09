@@ -747,10 +747,20 @@ impl AgentInputFooter {
         ctx.subscribe_to_model(
             &LLMPreferences::handle(ctx),
             |me, preferences, event, ctx| {
-                if !llm_preferences_event_affects_long_context_warning(event) {
+                let LLMPreferencesEvent::UpdatedActiveAgentModeLLM = event else {
                     return;
-                }
-                me.sync_long_context_warning_from_effective_model(preferences.as_ref(ctx), ctx);
+                };
+                let (effective_model_id, effective_model_provider) = {
+                    let active_base_model = preferences
+                        .as_ref(ctx)
+                        .get_active_base_model(ctx, Some(me.terminal_view_id));
+                    (
+                        active_base_model.id.clone(),
+                        active_base_model.provider.clone(),
+                    )
+                };
+                me.long_context_warning_state
+                    .update_effective_model(effective_model_id, effective_model_provider);
                 me.update_context_window_button(ctx);
             },
         );
@@ -840,8 +850,8 @@ impl AgentInputFooter {
                     | BlocklistAIHistoryEvent::SetActiveConversation { .. }
                     | BlocklistAIHistoryEvent::ClearedActiveConversation { .. }
                     | BlocklistAIHistoryEvent::ClearedConversationsForTerminalSurface { .. }
-                    | BlocklistAIHistoryEvent::RemoveConversation { .. }
-                    | BlocklistAIHistoryEvent::UpdatedAutoexecuteOverride { .. } => {
+                    | BlocklistAIHistoryEvent::RemoveConversation { .. } => {
+                        me.sync_long_context_warning_from_conversation(ctx);
                         me.sync_fast_forward_button(ctx);
                         me.update_context_window_button(ctx);
                         me.model_selector.update(ctx, |_, ctx| ctx.notify());
@@ -906,21 +916,17 @@ impl AgentInputFooter {
             None
         };
 
-        let (effective_model_provider, effective_model_threshold, is_custom_endpoint) = {
-            let preferences = LLMPreferences::as_ref(ctx);
-            let active_base_model = preferences.get_active_base_model(ctx, Some(terminal_view_id));
-            let is_custom_endpoint = preferences
-                .custom_llm_info_for_id(&active_base_model.id)
-                .is_some();
+        let (effective_model_id, effective_model_provider) = {
+            let active_base_model =
+                LLMPreferences::as_ref(ctx).get_active_base_model(ctx, Some(terminal_view_id));
             (
+                active_base_model.id.clone(),
                 active_base_model.provider.clone(),
-                active_base_model.context_window.long_context_threshold,
-                is_custom_endpoint,
             )
         };
-        let total_input_tokens = BlocklistAIHistoryModel::as_ref(ctx)
+        let long_context_used = BlocklistAIHistoryModel::as_ref(ctx)
             .active_conversation(terminal_view_id)
-            .map_or(0, |conversation| conversation.total_input_tokens());
+            .is_some_and(|conversation| conversation.long_context_used());
         let mut me = Self {
             terminal_view_id,
             ambient_agent_view_model,
@@ -941,10 +947,9 @@ impl AgentInputFooter {
             plugin_chip_ready: false,
             context_window_button,
             long_context_warning_state: LongContextWarningState::new(
+                effective_model_id,
                 effective_model_provider,
-                effective_model_threshold,
-                is_custom_endpoint,
-                total_input_tokens,
+                long_context_used,
             ),
             model_selector: profile_model_selector_full,
             environment_selector,
@@ -1100,27 +1105,11 @@ impl AgentInputFooter {
     }
 
     fn sync_long_context_warning_from_conversation(&mut self, app: &AppContext) {
-        let total_input_tokens = BlocklistAIHistoryModel::as_ref(app)
+        let long_context_used = BlocklistAIHistoryModel::as_ref(app)
             .active_conversation(self.terminal_view_id)
-            .map_or(0, |conversation| conversation.total_input_tokens());
+            .is_some_and(|conversation| conversation.long_context_used());
         self.long_context_warning_state
-            .sync_from_server(total_input_tokens);
-    }
-
-    fn sync_long_context_warning_from_effective_model(
-        &mut self,
-        preferences: &LLMPreferences,
-        app: &AppContext,
-    ) {
-        let active_base_model = preferences.get_active_base_model(app, Some(self.terminal_view_id));
-        let is_custom_endpoint = preferences
-            .custom_llm_info_for_id(&active_base_model.id)
-            .is_some();
-        self.long_context_warning_state.update_effective_model(
-            active_base_model.provider.clone(),
-            active_base_model.context_window.long_context_threshold,
-            is_custom_endpoint,
-        );
+            .sync_from_server(long_context_used);
     }
 
     fn has_active_cli_agent_input_session(&self, app: &AppContext) -> bool {
@@ -2102,7 +2091,13 @@ impl AgentInputFooter {
             });
             let is_cache_expired = FeatureFlag::PromptCacheExpiryWarning.is_enabled()
                 && expiry.is_some_and(|expiry| expiry <= Local::now());
-            let context_remaining_tooltip = format!("{remaining_pct}% context remaining");
+            let context_remaining_tooltip = if show_long_context_warning {
+                format!(
+                    "{remaining_pct}% context remaining\n{OPENAI_LONG_CONTEXT_PRICING_WARNING_TOOLTIP}"
+                )
+            } else {
+                format!("{remaining_pct}% context remaining")
+            };
             let tooltip = if is_cache_expired {
                 format!("{context_remaining_tooltip} · prompt cache expired")
             } else {
@@ -2112,6 +2107,10 @@ impl AgentInputFooter {
             self.prompt_cache_expired = is_cache_expired;
             self.context_window_button.update(ctx, |button, ctx| {
                 button.set_icon(Some(icon), ctx);
+                button.set_icon_ansi_color(
+                    show_long_context_warning.then_some(AnsiColorIdentifier::Yellow),
+                    ctx,
+                );
                 button.set_tooltip(Some(tooltip), ctx);
             });
 

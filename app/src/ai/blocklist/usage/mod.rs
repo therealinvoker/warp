@@ -2,12 +2,63 @@ use warp_core::ui::theme::{Fill, WarpTheme};
 use warp_core::ui::Icon;
 use warpui::Element;
 
-use crate::ai::llms::LLMProvider;
+use crate::ai::llms::{LLMId, LLMProvider};
 
 pub mod conversation_usage_view;
 pub mod rollup;
 
-pub fn icon_for_context_window_usage(context_window_usage: f32) -> Icon {
+#[derive(Debug)]
+pub(crate) struct LongContextWarningState {
+    effective_model_id: LLMId,
+    effective_model_provider: LLMProvider,
+    visible: bool,
+}
+
+impl LongContextWarningState {
+    pub fn new(
+        effective_model_id: LLMId,
+        effective_model_provider: LLMProvider,
+        long_context_used: bool,
+    ) -> Self {
+        Self {
+            effective_model_id,
+            effective_model_provider,
+            visible: long_context_used,
+        }
+    }
+
+    pub fn sync_from_server(&mut self, long_context_used: bool) {
+        self.visible = long_context_used;
+    }
+
+    pub fn update_effective_model(
+        &mut self,
+        effective_model_id: LLMId,
+        effective_model_provider: LLMProvider,
+    ) {
+        if self.effective_model_id != effective_model_id {
+            self.effective_model_id = effective_model_id;
+            self.effective_model_provider = effective_model_provider;
+            self.visible = false;
+        }
+    }
+
+    /// The long-context warning communicates OpenAI's long-context pricing tiers, so it is only
+    /// surfaced for OpenAI models — even if the server reports long-context usage for a model
+    /// from another provider.
+    pub fn is_visible(&self) -> bool {
+        self.visible && self.effective_model_provider == LLMProvider::OpenAI
+    }
+}
+
+pub fn icon_for_context_window_usage(
+    context_window_usage: f32,
+    show_long_context_warning: bool,
+) -> Icon {
+    if show_long_context_warning {
+        return Icon::ContextRemaining0;
+    }
+
     // The circle's solid (white) marks represent the context *remaining*, not
     // the amount used: an empty conversation shows an all-white circle (100%
     // remaining) and counts down to an all-grey circle as the context window
