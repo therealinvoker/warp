@@ -1,4 +1,3 @@
-// Suppress warnings about rustdoc style.
 #![allow(clippy::doc_lazy_continuation)]
 
 mod ai;
@@ -43,6 +42,8 @@ mod gpu_state;
 mod input_classifier;
 mod interval_timer;
 mod linear;
+#[cfg(not(target_family = "wasm"))]
+mod local_control;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod login_item;
 mod menu;
@@ -144,6 +145,7 @@ use ai::ambient_agents::scheduled::ScheduledAgentManager;
 use ai::blocklist::{BlocklistAIHistoryModel, BlocklistAIPermissions};
 use ai::execution_profiles::editor::ExecutionProfileEditorManager;
 use ai::execution_profiles::profiles::AIExecutionProfilesModel;
+use ai::metadata_project_rules::read_project_rule_contents;
 use ai::persisted_workspace::PersistedWorkspace;
 use auth::auth_manager::AuthManager;
 use auth::auth_state::{AuthState, AuthStateProvider};
@@ -584,6 +586,11 @@ pub fn run() -> Result<()> {
 
     // Ensure feature flags are initialized before parsing command-line arguments.
     features::init_feature_flags();
+    if let Some(args) = warp_cli::local_control::ControlArgs::from_control_mode_env() {
+        #[cfg(windows)]
+        warp_util::windows::attach_to_parent_console();
+        warp_cli::local_control::run_and_exit(args);
+    }
 
     // Parse command-line arguments.
     let args = warp_cli::Args::from_env();
@@ -1508,6 +1515,18 @@ pub(crate) fn initialize_app(
     #[cfg(not(target_family = "wasm"))]
     {
         ctx.add_singleton_model(DirectoryWatcher::new);
+        // Register the skill provider directories as force-included paths so
+        // the gitignore-pruning watch descend filter still watches gitignored
+        // skill directories (e.g. `.agents/skills`) for `Repository`
+        // subscribers (LSP, MCP). Registered before any repository begins
+        // watching so it gates descent on the very first registration.
+        DirectoryWatcher::handle(ctx).update(ctx, |watcher, _| {
+            watcher.register_force_included_paths(
+                ::ai::skills::SKILL_PROVIDER_DEFINITIONS
+                    .iter()
+                    .map(|provider| provider.skills_path.clone()),
+            );
+        });
         ctx.add_singleton_model(|_| DetectedRepositories::default());
         if let Some(home_dir) = dirs::home_dir() {
             ctx.add_singleton_model(|ctx| HomeDirectoryWatcher::new(home_dir, ctx));
@@ -1533,7 +1552,13 @@ pub(crate) fn initialize_app(
             } else {
                 RepoMetadataModel::new(ctx)
             };
-            model.register_ignored_path_interests(
+            model.register_force_included_paths(
+                ::ai::skills::SKILL_PROVIDER_DEFINITIONS
+                    .iter()
+                    .map(|provider| provider.skills_path.clone()),
+                ctx,
+            );
+            model.set_project_skill_provider_paths(
                 ::ai::skills::SKILL_PROVIDER_DEFINITIONS
                     .iter()
                     .map(|provider| provider.skills_path.clone()),
@@ -1762,11 +1787,9 @@ pub(crate) fn initialize_app(
     ctx.add_singleton_model(
         ai::blocklist::local_agent_task_sync_model::LocalAgentTaskSyncModel::new,
     );
-    if warp_core::features::FeatureFlag::OrchestrationV2.is_enabled() {
-        ctx.add_singleton_model(
-            ai::blocklist::orchestration_event_streamer::OrchestrationEventStreamer::new,
-        );
-    }
+    ctx.add_singleton_model(
+        ai::blocklist::orchestration_event_streamer::OrchestrationEventStreamer::new,
+    );
 
     if launch_mode.supports_indexing() {
         ctx.add_singleton_model(RepoOutlines::new);
@@ -1980,7 +2003,7 @@ pub(crate) fn initialize_app(
         };
 
         let codebase_limits = AIRequestUsageModel::as_ref(ctx).codebase_context_limits();
-        let codebase_index_config = CodebaseIndexManagerConfig::new(
+        let mut codebase_index_config = CodebaseIndexManagerConfig::new(
             indices_to_restore,
             codebase_limits.max_indices_allowed,
             codebase_limits.max_files_per_repo,
@@ -1988,6 +2011,9 @@ pub(crate) fn initialize_app(
             server_api_provider.as_ref(ctx).get(),
             launch_mode.supports_indexing(),
         );
+        if matches!(launch_mode, LaunchMode::RemoteServerDaemon { .. }) {
+            codebase_index_config = codebase_index_config.defer_persisted_index_restore();
+        }
         #[cfg(feature = "local_fs")]
         if let Some(snapshot_storage) = daemon_codebase_index_snapshot_storage(launch_mode) {
             return CodebaseIndexManager::new_with_snapshot_storage(
@@ -2001,7 +2027,11 @@ pub(crate) fn initialize_app(
     });
 
     ctx.add_singleton_model(|ctx| {
-        ProjectContextModel::new_from_persisted(persisted_project_rules, ctx)
+        ProjectContextModel::new_from_persisted(
+            persisted_project_rules,
+            read_project_rule_contents,
+            ctx,
+        )
     });
 
     // Index global rules (e.g. ~/.agents/AGENTS.md) on a background task so
@@ -2037,6 +2067,15 @@ pub(crate) fn initialize_app(
         ];
         http_server::HttpServer::new(routers, ctx)
     });
+    #[cfg(not(target_family = "wasm"))]
+    if matches!(
+        launch_mode,
+        LaunchMode::App { .. } | LaunchMode::Test { .. }
+    ) && FeatureFlag::WarpControlCli.is_enabled()
+    {
+        ctx.add_singleton_model(local_control::LocalControlBridge::new);
+        ctx.add_singleton_model(local_control::LocalControlServer::new);
+    }
 
     app_state
 }
