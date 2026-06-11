@@ -208,6 +208,18 @@ pub struct RequestInput {
 }
 
 impl RequestInput {
+    pub fn carries_pending_conversation_handoff(&self) -> bool {
+        self.all_inputs().any(|input| {
+            matches!(
+                input,
+                AIAgentInput::UserQuery {
+                    static_query_type: None,
+                    user_query_mode: UserQueryMode::Normal,
+                    ..
+                }
+            )
+        })
+    }
     fn for_task(
         inputs: Vec<AIAgentInput>,
         task_id: TaskId,
@@ -2138,6 +2150,7 @@ impl BlocklistAIController {
                 forked_from_conversation_token: conversation
                     .forked_from_server_conversation_token()
                     .cloned(),
+                pending_conversation_handoff: None,
                 // Do not tie passive suggestion requests to the cloud agent task, since they are
                 // separate, read-only requests.
                 ambient_agent_task_id: None,
@@ -2156,6 +2169,7 @@ impl BlocklistAIController {
                 tasks: vec![],
                 server_conversation_token: None,
                 forked_from_conversation_token: None,
+                pending_conversation_handoff: None,
                 // Do not tie passive suggestion requests to the cloud agent task, since they are
                 // separate, read-only requests.
                 ambient_agent_task_id: None,
@@ -2331,6 +2345,7 @@ impl BlocklistAIController {
             conversation_id,
             conversation_server_token,
             conversation_forked_from_token,
+            pending_conversation_handoff,
             active_tasks,
             parent_agent_id,
             agent_name,
@@ -2353,6 +2368,7 @@ impl BlocklistAIController {
                 conversation
                     .forked_from_server_conversation_token()
                     .cloned(),
+                conversation.pending_conversation_handoff(),
                 active_tasks,
                 conversation.parent_agent_id().map(str::to_string),
                 conversation.agent_name().map(str::to_string),
@@ -2405,6 +2421,7 @@ impl BlocklistAIController {
             tasks: active_tasks,
             server_conversation_token: conversation_server_token,
             forked_from_conversation_token: conversation_forked_from_token,
+            pending_conversation_handoff,
             ambient_agent_task_id: self.ambient_agent_task_id,
             existing_suggestions: history_model
                 .as_ref(ctx)
@@ -2777,6 +2794,10 @@ impl BlocklistAIController {
                         };
                         match event {
                             warp_multi_agent_api::response_event::Type::Init(init_event) => {
+                                let should_clear_pending_handoff = response_stream
+                                    .as_ref(ctx)
+                                    .pending_conversation_handoff()
+                                    .is_some();
                                 history_model.update(ctx, |history_model, ctx| {
                                     history_model.initialize_output_for_response_stream(
                                         &stream_id,
@@ -2794,6 +2815,10 @@ impl BlocklistAIController {
                                         history_model.conversation_mut(&conversation_id)
                                     {
                                         conversation.clear_forked_from_server_conversation_token();
+                                        if should_clear_pending_handoff {
+                                            conversation.clear_pending_conversation_handoff();
+                                            conversation.write_updated_conversation_state(ctx);
+                                        }
                                     }
                                 });
                             }

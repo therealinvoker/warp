@@ -2273,7 +2273,11 @@ impl TypedActionView for ConversationDetailsPanel {
                     match continuation_info {
                         DetailsPanelLocalContinuationInfo::Conversation(conversation_id) => {
                             ctx.dispatch_typed_action(
-                                &WorkspaceAction::ContinueConversationLocally { conversation_id },
+                                &WorkspaceAction::ContinueConversationLocally {
+                                    conversation_id,
+                                    initial_prompt: None,
+                                    destination: ForkedConversationDestination::SplitPane,
+                                },
                             );
                         }
                         DetailsPanelLocalContinuationInfo::ThirdPartyTask { task_id, harness } => {
