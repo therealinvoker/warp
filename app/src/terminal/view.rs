@@ -345,6 +345,7 @@ use crate::resource_center::{
 use crate::search::slash_command_menu::static_commands::commands;
 use crate::server::cloud_objects::update_manager::UpdateManager;
 use crate::server::ids::{ObjectUid, SyncId};
+use crate::server::server_api::ai::{AIClient, AgentRunClientEventRequest};
 use crate::server::server_api::ServerApi;
 use crate::server::telemetry::{
     self, AgentModeAttachContextMethod, AgentModeEntrypoint, AgentModeRewindEntrypoint,
@@ -10865,6 +10866,85 @@ impl TerminalView {
         }
     }
 
+    /// Best-effort upload of a completed, user-run terminal block to the run's
+    /// `client-events` endpoint during a shared Oz run. The server persists the
+    /// payload to GCS keyed by the shared-session UUID so the full session
+    /// transcript (including manually-run commands) can be reconstructed.
+    ///
+    /// No-op unless block persistence is enabled, this client is sharing an Oz
+    /// run, and the block was not run by an agent — agent-run blocks are already
+    /// captured in the conversation transcript synced to GCS.
+    fn maybe_persist_block_for_shared_oz_run(&self, user_block_completed: &UserBlockCompleted) {
+        log::info!(
+            "[block-persist-debug] entry: block_id={}, flag_enabled={}, was_part_of_agent_interaction={}",
+            user_block_completed.serialized_block.id,
+            FeatureFlag::PersistSharedSessionBlocks.is_enabled(),
+            user_block_completed.was_part_of_agent_interaction,
+        );
+        if !FeatureFlag::PersistSharedSessionBlocks.is_enabled() {
+            log::info!("[block-persist-debug] skip: feature flag disabled");
+            return;
+        }
+
+        if user_block_completed.was_part_of_agent_interaction {
+            log::info!("[block-persist-debug] skip: block was part of agent interaction");
+            return;
+        }
+
+        let run_id = {
+            let model = self.model.lock();
+            let is_sharer = model.shared_session_status().is_sharer();
+            let is_shared_ambient = model.is_shared_ambient_agent_session();
+            log::info!(
+                "[block-persist-debug] gates: is_sharer={is_sharer}, is_shared_ambient_agent_session={is_shared_ambient}",
+            );
+            if !(is_sharer && is_shared_ambient) {
+                log::info!("[block-persist-debug] skip: not a shared Oz run");
+                return;
+            }
+            match model.ambient_agent_task_id() {
+                Some(run_id) => run_id,
+                None => {
+                    log::info!("[block-persist-debug] skip: no ambient_agent_task_id");
+                    return;
+                }
+            }
+        };
+        log::info!("[block-persist-debug] all gates passed, posting block for run {run_id}");
+
+        let serialized_block = user_block_completed.serialized_block.clone();
+        let request = match AgentRunClientEventRequest::block_event(
+            serialized_block.id.as_str(),
+            &serialized_block,
+            chrono::Utc::now(),
+        ) {
+            Ok(request) => request,
+            Err(err) => {
+                log::warn!("Failed to serialize block for shared Oz run {run_id}: {err:#}");
+                return;
+            }
+        };
+
+        let server_api = self.server_api.clone();
+        self.background_executor
+            .spawn(async move {
+                match server_api
+                    .post_agent_run_client_event(&run_id, request)
+                    .await
+                {
+                    Ok(()) => {
+                        log::info!(
+                            "Successfully posted block client event for shared Oz run {run_id}"
+                        );
+                    }
+                    Err(err) => {
+                        log::warn!("Failed to post block client event for run {run_id}: {err:#}");
+                    }
+                }
+            })
+            .detach();
+    }
+
     fn active_block_is_considered_remote(&self, app: &AppContext) -> bool {
         let model = self.model.lock();
         let active_block = model.block_list().active_block();
@@ -11830,6 +11910,10 @@ impl TerminalView {
                             .spawn(async move { active_session.load_external_commands().await })
                             .detach();
                     }
+                }
+
+                if let BlockType::User(user_block_completed) = &block_type {
+                    self.maybe_persist_block_for_shared_oz_run(user_block_completed);
                 }
 
                 if let Some(delay) = command_finished_to_precmd_delay {
