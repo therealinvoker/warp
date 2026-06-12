@@ -2744,7 +2744,7 @@ impl BlocklistAIController {
                         }
                     }
                     Err(e) => {
-                        if matches!(e.as_ref(), AIApiError::QuotaLimit { .. }) {
+                        if let AIApiError::QuotaLimit { denial_reason, .. } = e.as_ref() {
                             // If the error is a quota limit, we want to refresh workspace metadata
                             // So the current state of AI overages is immediately up to date.
                             TeamUpdateManager::handle(ctx).update(
@@ -2755,8 +2755,13 @@ impl BlocklistAIController {
                                     );
                                 },
                             );
+                            let is_free_plan_no_ai = denial_reason.as_deref()
+                                == Some(crate::server::server_api::FREE_PLAN_NO_AI_DENIAL_REASON);
                             AIRequestUsageModel::handle(ctx).update(ctx, |model, ctx| {
                                 model.enable_buy_credits_banner(ctx);
+                                if is_free_plan_no_ai {
+                                    model.note_free_plan_no_ai_denial(ctx);
+                                }
                             });
                         }
 
@@ -3066,6 +3071,7 @@ impl BlocklistAIController {
                     history_model.mark_response_stream_completed_with_error(
                         RenderableAIError::QuotaLimit {
                             user_display_message: None,
+                            denial_reason: None,
                         },
                         stream_id,
                         conversation_id,
