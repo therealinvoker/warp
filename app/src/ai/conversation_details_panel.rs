@@ -2276,6 +2276,7 @@ impl TypedActionView for ConversationDetailsPanel {
                                 &WorkspaceAction::ContinueConversationLocally {
                                     conversation_id,
                                     initial_prompt: None,
+                                    initial_attachments: vec![],
                                     destination: ForkedConversationDestination::SplitPane,
                                 },
                             );
