@@ -169,6 +169,7 @@ impl Sessions {
                 | RemoteServerManagerEvent::SessionConnectionFailed { .. }
                 | RemoteServerManagerEvent::HostConnected { .. }
                 | RemoteServerManagerEvent::HostDisconnected { .. }
+                | RemoteServerManagerEvent::BundledSkillsSnapshot { .. }
                 | RemoteServerManagerEvent::NavigatedToDirectory { .. }
                 | RemoteServerManagerEvent::RepoMetadataSnapshot { .. }
                 | RemoteServerManagerEvent::RepoMetadataUpdated { .. }
@@ -188,8 +189,10 @@ impl Sessions {
                 | RemoteServerManagerEvent::GitPushResponse { .. }
                 | RemoteServerManagerEvent::CreatePrResponse { .. }
                 | RemoteServerManagerEvent::GenerateCommitMessageResponse { .. }
-                | RemoteServerManagerEvent::GetPrInfoResponse { .. }
-                | RemoteServerManagerEvent::GetCommittedBranchFilesResponse { .. } => {}
+                | RemoteServerManagerEvent::GetCommittedBranchFilesResponse { .. }
+                | RemoteServerManagerEvent::GitStatusPushReceived { .. }
+                | RemoteServerManagerEvent::GitHubPrInfoPushReceived { .. }
+                | RemoteServerManagerEvent::GitHubRepositoryInfoPushReceived { .. } => {}
                 RemoteServerManagerEvent::SessionReconnected {
                     session_id: sid,
                     client,

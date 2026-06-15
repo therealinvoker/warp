@@ -42,7 +42,7 @@ mod gpu_state;
 mod input_classifier;
 mod interval_timer;
 mod linear;
-#[cfg(not(target_family = "wasm"))]
+#[cfg(feature = "local_fs")]
 mod local_control;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod login_item;
@@ -151,6 +151,7 @@ use auth::auth_manager::AuthManager;
 use auth::auth_state::{AuthState, AuthStateProvider};
 use code::editor_management::CodeManager;
 use code::opened_files::OpenedFilesModel;
+use code_review::git_repo_model::GitRepoModels;
 use code_review::GlobalCodeReviewModel;
 use quit_warning::UnsavedStateSummary;
 #[cfg(feature = "local_fs")]
@@ -178,6 +179,8 @@ use watcher::HomeDirectoryWatcher;
 use crate::ai::active_agent_views_model::ActiveAgentViewsModel;
 #[cfg(not(target_family = "wasm"))]
 use crate::ai::aws_credentials::AwsCredentialRefresher as _;
+#[cfg(not(target_family = "wasm"))]
+use crate::ai::geap_credentials::GeapCredentialRefresher as _;
 use crate::ai::mcp::{FileBasedMCPManager, FileMCPWatcher};
 use crate::uri::web_intent_parser::maybe_rewrite_web_url_to_intent;
 pub mod workflows;
@@ -1173,7 +1176,21 @@ pub(crate) fn initialize_app(
     });
 
     let server_api = server_api_provider.as_ref(ctx).get();
+    #[cfg(not(target_family = "wasm"))]
+    if let Ok(run_id) = std::env::var(warp_cli::OZ_RUN_ID_ENV) {
+        match run_id.parse() {
+            Ok(task_id) => server_api.set_ambient_agent_task_id(Some(task_id)),
+            Err(err) => log::warn!("Ignoring invalid {}: {err}", warp_cli::OZ_RUN_ID_ENV),
+        }
+    }
     let ai_client = server_api_provider.as_ref(ctx).get_ai_client();
+    #[cfg(not(target_family = "wasm"))]
+    // Refresh starts only after the authenticated server client exists; tracing initialization
+    // remains responsible for deciding whether this process opted in to cloud-agent export.
+    tracing::start_auth_refresh(
+        server_api_provider.as_ref(ctx).get_managed_secrets_client(),
+        ctx,
+    );
 
     ctx.add_singleton_model(|_ctx| AuthStateProvider::new(auth_state.clone()));
 
@@ -1354,6 +1371,12 @@ pub(crate) fn initialize_app(
         let mut manager = ::ai::api_keys::ApiKeyManager::new(ctx);
         #[cfg(not(target_family = "wasm"))]
         manager.subscribe_to_settings_changes(ctx);
+        // Gemini Enterprise (GEAP) credential refresh triggers: workspace
+        // settings saves / team changes and the member's enablement toggle.
+        #[cfg(not(target_family = "wasm"))]
+        if FeatureFlag::GeminiEnterprise.is_enabled() {
+            manager.subscribe_to_geap_settings_changes(ctx);
+        }
         // The Grok subscription refresher (`ai::grok_subscription`) has no
         // visibility into workspace policy, so wire the BYO API key policy in
         // here. The initial value resumes proactive refresh of any tokens
@@ -1626,11 +1649,7 @@ pub(crate) fn initialize_app(
         });
     }
 
-    #[cfg(feature = "local_fs")]
-    {
-        use code_review::git_repo_model::GitRepoModels;
-        ctx.add_singleton_model(|_| GitRepoModels::new());
-    }
+    ctx.add_singleton_model(|_| GitRepoModels::new());
 
     ctx.add_singleton_model(|ctx| {
         ProjectManagementModel::new(persisted_projects, persistence_writer.sender(), ctx)
@@ -1904,6 +1923,8 @@ pub(crate) fn initialize_app(
 
     // SkillManager is used to cache SKILL.md files for all active terminal views and their working directories
     ctx.add_singleton_model(SkillManager::new);
+    #[cfg(all(not(target_family = "wasm"), feature = "local_fs"))]
+    ai::skills::wire_remote_bundled_skills(ctx);
 
     // CloudViewModel subscribes to UpdateManager so that it can be notified when objects are
     // created on the server.
@@ -2093,7 +2114,7 @@ pub(crate) fn initialize_app(
         ];
         http_server::HttpServer::new(routers, ctx)
     });
-    #[cfg(not(target_family = "wasm"))]
+    #[cfg(feature = "local_fs")]
     if matches!(
         launch_mode,
         LaunchMode::App { .. } | LaunchMode::Test { .. }

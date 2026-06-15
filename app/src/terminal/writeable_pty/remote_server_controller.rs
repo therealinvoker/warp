@@ -138,6 +138,7 @@ impl<T: EventLoopSender> RemoteServerController<T> {
             | RemoteServerManagerEvent::SessionDeregistered { .. }
             | RemoteServerManagerEvent::HostConnected { .. }
             | RemoteServerManagerEvent::HostDisconnected { .. }
+            | RemoteServerManagerEvent::BundledSkillsSnapshot { .. }
             | RemoteServerManagerEvent::NavigatedToDirectory { .. }
             | RemoteServerManagerEvent::RepoMetadataSnapshot { .. }
             | RemoteServerManagerEvent::RepoMetadataUpdated { .. }
@@ -158,8 +159,10 @@ impl<T: EventLoopSender> RemoteServerController<T> {
             | RemoteServerManagerEvent::GitPushResponse { .. }
             | RemoteServerManagerEvent::CreatePrResponse { .. }
             | RemoteServerManagerEvent::GenerateCommitMessageResponse { .. }
-            | RemoteServerManagerEvent::GetPrInfoResponse { .. }
-            | RemoteServerManagerEvent::GetCommittedBranchFilesResponse { .. } => {}
+            | RemoteServerManagerEvent::GetCommittedBranchFilesResponse { .. }
+            | RemoteServerManagerEvent::GitStatusPushReceived { .. }
+            | RemoteServerManagerEvent::GitHubPrInfoPushReceived { .. }
+            | RemoteServerManagerEvent::GitHubRepositoryInfoPushReceived { .. } => {}
         });
 
         Self {

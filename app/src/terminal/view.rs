@@ -24,6 +24,9 @@ pub use init_project::{
 };
 use onboarding::callout::{FinalState, OnboardingCalloutViewEvent, OnboardingQuery};
 use onboarding::{OnboardingCalloutView, OnboardingKeybindings};
+use repo_metadata::CanonicalizedPath;
+use warp_util::remote_path::RemotePath;
+use warp_util::standardized_path::StandardizedPath;
 
 use crate::ai::block_context::BlockContext;
 use crate::global_resource_handles::GlobalResourceHandlesProvider;
@@ -304,16 +307,12 @@ use crate::code_review::context::{
 #[cfg(feature = "local_fs")]
 use crate::code_review::diff_state::LocalDiffStateModel;
 use crate::code_review::diff_state::{DiffMode, GitDeltaPreference};
-#[cfg(feature = "local_fs")]
 use crate::code_review::git_repo_model::{GitRepoModels, GitRepoStatusModel, GitStatusMetadata};
-#[cfg(feature = "local_fs")]
 use crate::code_review::github_repo_model::GitHubRepoModel;
 use crate::code_review::telemetry_event::CodeReviewPaneEntrypoint;
 #[cfg(feature = "local_fs")]
 use crate::code_review::DiffSetScope;
-use crate::context_chips::prompt::Prompt;
-#[cfg(feature = "local_fs")]
-use crate::context_chips::prompt::PromptSelection;
+use crate::context_chips::prompt::{Prompt, PromptSelection};
 use crate::context_chips::prompt_type::PromptType;
 use crate::context_chips::ContextChipKind;
 use crate::drive::settings::WarpDriveSettings;
@@ -2432,6 +2431,13 @@ impl DropTargetData for TerminalDropTargetData {
     }
 }
 
+/// Cached result of [`TerminalView::canonical_session_pwd_if_local`].
+struct LocalSessionCanonicalPwdCache {
+    /// Non-canonical path
+    path: PathBuf,
+    canonical: CanonicalizedPath,
+}
+
 pub struct TerminalView {
     pub model: Arc<FairMutex<TerminalModel>>,
     view_handle: WeakViewHandle<Self>,
@@ -2580,6 +2586,8 @@ pub struct TerminalView {
 
     sessions: ModelHandle<Sessions>,
     active_block_metadata: Option<BlockMetadata>,
+    /// Memoized result of `canonical_session_pwd_if_local`.
+    canonical_session_pwd_cache: RefCell<Option<LocalSessionCanonicalPwdCache>>,
 
     block_text_selection_start_position: Option<Vector2F>,
 
@@ -2771,17 +2779,14 @@ pub struct TerminalView {
     agent_todos_popup: ViewHandle<AgentTodosPopupView>,
 
     /// Per-repo git status model for the current repository, if any.
-    #[cfg(feature = "local_fs")]
     git_repo_status: Option<ModelHandle<GitRepoStatusModel>>,
 
     /// Per-repo GitHub-info model for the current repository, if any.
-    #[cfg(feature = "local_fs")]
     github_repo_model: Option<ModelHandle<GitHubRepoModel>>,
 
     /// Deferred code review open request, stashed when [`GitDeltaPreference::OnlyDirty`] is
     /// requested but git status metadata has not loaded yet. Consumed in
     /// [`Self::handle_git_repo_status_event`].
-    #[cfg(feature = "local_fs")]
     deferred_code_review_open: Option<DeferredCodeReviewOpen>,
 
     /// A list of callbacks to run on the next [`ModelEvent::AfterBlockCompleted`] received.
@@ -2892,7 +2897,6 @@ pub struct TerminalView {
 /// Parameters stashed when a code review pane open is requested with
 /// [`GitDeltaPreference::OnlyDirty`] but git status metadata is not yet available.
 /// Consumed once the per-repo [`GitRepoStatusModel`] delivers its first update.
-#[cfg(feature = "local_fs")]
 struct DeferredCodeReviewOpen {
     git_delta_preference: GitDeltaPreference,
     focus_new_pane: bool,
@@ -4273,6 +4277,7 @@ impl TerminalView {
             sessions,
             remote_server_shimmer_handle: ShimmeringTextStateHandle::new(),
             active_block_metadata: None,
+            canonical_session_pwd_cache: RefCell::new(None),
             block_text_selection_start_position: None,
             background_executor: ctx.background_executor().clone(),
             inline_banners_state: Default::default(),
@@ -4338,11 +4343,8 @@ impl TerminalView {
             model_events_handle,
             is_todo_popup_visible: false,
             agent_todos_popup,
-            #[cfg(feature = "local_fs")]
             git_repo_status: None,
-            #[cfg(feature = "local_fs")]
             github_repo_model: None,
-            #[cfg(feature = "local_fs")]
             deferred_code_review_open: None,
             block_completed_callbacks: Default::default(),
             conversation_completed_callbacks: Default::default(),
@@ -4704,6 +4706,7 @@ impl TerminalView {
                     }
                     RemoteServerManagerEvent::SessionConnecting { .. }
                     | RemoteServerManagerEvent::HostConnected { .. }
+                    | RemoteServerManagerEvent::BundledSkillsSnapshot { .. }
                     | RemoteServerManagerEvent::RepoMetadataSnapshot { .. }
                     | RemoteServerManagerEvent::RepoMetadataUpdated { .. }
                     | RemoteServerManagerEvent::RepoMetadataDirectoryLoaded { .. }
@@ -4720,8 +4723,10 @@ impl TerminalView {
                     | RemoteServerManagerEvent::GitPushResponse { .. }
                     | RemoteServerManagerEvent::CreatePrResponse { .. }
                     | RemoteServerManagerEvent::GenerateCommitMessageResponse { .. }
-                    | RemoteServerManagerEvent::GetPrInfoResponse { .. }
-                    | RemoteServerManagerEvent::GetCommittedBranchFilesResponse { .. } => {}
+                    | RemoteServerManagerEvent::GetCommittedBranchFilesResponse { .. }
+                    | RemoteServerManagerEvent::GitStatusPushReceived { .. }
+                    | RemoteServerManagerEvent::GitHubPrInfoPushReceived { .. }
+                    | RemoteServerManagerEvent::GitHubRepositoryInfoPushReceived { .. } => {}
                 }
             });
         }
@@ -4864,9 +4869,24 @@ impl TerminalView {
             .push(Box::new(callback));
     }
 
+    /// Handles `conversation_id`'s turn finishing with `finish_reason`: fires
+    /// the pane-level finished callbacks and drains the conversation's queued
+    /// prompts.
     fn handle_finished_conversation(
         &mut self,
         conversation_id: AIConversationId,
+        finish_reason: FinishReason,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        self.fire_conversation_finished_callbacks(finish_reason, ctx);
+        self.drain_queued_prompts(conversation_id, finish_reason, ctx);
+    }
+
+    /// Fires the pane-level one-shot callbacks registered via
+    /// [`Self::on_next_conversation_finished`], plus the queued-prompt
+    /// callback if one is armed.
+    fn fire_conversation_finished_callbacks(
+        &mut self,
         finish_reason: FinishReason,
         ctx: &mut ViewContext<Self>,
     ) {
@@ -4881,7 +4901,6 @@ impl TerminalView {
         if let Some(callback) = queued_prompt {
             callback(self, finish_reason, ctx);
         }
-        self.drain_queued_prompts(conversation_id, finish_reason, ctx);
     }
 
     /// Advances the queued-prompts queue after a dispatched queued command's block completes.
@@ -4925,7 +4944,6 @@ impl TerminalView {
             .is_some()
     }
 
-    #[cfg(feature = "local_fs")]
     fn handle_git_repo_status_event(&mut self, ctx: &mut ViewContext<Self>) {
         if let Some(deferred) = self.deferred_code_review_open.take() {
             self.toggle_code_review_pane(
@@ -4945,7 +4963,6 @@ impl TerminalView {
     /// repo path. Use this when unsubscribing because the subscription is no
     /// longer needed (e.g. the git chip was removed) but the user is still in
     /// the same repository.
-    #[cfg(feature = "local_fs")]
     fn clear_git_repo_status_subscription(&mut self, ctx: &mut ViewContext<Self>) {
         let git_repo_status = self.git_repo_status.take();
         if let Some(handle) = &git_repo_status {
@@ -4963,7 +4980,6 @@ impl TerminalView {
         });
     }
 
-    #[cfg(feature = "local_fs")]
     fn clear_github_repo_model(&mut self, ctx: &mut ViewContext<Self>) {
         let Some(handle) = self.github_repo_model.take() else {
             return;
@@ -4989,7 +5005,6 @@ impl TerminalView {
 
     /// Fully clear the per-repo git status handle, including the input's repo
     /// path. Use this when navigating out of a git repository.
-    #[cfg(feature = "local_fs")]
     fn clear_git_repo_status(&mut self, ctx: &mut ViewContext<Self>) {
         self.clear_git_repo_status_subscription(ctx);
         self.input.update(ctx, |input, ctx| {
@@ -4998,14 +5013,12 @@ impl TerminalView {
     }
 
     /// Helper to read metadata from the per-repo sub-model.
-    #[cfg(feature = "local_fs")]
     fn git_status_metadata<'a>(&'a self, ctx: &'a AppContext) -> Option<&'a GitStatusMetadata> {
         self.git_repo_status
             .as_ref()
             .and_then(|h| h.as_ref(ctx).metadata(ctx))
     }
 
-    #[cfg(feature = "local_fs")]
     fn uses_git_status_chips(chips: Vec<ContextChipKind>) -> bool {
         chips.iter().any(|chip| {
             matches!(
@@ -5016,7 +5029,6 @@ impl TerminalView {
     }
 
     /// Returns whether visible prompt/footer chips need git status updates.
-    #[cfg(feature = "local_fs")]
     fn needs_git_status_for_chip_ui(&self, ctx: &AppContext) -> bool {
         // Agent view: subscribe when the configured agent footer includes
         // git stats or PR info.
@@ -5050,20 +5062,16 @@ impl TerminalView {
         is_using_warp_prompt && Self::uses_git_status_chips(Prompt::as_ref(ctx).chip_kinds())
     }
 
-    #[cfg(feature = "local_fs")]
     fn needs_git_status_for_agent_context(&self, ctx: &AppContext) -> bool {
-        self.current_local_repo_path().is_some()
-            && self.ai_input_model.as_ref(ctx).is_ai_input_enabled()
+        self.current_repo_path.is_some() && self.ai_input_model.as_ref(ctx).is_ai_input_enabled()
     }
 
     /// Returns whether this terminal view should subscribe to git status updates.
-    #[cfg(feature = "local_fs")]
     fn should_subscribe_to_git_status(&self, ctx: &AppContext) -> bool {
         self.needs_git_status_for_chip_ui(ctx) || self.needs_git_status_for_agent_context(ctx)
     }
 
     /// Whether the terminal's prompt/footer chips need PR info.
-    #[cfg(feature = "local_fs")]
     fn needs_pr_info_for_chip_ui(&self, ctx: &AppContext) -> bool {
         if self.agent_view_controller.as_ref(ctx).is_active() {
             return SessionSettings::as_ref(ctx)
@@ -5089,19 +5097,15 @@ impl TerminalView {
                     .contains(&ContextChipKind::GithubPullRequest))
     }
 
-    #[cfg(feature = "local_fs")]
     fn needs_pr_info_for_agent_context(&self, ctx: &AppContext) -> bool {
-        self.current_local_repo_path().is_some()
-            && self.ai_input_model.as_ref(ctx).is_ai_input_enabled()
+        self.current_repo_path.is_some() && self.ai_input_model.as_ref(ctx).is_ai_input_enabled()
     }
 
     /// Whether this terminal needs PR info from the git status model.
-    #[cfg(feature = "local_fs")]
     fn needs_pr_info(&self, ctx: &AppContext) -> bool {
         self.needs_pr_info_for_chip_ui(ctx) || self.needs_pr_info_for_agent_context(ctx)
     }
 
-    #[cfg(feature = "local_fs")]
     fn should_retry_default_pr_chip_validation(ctx: &AppContext) -> bool {
         let settings = SessionSettings::as_ref(ctx);
         FeatureFlag::GithubPrPromptChip.is_enabled()
@@ -5111,16 +5115,17 @@ impl TerminalView {
 
     /// Re-evaluate whether the terminal needs a PR-info subscription, and
     /// acquire or drop the handle accordingly.
-    #[cfg(feature = "local_fs")]
     fn sync_pr_info_subscription(&mut self, ctx: &mut ViewContext<Self>) {
         let needs_pr_info = self.needs_pr_info(ctx);
         if needs_pr_info && self.github_repo_model.is_none() {
-            let Some(repo_path) = self.current_local_repo_path().map(Path::to_path_buf) else {
+            // Acquire a GitHub-info handle for the current repo. The factory
+            // dispatches on the `LocalOrRemotePath` to a local `gh`-driven model
+            // or a remote push receiver, both wired up identically.
+            let Some(repo) = self.current_repo_path.clone() else {
                 return;
             };
-            let result = GitRepoModels::handle(ctx).update(ctx, |model, ctx| {
-                model.subscribe_github_repo(&repo_path, ctx)
-            });
+            let result = GitRepoModels::handle(ctx)
+                .update(ctx, |model, ctx| model.subscribe_github_repo(&repo, ctx));
             match result {
                 Ok(handle) => {
                     let weak_for_prompt = handle.downgrade();
@@ -5168,49 +5173,56 @@ impl TerminalView {
         });
     }
 
-    /// No-op when the `local_fs` feature is disabled – git status is not
-    /// available so there is nothing to subscribe to.
-    #[cfg(not(feature = "local_fs"))]
-    fn update_git_status_subscription(&mut self, _ctx: &mut ViewContext<Self>) {}
-
     /// Re-evaluate whether this terminal view should be subscribed to git
     /// status updates and subscribe/unsubscribe accordingly.
-    #[cfg(feature = "local_fs")]
     fn update_git_status_subscription(&mut self, ctx: &mut ViewContext<Self>) {
         let should_subscribe = self.should_subscribe_to_git_status(ctx);
-        if should_subscribe {
-            // Subscribe if we have a repo path but no active subscription.
+        if !should_subscribe {
             if self.git_repo_status.is_some() {
-                self.sync_pr_info_subscription(ctx);
-            } else if let Some(repo_path) = self.current_local_repo_path().map(Path::to_path_buf) {
-                let result = GitRepoModels::handle(ctx)
-                    .update(ctx, |model, ctx| model.subscribe(&repo_path, ctx));
-                match result {
-                    Ok(handle) => {
-                        ctx.subscribe_to_model(&handle, |me, _, _, ctx| {
-                            me.handle_git_repo_status_event(ctx);
-                        });
-                        let weak_for_prompt = handle.downgrade();
-                        self.git_repo_status = Some(handle);
-                        self.current_prompt.update(ctx, |prompt_type, ctx| {
-                            if let PromptType::Dynamic { prompt } = prompt_type {
-                                prompt.update(ctx, |current_prompt, ctx| {
-                                    current_prompt.set_git_repo_status(Some(weak_for_prompt), ctx);
-                                });
-                            }
-                        });
-                        // Acquire a GitHub-info handle if the terminal's
-                        // prompt/footer chips or agent context need PR or
-                        // repository info.
-                        self.sync_pr_info_subscription(ctx);
-                    }
-                    Err(err) => {
-                        log::warn!("GitRepoModels subscribe failed: {err}");
-                    }
-                }
+                self.clear_git_repo_status_subscription(ctx);
             }
-        } else if self.git_repo_status.is_some() {
-            self.clear_git_repo_status_subscription(ctx);
+            return;
+        }
+
+        // Already subscribed — keep the PR-info (GitHub) subscription in sync.
+        if self.git_repo_status.is_some() {
+            self.sync_pr_info_subscription(ctx);
+            return;
+        }
+
+        // No active subscription: create one for the current repo. The factory
+        // dispatches on the `LocalOrRemotePath` to a local watcher-backed model
+        // or a remote push receiver, both wired up identically.
+        let Some(repo) = self.current_repo_path.clone() else {
+            return;
+        };
+        let result =
+            GitRepoModels::handle(ctx).update(ctx, |model, ctx| model.subscribe(&repo, ctx));
+        match result {
+            Ok(handle) => {
+                // Wire the freshly-obtained per-repo `GitRepoStatusModel` handle
+                // (local or remote) into this view: subscribe for events, feed
+                // the prompt, store the handle, and sync the PR-info consumer slot.
+                ctx.subscribe_to_model(&handle, |me, _, _, ctx| {
+                    me.handle_git_repo_status_event(ctx);
+                });
+                let weak_for_prompt = handle.downgrade();
+                self.git_repo_status = Some(handle);
+                self.current_prompt.update(ctx, |prompt_type, ctx| {
+                    if let PromptType::Dynamic { prompt } = prompt_type {
+                        prompt.update(ctx, |current_prompt, ctx| {
+                            current_prompt.set_git_repo_status(Some(weak_for_prompt), ctx);
+                        });
+                    }
+                });
+                // Acquire a GitHub-info handle if the terminal's prompt/footer
+                // chips or agent context need PR or repository info. The AI
+                // context model reads PR / repository info from that GitHub-info
+                // handle, so it is wired up by `sync_pr_info_subscription` rather
+                // than here.
+                self.sync_pr_info_subscription(ctx);
+            }
+            Err(err) => log::warn!("GitRepoModels subscribe failed: {err}"),
         }
     }
 
@@ -5242,13 +5254,11 @@ impl TerminalView {
             // handing off to it — not the end of the overall turn. Defer
             // conversation-finished side effects (e.g. firing a queued `/queue`
             // prompt) until the entire turn is actually done.
-            let has_active_subagent = || {
-                BlocklistAIHistoryModel::as_ref(ctx)
-                    .conversation(conversation_id)
-                    .is_some_and(|c| c.has_active_subagent())
-            };
+            let has_active_subagent = BlocklistAIHistoryModel::as_ref(ctx)
+                .conversation(conversation_id)
+                .is_some_and(|c| c.has_active_subagent());
 
-            let mut finish_reason: Option<FinishReason> = None;
+            let mut pane_finish_reason: Option<FinishReason> = None;
             if let Some(active_ai_block) = self.active_ai_block(ctx) {
                 // A new exchange is already active, so callbacks for the
                 // just-finished exchange will be skipped. Clear any pending
@@ -5265,14 +5275,28 @@ impl TerminalView {
                 if self.pending_user_query_view_id.is_some() && !is_same_conversation {
                     self.remove_pending_user_query_block(ctx);
                 }
-            } else if !has_active_subagent() {
+            } else if !has_active_subagent {
                 if let Some(last_ai_block) = self.last_ai_block() {
-                    finish_reason = last_ai_block.as_ref(ctx).finish_reason();
+                    pane_finish_reason = last_ai_block.as_ref(ctx).finish_reason();
                 }
             }
 
-            if let Some(reason) = finish_reason {
-                self.handle_finished_conversation(*conversation_id, reason, ctx);
+            // Pane-scoped: the one-shot conversation-finished callbacks fire
+            // when the pane's most recent block is done.
+            if let Some(reason) = pane_finish_reason {
+                self.fire_conversation_finished_callbacks(reason, ctx);
+            }
+
+            // Conversation-scoped: drain this conversation's queued prompts
+            // keyed off its own most recent block. The pane-global lookup
+            // above can observe a sibling conversation's block instead
+            // (orchestration panes host the lead and local child conversations
+            // in one view), so it can't drive the drain decision or supply the
+            // finish reason.
+            if !has_active_subagent {
+                if let Some(reason) = self.finish_reason_for_conversation(*conversation_id, ctx) {
+                    self.drain_queued_prompts(*conversation_id, reason, ctx);
+                }
             }
 
             // If the most recent action in the current interaction turn created or updated a plan
@@ -5610,17 +5634,19 @@ impl TerminalView {
     }
 
     pub fn attach_path_as_context(&mut self, path: &Path, ctx: &mut ViewContext<Self>) {
-        // If a CLI agent is running, write the path directly to the PTY.
-        if self.active_cli_agent(ctx).is_some() {
-            let content = path.to_string_lossy().to_string();
-            self.write_to_pty(content.into_bytes(), ctx);
-            self.focus_terminal(ctx);
+        let content = path.to_string_lossy().to_string();
+
+        // If a CLI agent is running, route the context to rich input when it is
+        // open, otherwise fall back to writing directly to the PTY.
+        if self
+            .try_send_text_to_cli_agent_or_rich_input(content.clone(), ctx)
+            .is_some()
+        {
             return;
         }
 
         self.input.update(ctx, |input, ctx| {
-            let content = path.to_string_lossy();
-            input.append_to_buffer(content.as_ref(), ctx);
+            input.append_to_buffer(content.as_str(), ctx);
             ctx.notify();
         });
     }
@@ -7667,6 +7693,36 @@ impl TerminalView {
         } else {
             None
         }
+    }
+
+    /// Returns the active local session's CWD, canonicalized via `dunce::canonicalize` to resolve
+    /// symlinks and normalize the path.
+    ///
+    /// The canonicalization is memoized in `canonical_session_pwd_cache`, keyed on the
+    /// non-canonical path, and only recomputed when that path changes.
+    pub fn canonical_session_pwd_if_local<C: ModelAsRef>(
+        &self,
+        ctx: &C,
+    ) -> Option<CanonicalizedPath> {
+        let path = self.active_session_path_if_local(ctx)?;
+
+        // Return the cached value when the non-canonical path has not changed.
+        if let Some(cached) = self.canonical_session_pwd_cache.borrow().as_ref() {
+            if cached.path == path {
+                return Some(cached.canonical.clone());
+            }
+        }
+
+        let canonical = CanonicalizedPath::try_from(&path).ok()?;
+
+        if let Ok(mut cache) = self.canonical_session_pwd_cache.try_borrow_mut() {
+            *cache = Some(LocalSessionCanonicalPwdCache {
+                path,
+                canonical: canonical.clone(),
+            });
+        }
+
+        Some(canonical)
     }
 
     pub fn input(&self) -> &ViewHandle<Input> {
@@ -11240,6 +11296,17 @@ impl TerminalView {
                                     ctx.emit(Event::Pane(PaneEvent::RemoteRepoNavigated {
                                         remote_path: remote_path.clone(),
                                     }));
+
+                                    // Wire up the remote git-status chips when the
+                                    // remote repo changed (mirrors the local branch).
+                                    let changed = !matches!(
+                                        old_repo_path.as_ref(),
+                                        Some(LocalOrRemotePath::Remote(rp)) if rp == remote_path
+                                    );
+                                    if changed {
+                                        me.clear_git_repo_status_subscription(ctx);
+                                        me.update_git_status_subscription(ctx);
+                                    }
                                 }
                                 Some(LocalOrRemotePath::Local(repo_path)) => {
                                     #[cfg(feature = "local_fs")]
@@ -11252,7 +11319,7 @@ impl TerminalView {
                                         };
 
                                         let Ok(active_directory) =
-                                            repo_metadata::CanonicalizedPath::try_from(
+                                            CanonicalizedPath::try_from(
                                                 active_directory,
                                             )
                                         else {
@@ -11309,7 +11376,6 @@ impl TerminalView {
                                     let _ = repo_path;
                                 }
                                 None => {
-                                    #[cfg(feature = "local_fs")]
                                     me.clear_git_repo_status(ctx);
                                     ctx.notify();
                                 }
@@ -13270,10 +13336,9 @@ impl TerminalView {
         self.any_session_contains_remote_blocks |= self.active_block_is_considered_remote(ctx);
         self.update_focused_terminal_info(ctx);
 
-        if let Some(working_directory) = self.pwd_if_local(ctx) {
+        if let Some(working_directory) = self.active_session_path_if_local(ctx) {
             CodebaseIndexManager::handle(ctx).update(ctx, |manager, _ctx| {
-                let path_buf = PathBuf::from(&working_directory);
-                manager.handle_session_bootstrapped(&path_buf);
+                manager.handle_session_bootstrapped(&working_directory);
             });
         }
 
@@ -13714,11 +13779,10 @@ impl TerminalView {
         self.init_project(true, ctx);
     }
 
-    // Show or hide codebase index speedbump depending when a settings change happens.
+    /// Show or hide codebase index speedbump depending when a settings change happens.
     fn check_codebase_index_speedbump_on_settings_changed(&mut self, ctx: &mut ViewContext<Self>) {
-        if let Some(working_directory) = self.pwd_if_local(ctx) {
-            let path_buf = PathBuf::from(&working_directory);
-            self.update_repo_banner_state(path_buf, ctx);
+        if let Some(working_directory) = self.active_session_path_if_local(ctx) {
+            self.update_repo_banner_state(working_directory, ctx);
         }
     }
 
@@ -20225,6 +20289,19 @@ impl TerminalView {
         })
     }
 
+    /// Returns the finish reason of the most recent AI block belonging to
+    /// `conversation_id`, or `None` when the conversation has no AI blocks in
+    /// this view or its most recent block is still in flight.
+    fn finish_reason_for_conversation(
+        &self,
+        conversation_id: AIConversationId,
+        ctx: &AppContext,
+    ) -> Option<FinishReason> {
+        self.ai_block_metadata_for_current_thread(&conversation_id, ctx)
+            .next()
+            .and_then(|ai_metadata| ai_metadata.ai_block_handle.as_ref(ctx).finish_reason())
+    }
+
     /// Check if there's an active (non-completed, non-cancelled) /init in progress
     fn has_active_init_project(&self, ctx: &AppContext) -> bool {
         self.active_init_project_model
@@ -22306,6 +22383,30 @@ impl TerminalView {
         output: String,
         ctx: &mut ViewContext<Self>,
     ) -> ViewHandle<AIBlock> {
+        self.insert_dummy_ai_block_internal(query, Some(output), ctx)
+    }
+
+    /// Inserts a dummy AI block that is still streaming (unfinished), for tests
+    /// that need an in-flight block in the pane.
+    #[cfg(any(test, feature = "integration_tests"))]
+    pub fn insert_dummy_streaming_ai_block(
+        &mut self,
+        query: String,
+        ctx: &mut ViewContext<Self>,
+    ) -> ViewHandle<AIBlock> {
+        self.insert_dummy_ai_block_internal(query, None, ctx)
+    }
+
+    /// Shared body for the dummy AI block insertion helpers. Creates a fresh
+    /// conversation for the block; a `None` output models a block that is
+    /// still streaming (unfinished).
+    #[cfg(any(test, feature = "integration_tests"))]
+    fn insert_dummy_ai_block_internal(
+        &mut self,
+        query: String,
+        output: Option<String>,
+        ctx: &mut ViewContext<Self>,
+    ) -> ViewHandle<AIBlock> {
         use rand::distributions::{Alphanumeric, DistString};
 
         use crate::ai::agent::{
@@ -22329,7 +22430,7 @@ impl TerminalView {
             intended_agent: None,
         }];
 
-        let output = AIAgentOutput {
+        let output = output.map(|output| AIAgentOutput {
             messages: vec![AIAgentOutputMessage::text(
                 MessageId::new("fake-id".to_owned()),
                 AIAgentText {
@@ -22343,7 +22444,7 @@ impl TerminalView {
                 Alphanumeric.sample_string(&mut rand::thread_rng(), 24)
             ))),
             ..Default::default()
-        };
+        });
 
         // Create a real conversation in the history model for this dummy block so it renders.
         let terminal_view_id = ctx.view_id();
@@ -22357,7 +22458,10 @@ impl TerminalView {
         });
         let conversation_id = new_conversation_id.expect("conversation created for dummy AI block");
 
-        let ai_block_model = Rc::new(FakeAIBlockModel::new(inputs, output));
+        let ai_block_model = Rc::new(match output {
+            Some(output) => FakeAIBlockModel::new(inputs, output),
+            None => FakeAIBlockModel::new_streaming(inputs),
+        });
         let ai_block = ctx.add_typed_action_view(|ctx| {
             AIBlock::new(
                 ai_block_model,
@@ -22795,10 +22899,10 @@ impl TerminalView {
                 SessionType::WarpifiedRemote { host_id } => host_id,
                 SessionType::Local => return None,
             }?;
-            let std_path = warp_util::standardized_path::StandardizedPath::try_new(cwd_str).ok()?;
-            Some(LocalOrRemotePath::Remote(
-                warp_util::remote_path::RemotePath::new(host_id, std_path),
-            ))
+            let std_path = StandardizedPath::try_new(cwd_str).ok()?;
+            Some(LocalOrRemotePath::Remote(RemotePath::new(
+                host_id, std_path,
+            )))
         }
     }
 
@@ -25405,16 +25509,17 @@ impl TerminalView {
     fn start_lsp_server_in_active_pwd(&self, ctx: &mut ViewContext<Self>) {
         use crate::ai::persisted_workspace::LspTask;
 
-        let Some(cwd) = self
-            .pwd_if_local(ctx)
-            .map(PathBuf::from)
-            .and_then(|p| p.canonicalize().ok())
-        else {
+        let Some(cwd) = self.canonical_session_pwd_if_local(ctx) else {
             return;
         };
 
         PersistedWorkspace::handle(ctx).update(ctx, |workspace, ctx| {
-            workspace.execute_lsp_task(LspTask::Spawn { file_path: cwd }, ctx);
+            workspace.execute_lsp_task(
+                LspTask::Spawn {
+                    file_path: cwd.into(),
+                },
+                ctx,
+            );
         });
     }
 

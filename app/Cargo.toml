@@ -318,6 +318,7 @@ hyper.workspace = true
 libsqlite3-sys = { version = "0.33.0", features = ["bundled"] }
 mio = { version = "1.1.1", features = ["os-poll", "os-ext"] }
 opentelemetry.workspace = true
+opentelemetry-http.workspace = true
 opentelemetry-otlp.workspace = true
 opentelemetry_sdk.workspace = true
 tokio.workspace = true
@@ -464,6 +465,7 @@ autoupdate = []
 figma_detection = []
 bundled_skills = []
 supergrok = []
+gemini_enterprise = []
 agent_mode = []
 agent_mode_computer_use = []
 agent_mode_debug = []
@@ -722,7 +724,6 @@ nld_heuristic_v2 = ["input_classifier/nld_heuristic_v2"]
 nld_prompt_history_match = []
 msys2_shells = []
 file_retrieval_tools = []
-welcome_tab = []
 get_started_tab = []
 code_mode_chip = []
 github_pr_prompt_chip = []
