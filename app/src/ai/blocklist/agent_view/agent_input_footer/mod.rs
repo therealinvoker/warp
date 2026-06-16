@@ -55,7 +55,9 @@ use crate::ai::blocklist::history_model::{BlocklistAIHistoryEvent, BlocklistAIHi
 use crate::ai::blocklist::prompt::prompt_alert::{PromptAlertEvent, PromptAlertView};
 use crate::ai::blocklist::usage::{icon_for_context_window_usage, LongContextWarningState};
 use crate::ai::blocklist::BlocklistAIInputModel;
-use crate::ai::execution_profiles::profiles::AIExecutionProfilesModel;
+use crate::ai::execution_profiles::profiles::{
+    AIExecutionProfilesModel, AIExecutionProfilesModelEvent, ClientProfileId,
+};
 use crate::ai::harness_availability::HarnessAvailabilityModel;
 use crate::ai::llms::{LLMPreferences, LLMPreferencesEvent};
 use crate::ai::AIRequestUsageModel;
@@ -130,6 +132,31 @@ const START_REMOTE_CONTROL_LOGIN_REQUIRED_TOOLTIP: &str = "Log in to use /remote
 const OPENAI_LONG_CONTEXT_PRICING_WARNING_TOOLTIP: &str = "OpenAI long-context pricing in effect";
 
 const CLOUD_MODE_V2_FOOTER_GAP: f32 = 4.;
+
+fn llm_preferences_event_affects_long_context_warning(event: &LLMPreferencesEvent) -> bool {
+    match event {
+        LLMPreferencesEvent::UpdatedAvailableLLMs
+        | LLMPreferencesEvent::UpdatedActiveAgentModeLLM => true,
+        LLMPreferencesEvent::UpdatedActiveCodingLLM => false,
+    }
+}
+
+fn execution_profile_event_affects_long_context_warning(
+    event: &AIExecutionProfilesModelEvent,
+    active_profile_id: ClientProfileId,
+    terminal_view_id: EntityId,
+) -> bool {
+    match event {
+        AIExecutionProfilesModelEvent::ProfileUpdated(profile_id) => {
+            *profile_id == active_profile_id
+        }
+        AIExecutionProfilesModelEvent::ProfileDeleted => true,
+        AIExecutionProfilesModelEvent::UpdatedActiveProfile {
+            terminal_view_id: updated_terminal_view_id,
+        } => *updated_terminal_view_id == terminal_view_id,
+        AIExecutionProfilesModelEvent::ProfileCreated => false,
+    }
+}
 
 /// Voice input state for the CLI agent footer. Unlike the editor-based voice
 /// flow (which goes through Input → EditorView), this state is self-contained
@@ -716,20 +743,10 @@ impl AgentInputFooter {
         ctx.subscribe_to_model(
             &LLMPreferences::handle(ctx),
             |me, preferences, event, ctx| {
-                let LLMPreferencesEvent::UpdatedActiveAgentModeLLM = event else {
+                if !llm_preferences_event_affects_long_context_warning(event) {
                     return;
-                };
-                let (effective_model_provider, effective_model_threshold) = {
-                    let active_base_model = preferences
-                        .as_ref(ctx)
-                        .get_active_base_model(ctx, Some(me.terminal_view_id));
-                    (
-                        active_base_model.provider.clone(),
-                        active_base_model.context_window.long_context_threshold,
-                    )
-                };
-                me.long_context_warning_state
-                    .update_effective_model(effective_model_provider, effective_model_threshold);
+                }
+                me.sync_long_context_warning_from_effective_model(preferences.as_ref(ctx), ctx);
                 me.update_context_window_button(ctx);
             },
         );
@@ -785,10 +802,29 @@ impl AgentInputFooter {
                 _ => {}
             },
         );
-        // Subscribe to AIExecutionProfilesModel to potentially show/hide the profile selector button when profiles are added/removed
-        ctx.subscribe_to_model(&AIExecutionProfilesModel::handle(ctx), |_, _, _, ctx| {
-            ctx.notify();
-        });
+        // Subscribe to AIExecutionProfilesModel to potentially show/hide the profile selector button
+        // when profiles are added/removed and keep the warning in sync with the active profile.
+        ctx.subscribe_to_model(
+            &AIExecutionProfilesModel::handle(ctx),
+            |me, profiles, event, ctx| {
+                let active_profile_id = *profiles
+                    .as_ref(ctx)
+                    .active_profile(Some(me.terminal_view_id), ctx)
+                    .id();
+                if execution_profile_event_affects_long_context_warning(
+                    event,
+                    active_profile_id,
+                    me.terminal_view_id,
+                ) {
+                    me.sync_long_context_warning_from_effective_model(
+                        LLMPreferences::as_ref(ctx),
+                        ctx,
+                    );
+                    me.update_context_window_button(ctx);
+                }
+                ctx.notify();
+            },
+        );
 
         ctx.subscribe_to_model(
             &BlocklistAIHistoryModel::handle(ctx),
@@ -1074,6 +1110,18 @@ impl AgentInputFooter {
             .map_or(0, |conversation| conversation.total_input_tokens());
         self.long_context_warning_state
             .sync_from_server(total_input_tokens);
+    }
+
+    fn sync_long_context_warning_from_effective_model(
+        &mut self,
+        preferences: &LLMPreferences,
+        app: &AppContext,
+    ) {
+        let active_base_model = preferences.get_active_base_model(app, Some(self.terminal_view_id));
+        self.long_context_warning_state.update_effective_model(
+            active_base_model.provider.clone(),
+            active_base_model.context_window.long_context_threshold,
+        );
     }
 
     fn has_active_cli_agent_input_session(&self, app: &AppContext) -> bool {
@@ -3042,3 +3090,7 @@ impl ActionButtonTheme for NLDButtonTheme {
         true
     }
 }
+
+#[cfg(test)]
+#[path = "mod_tests.rs"]
+mod tests;
