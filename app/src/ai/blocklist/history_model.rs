@@ -245,6 +245,9 @@ pub struct BlocklistAIHistoryModel {
     /// conversations out of local history and navigation.
     conversation_transcript_viewer_terminal_view_ids: HashSet<EntityId>,
 
+    // TODO: When up-arrow prompt history supports pagination, consolidate
+    // `persisted_queries` and `prompt_history` (both seeded from the same `ai_queries`
+    // read) and share the in-memory conversation appending done by `all_ai_queries`.
     /// AI queries that were read from the SQLite DB. These exchanges do not contain as much
     /// information as the other exchanges we store because they are only used for display in
     /// history.

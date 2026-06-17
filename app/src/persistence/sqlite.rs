@@ -2754,6 +2754,8 @@ fn read_sqlite_data(
 
     // Seed up-arrow prompt history and (optionally) NLD prompt-history matching from a single
     // SQLite read, deriving both from the same in-memory query vector instead of reading twice.
+    // TODO: Once up-arrow prompt history supports pagination, drop the 100-row up-arrow cap and
+    // serve both up-arrow and NLD matching from one consolidated query list.
     let recent_ai_queries = read_recent_ai_queries(conn)?;
     let nld_prompts = if FeatureFlag::NldPromptHistoryMatch.is_enabled() {
         process_ai_queries_for_nld_history_match(&recent_ai_queries)
