@@ -2388,7 +2388,7 @@ enum ActiveCommandCtrlCAction {
 struct CtrlCActiveBlockState {
     is_long_running: bool,
     is_agent_in_control_of_command: bool,
-    is_executing_agent_requested_command: bool,
+    is_agent_requested_command_before_lrc_control: bool,
     conversation_id_to_stop: Option<AIConversationId>,
 }
 
@@ -7432,6 +7432,8 @@ impl TerminalView {
                         block.on_requested_command_execution_started(action_id.clone(), ctx)
                     });
                 }
+                // Requested command approvals focus the blocklist so Enter accepts them. After
+                // acceptance, route input back through the terminal for the running command.
                 if ctx.is_self_or_child_focused() {
                     self.redetermine_global_focus(ctx);
                 }
@@ -7442,6 +7444,8 @@ impl TerminalView {
                     // give some buffer to actually determine if its long running.
                     Timer::after(Duration::from_millis(LONG_RUNNING_COMMAND_DURATION_MS * 2)),
                     move |me, _, ctx| {
+                        // Ctrl-C can suppress agent-driving state before the command crosses the
+                        // long-running threshold; don't re-lock input after that user takeover.
                         if me
                             .model
                             .lock()
@@ -8505,7 +8509,7 @@ impl TerminalView {
             if active_block.ai_conversation_id() == Some(conversation_id)
                 && active_block.requested_command_action_id() == Some(&action_id)
             {
-                active_block.suppress_agent_auto_resume();
+                active_block.set_user_control_and_suppress_auto_resume();
             }
             drop(model);
             self.user_write_ctrl_c_to_pty(ctx);
@@ -8565,7 +8569,7 @@ impl TerminalView {
             let active_block = model.block_list().active_block();
             let is_long_running = active_block.is_active_and_long_running();
             let is_agent_in_control_of_command = active_block.is_agent_in_control();
-            let is_executing_agent_requested_command = !is_long_running
+            let is_agent_requested_command_before_lrc_control = !is_long_running
                 && active_block.long_running_control_state().is_none()
                 && active_block.requested_command_action_id().is_some()
                 && active_block.ai_conversation_id().is_some()
@@ -8582,7 +8586,7 @@ impl TerminalView {
             let active_block_state = CtrlCActiveBlockState {
                 is_long_running,
                 is_agent_in_control_of_command,
-                is_executing_agent_requested_command,
+                is_agent_requested_command_before_lrc_control,
                 conversation_id_to_stop,
             };
             (
@@ -8732,7 +8736,7 @@ impl TerminalView {
                     ActiveCommandCtrlCAction::WriteCtrlCToPty => self.user_write_ctrl_c_to_pty(ctx),
                 }
             }
-        } else if active_block_state.is_executing_agent_requested_command {
+        } else if active_block_state.is_agent_requested_command_before_lrc_control {
             match self.active_command_ctrl_c_action() {
                 ActiveCommandCtrlCAction::CancelRequestedCommand {
                     conversation_id,

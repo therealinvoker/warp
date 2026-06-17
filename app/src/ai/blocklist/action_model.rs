@@ -1054,6 +1054,7 @@ impl BlocklistAIActionModel {
         }
     }
 
+    /// Cancels a pending/running requested-command action, or marks its buffered snapshot as cancelled.
     pub(crate) fn cancel_requested_command_with_id(
         &mut self,
         conversation_id: AIConversationId,
@@ -1073,7 +1074,9 @@ impl BlocklistAIActionModel {
             self.cancel_action_with_id(conversation_id, action_id, reason, ctx);
             return true;
         }
-
+        // If the command was already classified as long-running, its snapshot can be buffered
+        // before the agent consumes it. Rewrite that result as cancelled so the agent does not
+        // attach to a command the user already interrupted.
         let Some(action_result) = self
             .finished_action_results
             .get_mut(&conversation_id)

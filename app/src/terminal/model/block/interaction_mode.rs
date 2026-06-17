@@ -156,18 +156,13 @@ impl Block {
             *is_blocked = new_value;
         }
     }
-    pub fn suppress_agent_auto_resume(&mut self) {
-        if let InteractionMode::Agent(metadata) = &mut self.interaction_mode {
-            metadata.set_suppress_auto_resume();
-        }
-    }
 
     /// Hands control to the user with the `Stop` reason and suppresses auto-resume of the
     /// conversation once the command completes. Used by teardown paths (rewind, stop) where
     /// the conversation has been cancelled and should not resume on its own.
     pub fn set_user_control_and_suppress_auto_resume(&mut self) {
-        self.suppress_agent_auto_resume();
         if let InteractionMode::Agent(metadata) = &mut self.interaction_mode {
+            metadata.set_suppress_auto_resume();
             if let Some(state) = &mut metadata.long_running_control_state {
                 *state = LongRunningCommandControlState::User {
                     reason: UserTakeOverReason::Stop,
