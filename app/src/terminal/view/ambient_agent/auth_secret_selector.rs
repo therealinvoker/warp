@@ -50,7 +50,11 @@ const SIDECAR_WIDTH: f32 = 220.;
 
 const SIDECAR_HORIZONTAL_GAP: f32 = 4.;
 
-const MENU_MAX_HEIGHT: f32 = 280.;
+// Caps the scrollable secrets list. Sized to comfortably show many
+// managed secrets before scrolling, matching the slash-command menu
+// (`cloud_mode_v2_view.rs`) in the same cloud-mode input area. The menu
+// is content-sized up to this cap, so short lists stay compact.
+const MENU_MAX_HEIGHT: f32 = 400.;
 
 const BUTTON_TOOLTIP: &str = "API key";
 

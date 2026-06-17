@@ -45,7 +45,10 @@ const MENU_ITEM_VERTICAL_PADDING: f32 = 8.;
 
 const LABEL_TO_SELECT_SPACING: f32 = 4.;
 
-const MENU_MAX_HEIGHT: f32 = 300.;
+// Caps the scrollable secrets list. Matches `auth_secret_selector.rs`
+// so the same managed secrets show comfortably before scrolling. The
+// menu is content-sized up to this cap, so short lists stay compact.
+const MENU_MAX_HEIGHT: f32 = 400.;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum FtuxDropdownAction {
