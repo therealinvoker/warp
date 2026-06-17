@@ -56,6 +56,22 @@ pub fn descendant_conversation_ids_in_spawn_order(
     descendants
 }
 
+/// Returns true when any loaded descendant of `parent_id` is actively running.
+pub fn has_in_progress_descendant_conversation(
+    history: &BlocklistAIHistoryModel,
+    parent_id: AIConversationId,
+) -> bool {
+    descendant_conversation_ids_in_spawn_order(history, parent_id)
+        .into_iter()
+        .filter_map(|id| history.conversation(&id))
+        .any(|conversation| {
+            matches!(
+                conversation.status(),
+                ConversationStatus::InProgress | ConversationStatus::TransientError
+            )
+        })
+}
+
 /// Recursive worker for [`descendant_conversation_ids_in_spawn_order`]. Kept
 /// separate so it can be invoked from existing call sites that already own a
 /// buffer.
