@@ -90,8 +90,8 @@ use crate::drive::OpenWarpDriveObjectSettings;
 use crate::notebooks::NotebookId;
 use crate::persistence::agent::read_agent_conversations;
 use crate::persistence::block_list::{
-    get_all_restored_blocks, read_ai_queries_for_nld_history_match,
-    read_ai_queries_for_uparrow_prompt_history,
+    get_all_restored_blocks, process_ai_queries_for_nld_history_match,
+    process_ai_queries_for_uparrow_prompt, read_recent_ai_queries,
 };
 use crate::persistence::model::{
     NewPersistedObjectAction, NewTeamSettings, ProjectRules, UserProfile, CODE_REVIEW_PANE_KIND,
@@ -2752,13 +2752,14 @@ fn read_sqlite_data(
 
     let time_of_next_force_object_refresh = read_time_of_next_force_object_refresh(conn)?;
 
-    let ai_queries = read_ai_queries_for_uparrow_prompt_history(conn)?;
-    // Only read NLD prompt-history candidates when the prompt-history match feature is enabled.
+    // Seed up-arrow prompt history and (optionally) NLD prompt-history matching from a single
+    // SQLite read, deriving both from the same in-memory query vector instead of reading twice.
+    let recent_ai_queries = read_recent_ai_queries(conn)?;
     let nld_prompts = FeatureFlag::NldPromptHistoryMatch
         .is_enabled()
-        .then(|| read_ai_queries_for_nld_history_match(conn))
-        .transpose()?
+        .then(|| process_ai_queries_for_nld_history_match(&recent_ai_queries))
         .unwrap_or_default();
+    let ai_queries = process_ai_queries_for_uparrow_prompt(recent_ai_queries);
 
     let codebase_indices = get_all_codebase_index_metadata(conn)?;
     let workspace_language_servers = get_all_workspace_language_servers_by_workspace(conn)?;

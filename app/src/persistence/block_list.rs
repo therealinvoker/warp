@@ -87,16 +87,25 @@ impl TryFrom<&PersistedAIInput> for NewAIQuery {
     }
 }
 
-/// Reads the most recent `limit` AI queries from the `ai_queries` table, oldest-first
-/// (ascending by submission).
+/// Fixed cap on how many recent AI query rows we read from SQLite at startup for performance
+const MAX_AI_QUERIES_READ_LIMIT: i64 = 2000;
+
+/// Maximum number of recent AI queries kept for up-arrow prompt history.
+/// TODO(alokedesai): Consider loading all AI queries by paginating the SQL query.
+const MAX_AI_QUERIES_FOR_UPARROW: usize = 100;
+
+/// Maximum number of recent AI queries scanned for NLD prompt-history matching.
+const MAX_AI_QUERIES_FOR_NLD: usize = 2000;
+
+/// Reads the most recent [`MAX_AI_QUERIES_READ_LIMIT`] AI queries from the `ai_queries` table,
+/// oldest-first (ascending by submission). 
 pub(super) fn read_recent_ai_queries(
     conn: &mut SqliteConnection,
-    limit: i64,
 ) -> Result<Vec<PersistedAIInput>, diesel::result::Error> {
     Ok(schema::ai_queries::table
         .select(AIQuery::as_select())
         .order_by(schema::ai_queries::columns::start_ts.desc())
-        .limit(limit)
+        .limit(MAX_AI_QUERIES_READ_LIMIT)
         .load::<AIQuery>(conn)?
         .into_iter()
         .filter_map(|ai_query| PersistedAIInput::try_from(ai_query).ok())
@@ -104,42 +113,37 @@ pub(super) fn read_recent_ai_queries(
         .collect_vec())
 }
 
-/// Reads the AI queries used to seed up-arrow prompt history, oldest-first.
-pub(super) fn read_ai_queries_for_uparrow_prompt_history(
-    conn: &mut SqliteConnection,
-) -> Result<Vec<PersistedAIInput>, diesel::result::Error> {
-    // Only load at most 100 AI queries; there's a very low chance that the user
-    // will ever try rerunning AI queries older than this duration and loading
-    // all AI queries in perpetuity has performance implications on app startup.
-    // TOOD(alokedesai): Consider loading all AI queries by paginating the SQL query.
-    const MAX_AI_QUERIES_TO_READ: i64 = 100;
-    read_recent_ai_queries(conn, MAX_AI_QUERIES_TO_READ)
+/// Selects the up-arrow prompt-history queries from `recent_ai_queries` (ordered oldest-first):
+/// the newest [`MAX_AI_QUERIES_FOR_UPARROW`] entries, kept oldest-first. Equivalent to the former
+/// `read_ai_queries_for_uparrow_prompt_history` as long as the input holds at least that many of
+/// the newest queries.
+pub(super) fn process_ai_queries_for_uparrow_prompt(
+    mut recent_ai_queries: Vec<PersistedAIInput>,
+) -> Vec<PersistedAIInput> {
+    let start = recent_ai_queries
+        .len()
+        .saturating_sub(MAX_AI_QUERIES_FOR_UPARROW);
+    recent_ai_queries.split_off(start)
 }
 
-
-
-/// Reads recent AI query prompts (text and submission time) for NLD prompt-history
-/// matching, oldest-first. Built on [`read_recent_ai_queries`]: the newest
-/// [`MAX_AI_QUERIES_TO_READ_FOR_NLD`] rows are read, then empty/whitespace-only prompts are
-/// filtered out after the limit (so this may return fewer query-bearing rows).
-pub(super) fn read_ai_queries_for_nld_history_match(
-    conn: &mut SqliteConnection,
-) -> Result<Vec<(String, DateTime<Local>)>, diesel::result::Error> {
-    const MAX_AI_QUERIES_TO_READ_FOR_NLD: i64 = 2000;
-    Ok(
-        read_recent_ai_queries(conn, MAX_AI_QUERIES_TO_READ_FOR_NLD)?
-            .into_iter()
-            .filter_map(|query| {
-                let text = query.inputs.into_iter().next().map(|input| match input {
-                    PersistedAIInputType::Query { text, .. } => text,
-                })?;
-                if text.trim().is_empty() {
-                    return None;
-                }
-                Some((text, query.start_ts))
-            })
-            .collect_vec(),
-    )
+/// Extracts NLD prompt-history candidates (prompt text and submission time) from the newest
+/// [`MAX_AI_QUERIES_FOR_NLD`] of `recent_ai_queries` (ordered oldest-first)
+pub(super) fn process_ai_queries_for_nld_history_match(
+    recent_ai_queries: &[PersistedAIInput],
+) -> Vec<(String, DateTime<Local>)> {
+    let start = recent_ai_queries.len().saturating_sub(MAX_AI_QUERIES_FOR_NLD);
+    recent_ai_queries[start..]
+        .iter()
+        .filter_map(|query| {
+            let text = query.inputs.first().map(|input| match input {
+                PersistedAIInputType::Query { text, .. } => text.clone(),
+            })?;
+            if text.trim().is_empty() {
+                return None;
+            }
+            Some((text, query.start_ts))
+        })
+        .collect_vec()
 }
 
 const AI_QUERIES_COUNT_LIMIT: i64 = 10_000;

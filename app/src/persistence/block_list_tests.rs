@@ -10,7 +10,10 @@ use diesel::sqlite::SqliteConnection;
 use diesel::{Connection, ExpressionMethods, QueryDsl, RunQueryDsl};
 use diesel_migrations::MigrationHarness;
 
-use super::{read_ai_queries_for_nld_history_match, upsert_ai_query_with_limit};
+use super::{
+    process_ai_queries_for_nld_history_match, process_ai_queries_for_uparrow_prompt,
+    read_recent_ai_queries, upsert_ai_query_with_limit,
+};
 use crate::ai::agent::conversation::AIConversationId;
 use crate::ai::agent::{AIAgentExchangeId, AIAgentInput, UserQueryMode};
 use crate::ai::blocklist::{AIQueryHistoryOutputStatus, PersistedAIInput, PersistedAIInputType};
@@ -78,6 +81,13 @@ fn input_json_for_exchange(conn: &mut SqliteConnection, exchange: &str) -> Strin
         .select(input)
         .first::<String>(conn)
         .expect("row for exchange should exist")
+}
+
+/// Returns the text of the first query input on a [`PersistedAIInput`].
+fn first_query_text(query: &PersistedAIInput) -> &str {
+    match query.inputs.first().expect("query should have an input") {
+        PersistedAIInputType::Query { text, .. } => text,
+    }
 }
 
 #[test]
@@ -177,7 +187,7 @@ fn make_empty_input_query() -> Arc<PersistedAIInput> {
 }
 
 #[test]
-fn read_ai_queries_for_nld_history_match_filters_empty_and_whitespace_inputs_oldest_first() {
+fn process_ai_queries_for_nld_history_match_filters_empty_and_whitespace_inputs_oldest_first() {
     let mut conn = test_connection();
 
     // Explicit, strictly increasing timestamps keep the `start_ts`-ordered read deterministic.
@@ -191,10 +201,38 @@ fn read_ai_queries_for_nld_history_match_filters_empty_and_whitespace_inputs_old
         upsert_ai_query_with_limit(&mut conn, query, 10).expect("upsert should succeed");
     }
 
-    let prompts = read_ai_queries_for_nld_history_match(&mut conn).expect("read should succeed");
+    let recent_ai_queries = read_recent_ai_queries(&mut conn).expect("read should succeed");
+    let prompts = process_ai_queries_for_nld_history_match(&recent_ai_queries);
     let texts: Vec<&str> = prompts.iter().map(|(text, _)| text.as_str()).collect();
     // `[]` and whitespace-only rows are dropped; the rest come back oldest-first.
     assert_eq!(texts, vec!["older prompt", "newer prompt"]);
+}
+
+#[test]
+fn process_ai_queries_for_uparrow_prompt_keeps_newest_capped_oldest_first() {
+    // Build 150 oldest-first queries; only the newest 100 should survive, order preserved.
+    let queries: Vec<PersistedAIInput> = (0..150)
+        .map(|i| (*make_query(&format!("q{i}"))).clone())
+        .collect();
+
+    let kept = process_ai_queries_for_uparrow_prompt(queries);
+
+    assert_eq!(kept.len(), 100);
+    // The newest 100 (q50..=q149) survive, still oldest-first.
+    assert_eq!(first_query_text(&kept[0]), "q50");
+    assert_eq!(first_query_text(&kept[99]), "q149");
+}
+
+#[test]
+fn process_ai_queries_for_uparrow_prompt_keeps_all_when_under_cap() {
+    // Fewer than the cap: everything is kept, order preserved.
+    let queries: Vec<PersistedAIInput> =
+        (0..3).map(|i| (*make_query(&format!("q{i}"))).clone()).collect();
+
+    let kept = process_ai_queries_for_uparrow_prompt(queries);
+
+    let texts: Vec<&str> = kept.iter().map(first_query_text).collect();
+    assert_eq!(texts, vec!["q0", "q1", "q2"]);
 }
 
 #[test]
