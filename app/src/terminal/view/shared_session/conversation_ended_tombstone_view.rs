@@ -30,7 +30,9 @@ use crate::settings::ai::{AISettings, AISettingsChangedEvent};
 use crate::ui_components::blended_colors;
 use crate::util::time_format::human_readable_precise_duration;
 use crate::view_components::action_button::{ActionButton, PrimaryTheme};
-use crate::workspace::{ForkedConversationDestination, WorkspaceAction};
+#[cfg(not(target_family = "wasm"))]
+use crate::workspace::ForkedConversationDestination;
+use crate::workspace::WorkspaceAction;
 
 /// Metadata collected for display in the tombstone.
 #[derive(Default)]

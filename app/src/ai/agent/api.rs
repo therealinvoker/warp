@@ -169,6 +169,7 @@ impl RequestParams {
             input: vec![],
             conversation_token: None,
             forked_from_conversation_token: None,
+            pending_conversation_handoff: None,
             ambient_agent_task_id: None,
             tasks: vec![],
             existing_suggestions: None,

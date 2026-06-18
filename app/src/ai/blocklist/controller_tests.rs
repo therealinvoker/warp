@@ -51,12 +51,16 @@ fn normal_user_query_input() -> AIAgentInput {
 }
 
 #[test]
-fn request_params_only_snapshots_pending_handoff_for_user_queries() {
+fn request_params_only_snapshots_pending_handoff_for_user_inputs() {
     App::test((), |mut app| async move {
         initialize_app_for_terminal_view(&mut app);
 
         app.update(|ctx| {
             let user_query_request = request_input_for_test(normal_user_query_input());
+            let other_user_input_request = request_input_for_test(AIAgentInput::CreateNewProject {
+                query: "create project".to_owned(),
+                context: vec![].into(),
+            });
             let action_result_request = request_input_for_test(AIAgentInput::ActionResult {
                 result: AIAgentActionResult {
                     id: "action-id".to_owned().into(),
@@ -89,6 +93,18 @@ fn request_params_only_snapshots_pending_handoff_for_user_queries() {
             );
             assert_eq!(
                 user_query_params.pending_conversation_handoff,
+                Some(PendingConversationHandoff::CloudToLocal),
+            );
+            let other_user_input_params = api::RequestParams::new(
+                None,
+                SessionContext::new_for_test(),
+                &other_user_input_request,
+                conversation.clone(),
+                None,
+                ctx,
+            );
+            assert_eq!(
+                other_user_input_params.pending_conversation_handoff,
                 Some(PendingConversationHandoff::CloudToLocal),
             );
 

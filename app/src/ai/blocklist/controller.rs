@@ -209,15 +209,8 @@ pub struct RequestInput {
 
 impl RequestInput {
     pub fn can_carry_conversation_handoff_marker(&self) -> bool {
-        self.all_inputs().any(|input| {
-            matches!(
-                input,
-                AIAgentInput::UserQuery {
-                    static_query_type: None,
-                    ..
-                }
-            )
-        })
+        self.all_inputs()
+            .any(|input| input.user_input_text().is_some())
     }
     fn for_task(
         inputs: Vec<AIAgentInput>,
