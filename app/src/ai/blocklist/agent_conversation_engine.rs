@@ -164,6 +164,7 @@ impl AgentConversationEngine {
         (response_stream, response_stream_id)
     }
 
+    /// Folds a response-stream model event into history through the delegate hooks.
     fn handle_response_stream_event<E>(
         delegate: &mut E,
         owner_id: AgentSessionOwnerId,
@@ -265,6 +266,7 @@ impl AgentConversationEngine {
         );
     }
 
+    /// Folds a received API event or API error into history.
     fn fold_received_event<E>(
         delegate: &mut E,
         owner_id: AgentSessionOwnerId,
@@ -379,6 +381,7 @@ impl AgentConversationEngine {
         }
     }
 
+    /// Finalizes stream state after natural completion or cancellation.
     fn fold_after_stream_finished<E>(
         delegate: &mut E,
         owner_id: AgentSessionOwnerId,

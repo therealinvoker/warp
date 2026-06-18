@@ -1,18 +1,29 @@
-//! Headless integration tests for [`RootTuiView`]: they stand up the composed
-//! transcript + input views in a test [`App`], drive editing through the same
-//! typed actions the input's key handlers dispatch, and assert the frame the
-//! [`TuiPresenter`] paints (buffer contents + cursor) reacts end-to-end —
-//! submission routing from the input through the root into the transcript, the
-//! empty-state placeholder, focus, and the transcript's bottom-anchored
-//! stacking with top-clipping.
+//! Headless tests for the TUI root view and core model bootstrap.
 
+use std::time::Duration;
+
+use settings::{PrivatePreferences, PublicPreferences};
+use warp_core::execution_mode::{AppExecutionMode, ExecutionMode};
+use warpui::r#async::Timer;
+use warpui::{App, EntityId, SingletonEntity, WindowId};
 use warpui_core::elements::tui::{TuiBufferExt, TuiRect};
 use warpui_core::platform::WindowStyle;
 use warpui_core::presenter::tui::TuiPresenter;
-use warpui_core::{AddWindowOptions, App, EntityId, WindowId};
+use warpui_core::AddWindowOptions;
+use warpui_extras::user_preferences::in_memory::InMemoryPreferences;
 
 use super::input_view::InputAction;
-use super::{RootTuiView, INPUT_ROWS};
+use super::{CoreTuiModel, RootTuiView, INPUT_ROWS};
+use crate::ai::blocklist::{AgentSessionOwnerId, BlocklistAIHistoryModel, BlocklistAIPermissions};
+use crate::ai::execution_profiles::profiles::AIExecutionProfilesModel;
+use crate::ai::llms::LLMPreferences;
+use crate::ai::mcp::TemplatableMCPServerManager;
+use crate::default_terminal::DefaultTerminal;
+use crate::interval_timer::IntervalTimer;
+use crate::network::NetworkStatus;
+use crate::server::server_api::ServerApiProvider;
+use crate::workspace::ActiveSession;
+use crate::{initialize_app, LaunchMode};
 
 fn window_options() -> AddWindowOptions {
     AddWindowOptions {
@@ -21,8 +32,7 @@ fn window_options() -> AddWindowOptions {
     }
 }
 
-/// Types `text` into the input one scalar at a time, exactly as the input's
-/// key-down fallback does for printable input.
+/// Types `text` into the input one scalar at a time.
 fn type_text(app: &App, window_id: WindowId, input_id: EntityId, text: &str) {
     for ch in text.chars() {
         app.dispatch_typed_action(window_id, &[input_id], &InputAction::Insert(ch.to_string()));
@@ -37,6 +47,50 @@ fn submit(app: &App, window_id: WindowId, input_id: EntityId) {
 /// The first row index whose painted line contains `needle`.
 fn row_with(lines: &[String], needle: &str) -> Option<usize> {
     lines.iter().position(|line| line.contains(needle))
+}
+
+/// Registers the singletons normally installed before `initialize_app`.
+fn register_pre_initialize_singletons(app: &mut App) {
+    app.add_singleton_model(|ctx| AppExecutionMode::new(ExecutionMode::App, false, ctx));
+    app.add_singleton_model(|_| PublicPreferences::new(Box::<InMemoryPreferences>::default()));
+    app.add_singleton_model(|_| PrivatePreferences::new(Box::<InMemoryPreferences>::default()));
+}
+
+/// Runs the TUI launch-mode singleton bootstrap without creating a TUI window.
+fn initialize_tui_app(app: &mut App) {
+    register_pre_initialize_singletons(app);
+    app.update(|ctx| {
+        let _ = initialize_app(
+            &LaunchMode::Tui,
+            IntervalTimer::new(),
+            None,
+            ctx,
+            Vec::<anyhow::Error>::new(),
+        );
+    });
+}
+
+/// Returns a clone of the in-flight request params for assertions.
+fn in_flight_request_params(app: &App) -> crate::ai::agent::api::RequestParams {
+    let stream = CoreTuiModel::handle(app).read(app, |model, _| {
+        model
+            .in_flight_response_stream_for_test()
+            .expect("request should be in flight")
+    });
+    stream.read(app, |stream, _| stream.params_for_test().clone())
+}
+
+/// Waits for the single TUI request to finish.
+async fn wait_for_tui_request_to_finish(app: &mut App) {
+    for _ in 0..600 {
+        let has_in_flight =
+            CoreTuiModel::handle(app).read(app, |model, _| model.has_in_flight_request());
+        if !has_in_flight {
+            return;
+        }
+        Timer::after(Duration::from_millis(250)).await;
+    }
+    panic!("timed out waiting for TUI request to finish");
 }
 
 #[test]
@@ -107,6 +161,24 @@ fn submitting_moves_text_into_the_transcript_and_clears_the_focused_input() {
 }
 
 #[test]
+fn tui_initialize_app_registers_agent_singletons_without_terminal_session() {
+    App::test((), |mut app| async move {
+        initialize_tui_app(&mut app);
+
+        assert_eq!(app.models_of_type::<CoreTuiModel>().len(), 1);
+        assert_eq!(app.models_of_type::<BlocklistAIHistoryModel>().len(), 1);
+        assert_eq!(app.models_of_type::<LLMPreferences>().len(), 1);
+        assert_eq!(app.models_of_type::<AIExecutionProfilesModel>().len(), 1);
+        assert_eq!(app.models_of_type::<BlocklistAIPermissions>().len(), 1);
+        assert_eq!(app.models_of_type::<ServerApiProvider>().len(), 1);
+        assert_eq!(app.models_of_type::<NetworkStatus>().len(), 1);
+        assert_eq!(app.models_of_type::<TemplatableMCPServerManager>().len(), 1);
+        assert!(app.models_of_type::<ActiveSession>().is_empty());
+        assert!(app.models_of_type::<DefaultTerminal>().is_empty());
+    });
+}
+
+#[test]
 fn transcript_anchors_newest_entry_to_the_bottom_and_clips_the_top() {
     App::test((), |mut app| async move {
         let (window_id, root) =
@@ -143,5 +215,83 @@ fn transcript_anchors_newest_entry_to_the_bottom_and_clips_the_top() {
                 "{clipped:?} should be clipped off the top:\n{rendered}"
             );
         }
+    });
+}
+
+#[test]
+fn core_tui_model_sends_initial_prompt_and_follow_up() {
+    App::test((), |mut app| async move {
+        initialize_tui_app(&mut app);
+        let owner = AgentSessionOwnerId::new(EntityId::new());
+        CoreTuiModel::handle(&app).update(&mut app, |model, ctx| {
+            model.register_session(owner, ctx);
+        });
+
+        let (conversation_id, first_stream_id) = CoreTuiModel::handle(&app)
+            .update(&mut app, |model, ctx| {
+                model.send_prompt("first".to_string(), ctx)
+            })
+            .expect("first prompt should send");
+        let first_params = in_flight_request_params(&app);
+        assert_eq!(first_params.input.len(), 1);
+        assert_eq!(first_params.conversation_token, None);
+        assert_eq!(first_params.tasks.len(), 0);
+        assert_eq!(first_params.supported_tools_override, Some(vec![]));
+
+        wait_for_tui_request_to_finish(&mut app).await;
+
+        BlocklistAIHistoryModel::handle(&app).read(&app, |history_model, _| {
+            let conversation = history_model
+                .conversation(&conversation_id)
+                .expect("conversation should exist after first prompt");
+            assert_eq!(conversation.root_task_exchanges().count(), 1);
+            assert!(conversation.server_conversation_token().is_some());
+            assert!(conversation
+                .root_task_exchanges()
+                .last()
+                .expect("first exchange should exist")
+                .output_status
+                .is_finished_and_successful());
+            assert!(conversation
+                .new_exchange_ids_for_response(&first_stream_id)
+                .next()
+                .is_none());
+        });
+
+        let (follow_up_conversation_id, _second_stream_id) = CoreTuiModel::handle(&app)
+            .update(&mut app, |model, ctx| {
+                model.send_prompt("second".to_string(), ctx)
+            })
+            .expect("second prompt should send");
+        assert_eq!(follow_up_conversation_id, conversation_id);
+        let second_params = in_flight_request_params(&app);
+        assert_eq!(second_params.input.len(), 1);
+        assert!(
+            second_params.conversation_token.is_some(),
+            "follow-up should carry server conversation token",
+        );
+        assert!(
+            !second_params.tasks.is_empty(),
+            "follow-up should carry prior task context",
+        );
+        assert_eq!(second_params.supported_tools_override, Some(vec![]));
+
+        wait_for_tui_request_to_finish(&mut app).await;
+
+        BlocklistAIHistoryModel::handle(&app).read(&app, |history_model, _| {
+            let conversations = history_model
+                .all_live_conversations_for_terminal_view(owner.entity_id())
+                .collect::<Vec<_>>();
+            assert_eq!(conversations.len(), 1);
+            let conversation = conversations[0];
+            assert_eq!(conversation.id(), conversation_id);
+            assert_eq!(conversation.root_task_exchanges().count(), 2);
+            assert!(conversation
+                .root_task_exchanges()
+                .last()
+                .expect("second exchange should exist")
+                .output_status
+                .is_finished_and_successful());
+        });
     });
 }

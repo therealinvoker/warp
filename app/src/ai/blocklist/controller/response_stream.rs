@@ -176,6 +176,12 @@ impl ResponseStream {
         &self.id
     }
 
+    /// Returns the request params for tests that assert request construction.
+    #[cfg(test)]
+    pub(crate) fn params_for_test(&self) -> &api::RequestParams {
+        &self.params
+    }
+
     /// Returns true if we should attempt to resume the conversation after the stream finishes.
     pub fn should_resume_conversation_after_stream_finished(&self) -> bool {
         self.should_resume_conversation_after_stream_finished

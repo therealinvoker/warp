@@ -332,15 +332,12 @@ fn determine_agent_source(
                 Some(crate::ai::ambient_agents::AgentSource::Cli)
             }
         }
-        LaunchMode::App { .. } | LaunchMode::Test { .. } => {
+        LaunchMode::App { .. } | LaunchMode::Test { .. } | LaunchMode::Tui => {
             Some(crate::ai::ambient_agents::AgentSource::CloudMode)
         }
         // RemoteServerProxy and RemoteServerDaemon are headless server
-        // processes that don't use the agent subsystem; the TUI front-end has
-        // no agent harness wired up yet.
-        LaunchMode::RemoteServerProxy | LaunchMode::RemoteServerDaemon { .. } | LaunchMode::Tui => {
-            None
-        }
+        // processes that don't use the agent subsystem.
+        LaunchMode::RemoteServerProxy | LaunchMode::RemoteServerDaemon { .. } => None,
     }
 }
 
@@ -996,9 +993,8 @@ fn run_internal(mut launch_mode: LaunchMode) -> Result<()> {
         )
     };
 
-    // The TUI front-end skips the GUI/agent model graph, so the GUI lifecycle
-    // callbacks (which reach for singletons like `NotebookManager` that the TUI
-    // never registers) would panic on termination. Use empty callbacks instead.
+    // The TUI front-end renders through the terminal backend, so GUI lifecycle
+    // callbacks that manipulate windows/menus are not needed.
     let callbacks = if matches!(launch_mode, LaunchMode::Tui) {
         warpui::platform::AppCallbacks::default()
     } else {
@@ -1092,16 +1088,6 @@ fn run_internal(mut launch_mode: LaunchMode) -> Result<()> {
         crate::util::bindings::custom_tag_to_keystroke,
     );
 
-    // The TUI front-end bootstraps the real (headless) app but renders through
-    // the WarpUI TUI backend instead of the GUI workspace, so it skips the full
-    // GUI/agent model graph (`initialize_app`/`launch`).
-    #[cfg(feature = "tui")]
-    if matches!(launch_mode, LaunchMode::Tui) {
-        return app_builder.run(move |ctx| {
-            crate::tui::init(ctx);
-        });
-    }
-
     app_builder.run(move |ctx| {
         #[cfg(not(target_family = "wasm"))]
         // Rotate the log files in the background.
@@ -1119,12 +1105,11 @@ fn run_internal(mut launch_mode: LaunchMode) -> Result<()> {
         #[cfg(feature = "crash_reporting")]
         crate::crash_reporting::set_client_type_tag(launch_mode.execution_mode().client_id());
 
-        // Add the terminal server singleton to the application. (The TUI front-end
-        // returns before this closure runs, so `pty_spawner` is always `Some` here.)
+        // Add the terminal server singleton to the application. The TUI front-end has no PTYs.
         #[cfg(feature = "local_tty")]
-        ctx.add_singleton_model(move |_ctx| {
-            pty_spawner.expect("pty spawner is created for all non-TUI launch modes")
-        });
+        if let Some(pty_spawner) = pty_spawner {
+            ctx.add_singleton_model(move |_ctx| pty_spawner);
+        }
 
         // Register user preferences.  This must be done before initializing
         // feature flags or experiments, both of which check user preferences for
@@ -1150,6 +1135,12 @@ fn run_internal(mut launch_mode: LaunchMode) -> Result<()> {
 
         if ImprovedPaletteSearch::improved_search_enabled(ctx) {
             FeatureFlag::UseTantivySearch.set_enabled(true);
+        }
+
+        #[cfg(feature = "tui")]
+        if matches!(launch_mode, LaunchMode::Tui) {
+            crate::tui::init(ctx);
+            return;
         }
 
         launch(ctx, app_state, launch_mode);
@@ -1915,6 +1906,10 @@ pub(crate) fn initialize_app(
     ctx.add_singleton_model(
         ai::blocklist::orchestration_event_streamer::OrchestrationEventStreamer::new,
     );
+    #[cfg(feature = "tui")]
+    if matches!(launch_mode, LaunchMode::Tui) {
+        ctx.add_singleton_model(crate::tui::CoreTuiModel::new);
+    }
 
     if launch_mode.supports_indexing() {
         ctx.add_singleton_model(RepoOutlines::new);
@@ -2014,7 +2009,9 @@ pub(crate) fn initialize_app(
     ctx.add_singleton_model(|_| OpenedFilesModel::new());
     ctx.add_singleton_model(NotebookKeybindings::new);
     ctx.add_singleton_model(TerminalKeybindings::new);
-    ctx.add_singleton_model(|_| ActiveSession::default());
+    if !matches!(launch_mode, LaunchMode::Tui) {
+        ctx.add_singleton_model(|_| ActiveSession::default());
+    }
     ctx.add_singleton_model(|ctx| {
         Listener::new(
             server_api_provider.as_ref(ctx).get_cloud_objects_client(),
@@ -2105,8 +2102,9 @@ pub(crate) fn initialize_app(
     ctx.add_singleton_model(move |_| timer);
 
     ctx.add_singleton_model(|ctx| AIExecutionProfilesModel::new(launch_mode, ctx));
-
-    ctx.add_singleton_model(DefaultTerminal::new);
+    if !matches!(launch_mode, LaunchMode::Tui) {
+        ctx.add_singleton_model(DefaultTerminal::new);
+    }
 
     ctx.add_singleton_model(|ctx| {
         let should_restore_indices = launch_mode.supports_indexing()
@@ -2662,9 +2660,12 @@ fn launch(ctx: &mut warpui::AppContext, app_state: Option<AppState>, launch_mode
     ctx.set_fallback_font_fn(font_fallback::fallback_font_fn);
 
     match launch_mode {
-        // The TUI front-end is handled in `run_internal` before `launch()`, so
-        // it never reaches this dispatch.
-        LaunchMode::Tui => unreachable!("LaunchMode::Tui is handled before launch()"),
+        LaunchMode::Tui => {
+            #[cfg(feature = "tui")]
+            crate::tui::init(ctx);
+            #[cfg(not(feature = "tui"))]
+            ctx.terminate_app(TerminationMode::ForceTerminate, None);
+        }
         LaunchMode::App { .. } | LaunchMode::Test { .. } => {
             let should_skip_restore = launch_mode
                 .args()

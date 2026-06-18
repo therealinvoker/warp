@@ -96,6 +96,15 @@ impl SessionContext {
         }
     }
 
+    /// Creates a local, non-terminal session context for surfaces without an `ActiveSession`.
+    pub fn local(current_working_directory: Option<String>) -> Self {
+        Self {
+            session_type: Some(SessionType::Local),
+            shell: None,
+            current_working_directory,
+        }
+    }
+
     pub fn session_type(&self) -> &Option<SessionType> {
         &self.session_type
     }

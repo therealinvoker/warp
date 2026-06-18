@@ -4,7 +4,7 @@ use std::sync::Arc;
 use anyhow::anyhow;
 use warp_multi_agent_api::client_action::Action;
 use warp_multi_agent_api::response_event::stream_finished;
-use warpui::{App, Entity, ModelContext, SingletonEntity};
+use warpui::{App, Entity, SingletonEntity};
 
 use super::*;
 use crate::ai::agent::conversation::ConversationStatus;
