@@ -308,7 +308,7 @@ impl WarpifySettings {
         // flag that we should show them a one-time deprecation notice on their next SSH, then
         // reset the opt-in. Because we only act when the value is still `true`, resetting it to
         // `false` ensures this migration does not run again.
-        handle.clone().update(ctx, |me, ctx| {
+        handle.update(ctx, |me, ctx| {
             if me.use_ssh_tmux_wrapper.is_value_explicitly_set() && *me.use_ssh_tmux_wrapper.value()
             {
                 if let Err(e) = me.ssh_tmux_deprecation_notice_pending.set_value(true, ctx) {
