@@ -13,7 +13,7 @@ use warpui::{
     ViewHandle,
 };
 
-use crate::ai::blocklist::block::view_impl::common::render_user_avatar;
+use crate::ai::blocklist::block::view_impl::common::{render_user_avatar, user_query_font_family};
 use crate::ai::blocklist::block::view_impl::{
     CONTENT_HORIZONTAL_PADDING, CONTENT_ITEM_VERTICAL_MARGIN,
 };
@@ -160,7 +160,7 @@ impl View for PendingUserQueryBlock {
 
         let prompt_text = Text::new(
             self.prompt.clone(),
-            appearance.monospace_font_family(),
+            user_query_font_family(appearance),
             appearance.monospace_font_size(),
         )
         .with_style(properties)

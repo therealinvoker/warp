@@ -5,10 +5,12 @@ use std::sync::Arc;
 use ai::skills::{ParsedSkill, SkillProvider, SkillScope};
 use itertools::Itertools;
 use ui_components::lightbox::{LightboxImage, LightboxImageSource};
+use warp_core::ui::appearance::Appearance;
 use warp_util::local_or_remote_path::LocalOrRemotePath;
 #[cfg(feature = "local_fs")]
 use warpui::assets::asset_cache::AssetSource;
 use warpui::elements::{Empty, MouseStateHandle};
+use warpui::fonts::FamilyId;
 use warpui::{App, Element};
 
 #[cfg(feature = "local_fs")]
@@ -17,8 +19,8 @@ use super::{
     collect_visual_markdown_lightbox_collection, compute_visual_section_width,
     image_tooltip_handles_for_group, inline_image_source_label,
     is_supported_blocklist_image_source, lightbox_trigger_for_section, query_prefix_highlight_len,
-    render_scrollable_collapsible_content, text_sections_with_indices, CollapsibleElementState,
-    CollapsibleExpansionState, VisualMarkdownLightboxCollection,
+    render_scrollable_collapsible_content, text_sections_with_indices, user_query_font_family,
+    CollapsibleElementState, CollapsibleExpansionState, VisualMarkdownLightboxCollection,
 };
 use crate::ai::agent::{
     AIAgentInput, AIAgentTextSection, AgentOutputImage, AgentOutputImageLayout,
@@ -26,6 +28,29 @@ use crate::ai::agent::{
 };
 use crate::features::FeatureFlag;
 use crate::search::slash_command_menu::static_commands::commands;
+
+/// Regression guard: a submitted user query in the agent conversation must use
+/// the configurable agent ("AI") font so it matches the agent's responses,
+/// rather than the terminal monospace font. Previously `render_query_text`
+/// hardcoded `monospace_font_family()`.
+#[test]
+fn user_query_uses_ai_font_family_not_monospace() {
+    let mut appearance = Appearance::mock();
+    // `mock()` initializes the agent and monospace families to the same id; make
+    // them distinct so the assertions below are meaningful.
+    appearance.set_ai_font_family_test(FamilyId(7));
+
+    assert_eq!(
+        user_query_font_family(&appearance),
+        appearance.ai_font_family(),
+        "user query should render in the configurable agent font",
+    );
+    assert_ne!(
+        user_query_font_family(&appearance),
+        appearance.monospace_font_family(),
+        "user query should not use the terminal monospace font when the agent font differs",
+    );
+}
 
 #[test]
 fn query_prefix_highlight_len_highlights_invoke_skill_inputs() {

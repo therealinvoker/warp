@@ -37,7 +37,7 @@ use warpui::elements::{
     Shrinkable, Stack, Table, TableColumnWidth, TableConfig, TableHeader, TableVerticalSizing,
     Text, Wrap,
 };
-use warpui::fonts::{Properties, Weight};
+use warpui::fonts::{FamilyId, Properties, Weight};
 use warpui::image_cache::{CacheOption, ImageType};
 use warpui::keymap::Keystroke;
 use warpui::platform::Cursor;
@@ -3550,6 +3550,16 @@ pub(super) fn query_prefix_highlight_len(
     }
 }
 
+/// Font family used to render a submitted user query in the agent conversation.
+///
+/// User queries use the configurable agent ("AI") font (`ai_font_family`) so they
+/// visually match the agent's responses, rather than the terminal monospace font.
+/// When the user has enabled "Match AI font to terminal font", `ai_font_family`
+/// already equals the monospace family, so matched-font users still see monospace.
+pub(crate) fn user_query_font_family(appearance: &Appearance) -> FamilyId {
+    appearance.ai_font_family()
+}
+
 /// Renders query text with all interactive features: link detection, secret redaction, and highlights.
 /// Returns a text element ready to be placed in a layout.
 pub fn render_query_text(props: UserQueryProps<'_>, app: &AppContext) -> Text {
@@ -3562,7 +3572,7 @@ pub fn render_query_text(props: UserQueryProps<'_>, app: &AppContext) -> Text {
 
     let mut text_element = Text::new(
         props.text,
-        appearance.monospace_font_family(),
+        user_query_font_family(appearance),
         appearance.monospace_font_size(),
     )
     .with_style(*props.font_properties)

@@ -245,6 +245,11 @@ impl Appearance {
         self.monospace_font_size = new_font_size;
     }
 
+    #[cfg(feature = "test-util")]
+    pub fn set_ai_font_family_test(&mut self, new_family: FamilyId) {
+        self.ai_font_family = new_family;
+    }
+
     pub fn set_line_height_ratio(
         &mut self,
         new_line_height_ratio: f32,
