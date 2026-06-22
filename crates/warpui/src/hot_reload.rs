@@ -69,7 +69,7 @@ pub fn connect(wake: impl Fn() + Send + Sync + 'static) {
         );
         return;
     };
-    log::info!("hot-reload: connecting to {endpoint}");
+    eprintln!("[hot-reload] connecting to {endpoint}");
 
     let _ = std::thread::Builder::new()
         .name("warpui-hot-reload".into())
@@ -103,12 +103,12 @@ fn run(endpoint: String) {
     let (mut ws, _resp) = match tungstenite::connect(&uri) {
         Ok(pair) => pair,
         Err(e) => {
-            log::warn!("hot-reload: failed to connect to {uri}: {e}");
+            eprintln!("[hot-reload] connection FAILED: {e}");
             return;
         }
     };
 
-    log::info!("hot-reload: connected to {uri}");
+    eprintln!("[hot-reload] connected OK to {uri}");
 
     while let Ok(msg) = ws.read() {
         if let tungstenite::Message::Text(text) = msg {
@@ -155,13 +155,15 @@ fn handle_message(text: &str) {
     unsafe {
         match subsecond::apply_patch(jump_table) {
             Ok(()) => {
-                log::info!("hot-reload: patch applied successfully");
+                eprintln!("[hot-reload] patch applied — triggering redraw");
                 REBUILD_PENDING.store(true, Ordering::Release);
                 if let Some(wake) = WAKE_FN.get() {
                     wake();
+                } else {
+                    eprintln!("[hot-reload] WARNING: no wake fn registered");
                 }
             }
-            Err(e) => log::warn!("hot-reload: patch failed: {e}"),
+            Err(e) => eprintln!("[hot-reload] patch FAILED: {e}"),
         }
     }
 }
