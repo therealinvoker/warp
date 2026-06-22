@@ -19231,7 +19231,7 @@ impl Workspace {
 
         let mut row = Flex::row().with_cross_axis_alignment(CrossAxisAlignment::Center);
         // The header is one flex slot, exactly like each member tab, so a
-        // long group name is cutt off within its own slot instead of stealing
+        // long group name is cut off within its own slot instead of stealing
         // width from the members and making them non-uniform.
         row.add_child(
             Shrinkable::new(
