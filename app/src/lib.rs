@@ -1000,14 +1000,14 @@ fn run_internal(mut launch_mode: LaunchMode) -> Result<()> {
     // files, modified signal handlers, etc.) to avoid unexpected effects on
     // spawned ptys.
     //
-    // The TUI front-end has no PTYs, so it skips this entirely. This is also
-    // load-bearing: the terminal server is spawned by re-exec'ing the current
-    // binary, but `warp-tui`'s `main` always runs the TUI (it doesn't dispatch
-    // worker subcommands), so spawning a server here would recursively launch
-    // more TUIs — a fork bomb.
+    // The TUI front-end uses a server-less `PtySpawner` (it spawns ptys directly
+    // in-process). It must NOT create a backing terminal server: that server is
+    // spawned by re-exec'ing the current binary, but `warp-tui`'s `main` always
+    // runs the TUI (it doesn't dispatch worker subcommands), so spawning a
+    // server here would recursively launch more TUIs — a fork bomb.
     #[cfg(feature = "local_tty")]
     let pty_spawner = if matches!(launch_mode, LaunchMode::Tui) {
-        None
+        Some(terminal::local_tty::spawner::PtySpawner::new_without_server())
     } else {
         Some(
             terminal::local_tty::spawner::PtySpawner::new()
@@ -1128,9 +1128,9 @@ fn run_internal(mut launch_mode: LaunchMode) -> Result<()> {
         #[cfg(feature = "crash_reporting")]
         crate::crash_reporting::set_client_type_tag(launch_mode.execution_mode().client_id());
 
-        // Add the terminal server singleton to the application. The TUI front-end
-        // runs in-process (`local_tty` with no terminal server), so `pty_spawner`
-        // is `None` for Tui; only register the singleton when present.
+        // Register the pty spawner singleton. The TUI uses a server-less spawner
+        // (direct in-process spawning, no terminal server); other modes use the
+        // server-backed spawner. The `Option` guards builds/platforms without one.
         #[cfg(feature = "local_tty")]
         if let Some(pty_spawner) = pty_spawner {
             ctx.add_singleton_model(move |_ctx| pty_spawner);

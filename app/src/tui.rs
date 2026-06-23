@@ -87,6 +87,19 @@ impl RootTuiView {
             ctx.subscribe_to_model(&model_events, |_, _, _event, ctx| {
                 ctx.notify();
             });
+
+            // Drain the PTY wakeup channel to repaint on terminal output. The
+            // wakeup channel is the terminal's redraw signal (fired on every
+            // PTY read); without draining it the receiver is dropped, the
+            // sender logs "Failed to send Wakeup event: Closed", and streamed
+            // command output never triggers a redraw.
+            if let Some(wakeups_rx) = session.update(ctx, |s, _| s.take_wakeups_rx()) {
+                ctx.spawn_stream_local(
+                    wakeups_rx,
+                    |_view, _wakeup, ctx| ctx.notify(),
+                    |_view, _ctx| {},
+                );
+            }
         }
 
         // Periodically check the terminal size and resize the model + PTY when

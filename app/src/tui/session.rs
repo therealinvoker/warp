@@ -11,6 +11,7 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 
 use async_broadcast::InactiveReceiver;
+use async_channel::Receiver;
 use parking_lot::FairMutex;
 use warpui::{AppContext, Entity, ModelContext, ModelHandle, SingletonEntity};
 
@@ -41,6 +42,10 @@ pub struct TuiTerminalSession {
     event_loop_handle: Option<JoinHandle<()>>,
     /// Held to keep the PTY reads broadcast channel alive.
     _inactive_pty_reads_rx: InactiveReceiver<Arc<Vec<u8>>>,
+    /// PTY redraw signals; taken once by the root view to drive repaints on
+    /// shell output. If never drained, the sender errors on every wakeup and
+    /// terminal output never repaints.
+    wakeups_rx: Option<Receiver<()>>,
 }
 
 impl Entity for TuiTerminalSession {
@@ -58,6 +63,12 @@ impl TuiTerminalSession {
     /// Returns the model event dispatcher (for repaint subscriptions).
     pub fn model_events(&self) -> &ModelHandle<ModelEventDispatcher> {
         &self.model_events
+    }
+
+    /// Takes the PTY wakeup receiver (terminal redraw signals). Consumed once
+    /// by the root view to drive repaints on shell output; `None` thereafter.
+    pub fn take_wakeups_rx(&mut self) -> Option<Receiver<()>> {
+        self.wakeups_rx.take()
     }
 
     /// Executes `command` in the persistent shell session. Resolves the
@@ -128,7 +139,7 @@ impl TuiTerminalSession {
             pty_controller,
             event_loop_tx,
             event_loop_rx,
-            wakeups_rx: _,
+            wakeups_rx,
             inactive_pty_reads_rx,
             channel_event_proxy,
             wsl_name_or_shell_starter,
@@ -204,6 +215,7 @@ impl TuiTerminalSession {
             event_loop_tx,
             event_loop_handle: None,
             _inactive_pty_reads_rx: inactive_pty_reads_rx,
+            wakeups_rx: Some(wakeups_rx),
         }
     }
 }
