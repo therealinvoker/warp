@@ -63,10 +63,7 @@ pathfinder_geometry.workspace = true
 rand.workspace = true
 rangemap.workspace = true
 ratatui = { version = "0.30", optional = true, features = [
-    "scrolling-regions",
-    "unstable-backend-writer",
     "unstable-rendered-line-info",
-    "unstable-widget-ref",
 ] }
 raw-window-handle = "0.6.2"
 resvg.workspace = true
