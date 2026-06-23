@@ -189,7 +189,7 @@ fn initialize_app(app: &mut App) {
     app.add_singleton_model(RepoMetadataModel::new);
     app.add_singleton_model(SkillManager::new);
     app.add_singleton_model(FileSearchModel::new);
-    app.add_singleton_model(|_| crate::code_review::git_status_update::GitStatusUpdateModel::new());
+    app.add_singleton_model(|_| crate::code_review::git_repo_model::GitRepoModels::new());
     app.add_singleton_model(RepoOutlines::new_for_test);
     crate::terminal::available_shells::register(app);
     app.update(experiments::init);
@@ -346,6 +346,7 @@ fn test_server_conversation_metadata(
             credits_spent_for_last_block: None,
             token_usage: vec![],
             tool_usage_metadata: Default::default(),
+            context_window_segments: Vec::new(),
         },
         metadata: mock_server_metadata(),
         creator: None,

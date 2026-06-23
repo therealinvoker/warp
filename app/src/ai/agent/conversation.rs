@@ -62,8 +62,8 @@ use crate::ai::skills::SkillDescriptor;
 use crate::code_review::CodeReviewTelemetryEvent;
 use crate::notebooks::NotebookId;
 use crate::persistence::model::{
-    AgentConversationData, ConversationUsageMetadata, ModelTokenUsage, PersistedAutoexecuteMode,
-    ToolUsageMetadata,
+    AgentConversationData, ContextWindowSegment, ConversationUsageMetadata, ModelTokenUsage,
+    PersistedAutoexecuteMode, ToolUsageMetadata,
 };
 use crate::persistence::ModelEvent;
 use crate::server::ids::ServerId;
@@ -673,6 +673,13 @@ impl AIConversation {
         self.conversation_usage_metadata.context_window_usage
     }
 
+    /// The per-segment breakdown of the context window (e.g. system prompt,
+    /// tool definitions, conversation history). Scaled so the segments sum to
+    /// `context_window_usage`. Empty when the server did not emit segments.
+    pub fn context_window_segments(&self) -> &[ContextWindowSegment] {
+        &self.conversation_usage_metadata.context_window_segments
+    }
+
     /// Total credits spent in the conversation, including both LLM inference
     /// and platform credits.
     pub fn credits_spent(&self) -> f32 {
@@ -871,6 +878,21 @@ impl AIConversation {
     pub fn status(&self) -> &ConversationStatus {
         &self.status
     }
+
+    /// Test-only setter for driving status-dependent logic directly.
+    #[cfg(test)]
+    pub(crate) fn set_status_for_test(&mut self, status: ConversationStatus) {
+        self.status = status;
+    }
+
+    /// Test-only helper: appends an exchange to the root task so status-derivation
+    /// logic (e.g. `map_conversation_status`) can be exercised end-to-end.
+    #[cfg(test)]
+    pub(crate) fn append_root_exchange_for_test(&mut self, exchange: AIAgentExchange) {
+        self.task_store
+            .modify_root_task(|root_task| root_task.append_exchange(exchange));
+    }
+
     pub fn status_error_message(&self) -> Option<&str> {
         self.status_error_message.as_deref()
     }
@@ -891,7 +913,10 @@ impl AIConversation {
         terminal_view_id: EntityId,
         ctx: &mut ModelContext<BlocklistAIHistoryModel>,
     ) {
-        self.status_error_message = if matches!(&status, ConversationStatus::Error) {
+        self.status_error_message = if matches!(
+            &status,
+            ConversationStatus::Error | ConversationStatus::TransientError
+        ) {
             error_message.filter(|message| !message.trim().is_empty())
         } else {
             None
@@ -1455,10 +1480,8 @@ impl AIConversation {
         self.task_store.latest_skills()
     }
 
-    /// Get the auto-generated title of the given conversation
-    /// (falling back to the first query if the title is empty).
     /// Get the title of the given conversation.
-    /// Priority: auto-generated task description > initial query > fallback_display_title.
+    /// Priority: task description > initial query > fallback_display_title.
     pub fn title(&self) -> Option<String> {
         self.task_store
             .root_task()
@@ -1472,7 +1495,39 @@ impl AIConversation {
             .or_else(|| self.fallback_display_title.clone())
     }
 
-    /// Set a fallback title used when no task description or initial query exists.
+    /// Updates the conversation title and persists the conversation.
+    pub(crate) fn update_conversation_title(
+        &mut self,
+        title: String,
+        ctx: &mut ModelContext<BlocklistAIHistoryModel>,
+    ) {
+        let title_for_metadata = title.clone();
+        self.task_store
+            .modify_root_task(|root_task| root_task.update_description(title));
+        if let Some(metadata) = self.server_metadata.as_mut() {
+            metadata.title = title_for_metadata;
+        }
+        self.write_updated_conversation_state(ctx);
+    }
+
+    /// Restores a previous title snapshot and persists the conversation.
+    pub(crate) fn restore_conversation_title(
+        &mut self,
+        root_task_description: String,
+        server_metadata_title: Option<String>,
+        ctx: &mut ModelContext<BlocklistAIHistoryModel>,
+    ) {
+        self.task_store
+            .modify_root_task(|root_task| root_task.update_description(root_task_description));
+        if let (Some(metadata), Some(title)) =
+            (self.server_metadata.as_mut(), server_metadata_title)
+        {
+            metadata.title = title;
+        }
+        self.write_updated_conversation_state(ctx);
+    }
+
+    /// Sets a fallback title used when no task description or initial query exists.
     pub fn set_fallback_display_title(&mut self, title: String) {
         self.fallback_display_title = Some(title);
     }
@@ -1541,7 +1596,7 @@ impl AIConversation {
         self.root_task_exchanges()
             .flat_map(|exchange| exchange.input.iter())
             .find_map(|input| {
-                AIAgentInput::user_query(input)
+                AIAgentInput::display_query(input)
                     .or_else(|| AIAgentInput::auto_code_diff_query(input).map(|s| s.to_string()))
                     .or_else(|| AIAgentInput::prompt_suggestion_result(input).cloned())
             })
@@ -1550,7 +1605,7 @@ impl AIConversation {
     pub fn initial_user_query(&self) -> Option<String> {
         self.root_task_exchanges()
             .flat_map(|exchange| exchange.input.iter())
-            .find_map(AIAgentInput::user_query)
+            .find_map(AIAgentInput::display_query)
     }
 
     /// Export the conversation to markdown format.
@@ -1578,7 +1633,7 @@ impl AIConversation {
     pub fn latest_user_query(&self) -> Option<String> {
         self.exchanges_reversed().find_map(|exchange| {
             exchange.input.iter().rev().find_map(|input| {
-                AIAgentInput::user_query(input)
+                AIAgentInput::display_query(input)
                     .map(|query| query.trim().to_owned())
                     .filter(|query| !query.is_empty())
             })
@@ -1919,6 +1974,12 @@ impl AIConversation {
                 .map(Into::into)
                 .unwrap_or_default();
 
+            self.conversation_usage_metadata.context_window_segments = usage_metadata
+                .context_window_segments
+                .iter()
+                .map(Into::into)
+                .collect();
+
             // A conversation can never go from summarized to un-summarized,
             // so we only update the summarized flag if it's going from false to true.
             if usage_metadata.summarized && !self.conversation_usage_metadata.was_summarized {
@@ -2125,10 +2186,16 @@ impl AIConversation {
         Ok(())
     }
 
+    /// Marks the in-flight request's exchanges as finished with `error`.
+    ///
+    /// `recovery_pending` moves the conversation to the non-terminal `TransientError`
+    /// status instead of `Error`, so consumers don't treat it as dead while an
+    /// automatic recovery is in flight.
     pub fn mark_request_completed_with_error(
         &mut self,
         stream_id: &ResponseStreamId,
         error: RenderableAIError,
+        recovery_pending: bool,
         terminal_view_id: EntityId,
         ctx: &mut ModelContext<BlocklistAIHistoryModel>,
     ) -> Result<(), UpdateConversationError> {
@@ -2152,19 +2219,12 @@ impl AIConversation {
             model_id: None,
         };
 
-        let will_attempt_to_resume = matches!(
-            &error,
-            RenderableAIError::Other {
-                will_attempt_resume: true,
-                ..
-            }
-        );
         send_telemetry_from_ctx!(
             crate::TelemetryEvent::AgentModeError {
                 identifiers,
                 error: error.to_string(),
                 is_user_visible: true,
-                will_attempt_to_resume,
+                will_attempt_to_resume: recovery_pending,
             },
             ctx
         );
@@ -2222,8 +2282,13 @@ impl AIConversation {
         }
 
         self.write_updated_conversation_state(ctx);
+        let status = if recovery_pending {
+            ConversationStatus::TransientError
+        } else {
+            ConversationStatus::Error
+        };
         self.update_status_with_error_message(
-            ConversationStatus::Error,
+            status,
             Some(error.to_string()),
             terminal_view_id,
             ctx,
@@ -2652,6 +2717,10 @@ impl AIConversation {
                             }
                         }
                         Some(api::message::Message::ModelUsed(model_used)) => {
+                            let prompt_cache_expires_at = model_used
+                                .prompt_cache_expires_at
+                                .as_ref()
+                                .map(|ts| proto_timestamp_to_local_datetime(ts.seconds, ts.nanos));
                             let exchange_id = self
                                 .added_exchanges_by_response
                                 .get(response_stream_id)
@@ -2665,6 +2734,7 @@ impl AIConversation {
                                     model_id: model_used.model_id.clone().into(),
                                     display_name: model_used.model_display_name.clone(),
                                     is_fallback: model_used.is_fallback,
+                                    prompt_cache_expires_at,
                                 });
                             }
                         }
@@ -4186,6 +4256,11 @@ pub enum ConversationStatus {
     /// The last turn of the agent completed with error.
     Error,
 
+    /// The last turn failed transiently and an automatic recovery (retry or resume)
+    /// is pending. Non-terminal: returns to `InProgress` when the recovery request
+    /// sends, or falls to `Error` if recovery is exhausted.
+    TransientError,
+
     /// The last turn of the agent was cancelled by the user.
     Cancelled,
 
@@ -4203,6 +4278,7 @@ impl std::fmt::Display for ConversationStatus {
             ConversationStatus::InProgress => write!(f, "In progress"),
             ConversationStatus::Success => write!(f, "Done"),
             ConversationStatus::Error => write!(f, "Error"),
+            ConversationStatus::TransientError => write!(f, "Reconnecting"),
             ConversationStatus::Cancelled => write!(f, "Cancelled"),
             ConversationStatus::Blocked { .. } => write!(f, "Blocked"),
             ConversationStatus::WaitingForEvents => write!(f, "Waiting"),
@@ -4217,6 +4293,8 @@ impl ConversationStatus {
             ConversationStatus::Success => succeeded_icon(appearance),
             ConversationStatus::Blocked { .. } => yellow_stop_icon(appearance),
             ConversationStatus::Error => failed_icon(appearance),
+            // Recovery pending: keep the in-progress treatment rather than an error one.
+            ConversationStatus::TransientError => in_progress_icon(appearance),
             ConversationStatus::Cancelled => gray_stop_icon(appearance),
             ConversationStatus::WaitingForEvents => in_progress_icon(appearance),
         }
@@ -4249,6 +4327,13 @@ impl ConversationStatus {
                     StatusColorStyle::Cloud => theme.ansi_bg_red(),
                 },
             ),
+            ConversationStatus::TransientError => (
+                Icon::ClockLoader,
+                match color_style {
+                    StatusColorStyle::Standard => theme.ansi_fg_yellow(),
+                    StatusColorStyle::Cloud => theme.ansi_bg_yellow(),
+                },
+            ),
             ConversationStatus::Cancelled => (Icon::StopFilled, internal_colors::neutral_5(theme)),
             ConversationStatus::Blocked { .. } => (
                 Icon::StopFilled,
@@ -4269,6 +4354,11 @@ impl ConversationStatus {
 
     pub fn is_in_progress(&self) -> bool {
         matches!(self, ConversationStatus::InProgress)
+    }
+
+    /// True while a transient failure is being automatically recovered.
+    pub fn is_transient_error(&self) -> bool {
+        matches!(self, ConversationStatus::TransientError)
     }
 
     pub fn is_blocked(&self) -> bool {

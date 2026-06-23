@@ -584,6 +584,7 @@ fn server_conversation_metadata(
             credits_spent_for_last_block: None,
             token_usage: vec![],
             tool_usage_metadata: Default::default(),
+            context_window_segments: Vec::new(),
         },
         metadata: ServerMetadata {
             uid: ServerId::default(),
@@ -1902,7 +1903,7 @@ fn test_shared_followup_on_existing_conversation_converts_user_query_input() {
                 .and_then(|exchange| exchange.input.first())
                 .expect("shared-session replay should reconstruct the user query input");
             assert!(matches!(input, AIAgentInput::UserQuery { .. }));
-            assert_eq!(input.user_query().as_deref(), Some(followup_query));
+            assert_eq!(input.display_query().as_deref(), Some(followup_query));
         });
     });
 }

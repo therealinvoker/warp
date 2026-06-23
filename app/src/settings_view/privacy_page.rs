@@ -79,8 +79,6 @@ const TELEMETRY_DESCRIPTION: &str =
     "Allow Warp to collect telemetry to analyze feature uptake and usage \
     patterns. These are high level metrics and do not include any \
     user-generated content.";
-const TELEMETRY_FREE_TIER_NOTE: &str =
-    "On the free tier, usage telemetry must be enabled to use AI features.";
 const TELEMETRY_DOCS_URL: &str =
     "https://docs.warp.dev/support-and-community/privacy-and-security/privacy#what-telemetry-data-does-warp-collect-and-why";
 
@@ -1536,13 +1534,6 @@ impl SettingsWidget for AppAnalyticsWidget {
                 .finish()
         };
 
-        // Check if user is on free tier to show the AI requirement note
-        // Fail safe: if billing status is unknown, assume paid (don't show free tier note)
-        let is_on_paid_plan = UserWorkspaces::as_ref(app)
-            .current_workspace()
-            .map(|w| w.billing_metadata.is_user_on_paid_plan())
-            .unwrap_or(true);
-
         let mut column = Flex::column();
         column.add_child(super::settings_page::build_toggle_element(
             label_component,
@@ -1565,23 +1556,6 @@ impl SettingsWidget for AppAnalyticsWidget {
                 .build()
                 .finish(),
         );
-
-        // Show free tier note only for non-paid users
-        if !is_on_paid_plan {
-            column.add_child(
-                ui_builder
-                    .paragraph(TELEMETRY_FREE_TIER_NOTE)
-                    .with_style(UiComponentStyles {
-                        font_color: Some(description_text_color),
-                        margin: Some(
-                            Coords::default().bottom(styles::DESCRIPTION_LINE_MARGIN_BOTTOM),
-                        ),
-                        ..Default::default()
-                    })
-                    .build()
-                    .finish(),
-            );
-        }
 
         column.add_child(
             Align::new(
