@@ -7,6 +7,7 @@ use warp_terminal::model::grid::Dimensions as _;
 use warpui_core::elements::tui::{Color as TuiColor, Modifier, TuiBuffer, TuiRect, TuiStyle};
 
 use crate::terminal::color;
+use crate::terminal::model::blockgrid::BlockGrid;
 use crate::terminal::model::grid::grid_handler::GridHandler;
 
 /// Converts a terminal `Color` to a ratatui `Color` using the theme's color list.
@@ -94,6 +95,46 @@ pub fn render_grid(
         let Some(row) = grid.row(row_idx) else {
             continue;
         };
+        for col_idx in 0..num_cols {
+            let x = area.x + col_idx as u16;
+            let cell = &row[col_idx];
+            let style = cell_to_style(cell, colors);
+            let symbol = sanitized_symbol(cell);
+            if let Some(buffer_cell) = buffer.cell_mut((x, y)) {
+                buffer_cell.set_symbol(&symbol);
+                buffer_cell.set_style(style);
+            }
+        }
+    }
+}
+
+/// Renders a displayed-row slice of a `BlockGrid` into `area`.
+pub fn render_block_grid_slice(
+    block_grid: &BlockGrid,
+    skip_rows: usize,
+    area: TuiRect,
+    buffer: &mut TuiBuffer,
+    colors: &color::List,
+) {
+    if area.is_empty() {
+        return;
+    }
+
+    let grid = block_grid.grid_handler();
+    let num_rows = block_grid.len_displayed();
+    let num_cols = grid.columns().min(area.width as usize);
+
+    for (i, displayed_row) in (skip_rows..num_rows).enumerate() {
+        let y = area.y + i as u16;
+        if y >= area.y + area.height {
+            break;
+        }
+
+        let original_row = grid.maybe_translate_row_from_displayed_to_original(displayed_row);
+        let Some(row) = grid.row(original_row) else {
+            continue;
+        };
+
         for col_idx in 0..num_cols {
             let x = area.x + col_idx as u16;
             let cell = &row[col_idx];

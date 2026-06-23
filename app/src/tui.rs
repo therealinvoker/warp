@@ -1,7 +1,7 @@
 //! The headless `warp-tui` front-end: a real (headless) Warp app whose root
 //! window is a [`RootTuiView`] rendered through the `tui`-gated WarpUI backend.
 //!
-//! `RootTuiView` renders the shared [`TerminalModel`]'s block list above a
+//! `RootTuiView` renders the shared [`TerminalModel`]'s terminal history above a
 //! bottom-anchored [`TuiInputView`] and routes submissions into the shared
 //! [`TuiTerminalSession`]. A leading `!` runs the rest as a command through the
 //! persistent `TerminalModel`; plain text is reserved for the future agent
@@ -13,6 +13,7 @@
 mod grid_render;
 mod input_view;
 mod session;
+mod terminal_history_source;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -20,9 +21,11 @@ use std::time::Duration;
 use input_view::{InputEvent, TuiInputView};
 use parking_lot::FairMutex;
 use session::{encode_keydown, TuiTerminalSession};
+use terminal_history_source::{TerminalHistoryItemId, TerminalHistorySource};
 use warpui_core::elements::tui::{
     TuiBuffer, TuiChildView, TuiColumn, TuiConstrainedBox, TuiConstraint, TuiElement,
-    TuiEventContext, TuiPresentationContext, TuiRect, TuiSize,
+    TuiEventContext, TuiPresentationContext, TuiRect, TuiSize, TuiVirtualList,
+    TuiVirtualListHandle,
 };
 use warpui_core::platform::{TerminationMode, WindowStyle};
 use warpui_core::runtime::{spawn_tui_driver, TuiDriverHandle};
@@ -31,10 +34,7 @@ use warpui_core::{
     ViewContext, ViewHandle,
 };
 
-use crate::ai::blocklist::agent_view::AgentViewState;
 use crate::terminal::color;
-use crate::terminal::model::block::Block;
-use crate::terminal::model::blocks::BlockHeightItem;
 use crate::terminal::model::terminal_model::{TerminalInputState, TerminalModel};
 
 /// The bottom input frame's height: one text row inside a single-cell rounded
@@ -47,11 +47,12 @@ const INTERRUPT_BYTE: u8 = 0x03;
 /// How often the background task checks for terminal size changes.
 const RESIZE_POLL_INTERVAL: Duration = Duration::from_millis(200);
 
-/// The root TUI view: the shared model's block list above a fixed,
+/// The root TUI view: the shared model's virtualized history above a fixed,
 /// bottom-anchored input. It owns the input view and forwards its submissions
 /// into the shared terminal session.
 struct RootTuiView {
     input: ViewHandle<TuiInputView>,
+    history_scroll: TuiVirtualListHandle<TerminalHistoryItemId>,
 }
 
 impl RootTuiView {
@@ -128,7 +129,10 @@ impl RootTuiView {
             |_, _| {},
         );
 
-        Self { input }
+        Self {
+            input,
+            history_scroll: TuiVirtualListHandle::new(),
+        }
     }
 }
 
@@ -161,11 +165,14 @@ impl TuiView for RootTuiView {
             ))));
         }
 
-        // Otherwise: block list (transcript area) + input.
-        let block_list = TuiBlockListElement::new(model, colors);
+        // Otherwise: virtualized terminal history + input.
+        let history = TuiVirtualList::new(
+            self.history_scroll.clone(),
+            TerminalHistorySource::new(model, colors),
+        );
 
         let column = TuiColumn::new()
-            .flex_child(block_list)
+            .flex_child(history)
             .child(TuiConstrainedBox::new(input).with_max_rows(INPUT_ROWS));
 
         Box::new(TuiKeyInterceptor::new(Box::new(column)))
@@ -261,116 +268,6 @@ impl TuiElement for TuiKeyInterceptor {
     }
 }
 
-/// Renders the `TerminalModel`'s block list bottom-anchored into the
-/// transcript area. Each block's `prompt_and_command_grid` and `output_grid`
-/// are painted via `render_grid`.
-struct TuiBlockListElement {
-    model: Arc<FairMutex<TerminalModel>>,
-    colors: color::List,
-}
-
-impl TuiBlockListElement {
-    fn new(model: Arc<FairMutex<TerminalModel>>, colors: color::List) -> Self {
-        Self { model, colors }
-    }
-
-    /// Sum of each rendered block's displayed rows, in block-list order
-    /// (see `ordered_block_rows`).
-    fn block_heights(&self) -> Vec<u16> {
-        let model = self.model.lock();
-        ordered_block_rows(&model)
-            .iter()
-            .map(|(_, pc, out)| pc.saturating_add(*out))
-            .collect()
-    }
-}
-
-impl TuiElement for TuiBlockListElement {
-    fn layout(&mut self, constraint: TuiConstraint) -> TuiSize {
-        constraint.clamp(constraint.max)
-    }
-
-    fn render(&self, area: TuiRect, buffer: &mut TuiBuffer) {
-        if area.is_empty() {
-            return;
-        }
-        let model = self.model.lock();
-        let items = ordered_block_rows(&model);
-        let width = area.width;
-
-        // Per-rendered-block height (prompt+command rows + output rows), in order.
-        let heights: Vec<u16> = items
-            .iter()
-            .map(|(_, pc, out)| pc.saturating_add(*out))
-            .collect();
-        let total: u16 = heights.iter().copied().fold(0, u16::saturating_add);
-        if total == 0 {
-            return;
-        }
-
-        // Bottom-anchor: the newest (last) block sits at the bottom.
-        let visible = total.min(area.height);
-        let top_clip = total - visible; // rows clipped from the top
-        let dst_top = area.y + (area.height - visible);
-
-        // Paint blocks top-to-bottom into the buffer, skipping clipped rows.
-        let mut src_y: u16 = 0;
-        let mut dst_y = dst_top;
-        for (&(block, pc_rows, out_rows), &height) in items.iter().zip(&heights) {
-            if height == 0 {
-                continue;
-            }
-            // Skip blocks entirely above the clip.
-            if src_y + height <= top_clip {
-                src_y += height;
-                continue;
-            }
-            // Partially clipped block: skip the clipped rows.
-            let skip = top_clip.saturating_sub(src_y);
-
-            // Render prompt+command grid.
-            let pc_skip = skip.min(pc_rows);
-            if pc_skip < pc_rows {
-                let pc_area = TuiRect::new(area.x, dst_y, width, pc_rows - pc_skip);
-                render_block_grid(
-                    block.prompt_and_command_grid(),
-                    pc_skip as usize,
-                    pc_area,
-                    buffer,
-                    &self.colors,
-                );
-                dst_y = dst_y.saturating_add(pc_rows - pc_skip);
-            }
-
-            // Render output grid.
-            let out_skip = skip.saturating_sub(pc_rows);
-            if out_skip < out_rows {
-                let out_area = TuiRect::new(area.x, dst_y, width, out_rows - out_skip);
-                render_block_grid(
-                    block.output_grid(),
-                    out_skip as usize,
-                    out_area,
-                    buffer,
-                    &self.colors,
-                );
-                dst_y = dst_y.saturating_add(out_rows - out_skip);
-            }
-
-            src_y += height;
-            if dst_y >= area.y + area.height {
-                break;
-            }
-        }
-    }
-
-    fn desired_height(&self, _width: u16) -> u16 {
-        self.block_heights()
-            .iter()
-            .copied()
-            .fold(0, u16::saturating_add)
-    }
-}
-
 /// Renders the alt-screen grid full-pane.
 struct TuiAltScreenElement {
     model: Arc<FairMutex<TerminalModel>>,
@@ -399,105 +296,6 @@ impl TuiElement for TuiAltScreenElement {
         let model = self.model.lock();
         let grid = model.alt_screen().grid_handler();
         grid.len_displayed().unwrap_or_else(|| grid.visible_rows()) as u16
-    }
-}
-
-/// Walks the block list's ordered items and returns the terminal blocks the TUI
-/// should paint, each with its (prompt+command rows, output rows), in order.
-///
-/// This iterates the same `block_heights` sum tree the GUI's block list renders
-/// from (the `match` in `app/src/terminal/block_list_element.rs:3307`). Today
-/// only the `Block` arm renders; `RichContent` (agent/AI blocks) is the seam
-/// where interleaved agent output will be painted once the agent cluster lands.
-/// `Block` items map 1:1, in order, to `blocks()` by their running count.
-fn ordered_block_rows(model: &TerminalModel) -> Vec<(&Block, u16, u16)> {
-    let agent_view_state = model.block_list().agent_view_state();
-    let blocks = model.block_list().blocks();
-    let mut items = Vec::new();
-    let mut block_count = 0usize;
-    for height_item in model.block_list().block_heights().cursor::<(), ()>() {
-        match height_item {
-            BlockHeightItem::Block(_) => {
-                let index = block_count;
-                block_count += 1;
-                if let Some(block) = blocks.get(index) {
-                    if let Some((pc, out)) = block_display_rows(block, agent_view_state) {
-                        items.push((block, pc, out));
-                    }
-                }
-            }
-            // Agent/AI output interleaves here once the agent cluster lands: this
-            // is where a TUI-native AI block would be produced (GUI counterpart:
-            // block_list_element.rs:3484).
-            BlockHeightItem::RichContent(_) => {}
-            // Visual-only items the TUI prototype does not render.
-            BlockHeightItem::Gap(_)
-            | BlockHeightItem::RestoredBlockSeparator { .. }
-            | BlockHeightItem::InlineBanner { .. }
-            | BlockHeightItem::SubshellSeparator { .. } => {}
-        }
-    }
-    items
-}
-
-/// Returns the (prompt+command rows, output rows) the TUI should paint for
-/// `block`, or `None` to skip it: blocks the GUI hides (bootstrap, empty,
-/// agent-only) via `is_visible`, and the idle current-prompt block (no command
-/// started or finished), which the TUI surfaces through its own input view.
-fn block_display_rows(block: &Block, agent_view_state: &AgentViewState) -> Option<(u16, u16)> {
-    if !block.is_visible(agent_view_state) || !(block.started() || block.finished()) {
-        return None;
-    }
-    let pc = if block.should_hide_command_grid() {
-        0
-    } else {
-        block.prompt_and_command_grid().len_displayed() as u16
-    };
-    let out = if block.should_hide_output_grid() {
-        0
-    } else {
-        block.output_grid().len_displayed() as u16
-    };
-    Some((pc, out))
-}
-
-/// Renders a `BlockGrid` starting from `skip_rows` into `area`.
-fn render_block_grid(
-    block_grid: &crate::terminal::model::blockgrid::BlockGrid,
-    skip_rows: usize,
-    area: TuiRect,
-    buffer: &mut TuiBuffer,
-    colors: &color::List,
-) {
-    use crate::terminal::model::grid::Dimensions as _;
-
-    let grid = block_grid.grid_handler();
-    // Use `BlockGrid::len_displayed()` (falls back to the grid's full length
-    // when there is no displayed-output filter) so the painted row count matches
-    // the height reserved in `TuiBlockListElement`. The raw `GridHandler`
-    // `len_displayed()` returns `None` for an ordinary block, which would paint
-    // zero rows even though the block reserved space.
-    let num_rows = block_grid.len_displayed();
-    let num_cols = grid.columns().min(area.width as usize);
-
-    for (i, row_idx) in (skip_rows..num_rows).enumerate() {
-        let y = area.y + i as u16;
-        if y >= area.y + area.height {
-            break;
-        }
-        let Some(row) = grid.row(row_idx) else {
-            continue;
-        };
-        for col_idx in 0..num_cols {
-            let x = area.x + col_idx as u16;
-            let cell = &row[col_idx];
-            let style = grid_render::cell_to_style(cell, colors);
-            let symbol = grid_render::sanitized_symbol(cell);
-            if let Some(buffer_cell) = buffer.cell_mut((x, y)) {
-                buffer_cell.set_symbol(&symbol);
-                buffer_cell.set_style(style);
-            }
-        }
     }
 }
 
