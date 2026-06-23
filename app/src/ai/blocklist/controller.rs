@@ -2472,6 +2472,8 @@ impl BlocklistAIController {
         let input_contains_user_query = request_input
             .all_inputs()
             .any(|input| input.is_user_query());
+
+        #[allow(model_handle_in_subscription)]
         ctx.subscribe_to_model(&response_stream, move |me, _, event, ctx| {
             me.handle_response_stream_event(
                 input_contains_user_query,
