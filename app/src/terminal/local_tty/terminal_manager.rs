@@ -287,6 +287,134 @@ pub(crate) fn build_session_core(
     }
 }
 
+/// The result of spawning a PTY: the event-loop join handle, the resolved
+/// `ShellLaunchData`, and (on unix) the PTY fd / (for integration tests) pid,
+/// so the caller can wire up view/poller state.
+pub(crate) struct SpawnedPty {
+    pub event_loop_handle: JoinHandle<()>,
+    pub shell_launch_data: ShellLaunchData,
+    #[cfg(feature = "integration_tests")]
+    pub pid: u32,
+    #[cfg(unix)]
+    pub fd: std::os::unix::io::RawFd,
+}
+
+/// Spawns the PTY for a session core: model prep (login shell, pending launch
+/// data, session id), the init script, the PTY, and its event loop. View-free;
+/// the caller handles view-side updates (`on_shell_determined`, the attributes
+/// poller) and failure toasts. Shared by the GUI's `on_shell_determined` and
+/// the TUI's session.
+pub(crate) fn spawn_pty(
+    shell_starter: ShellStarter,
+    startup_directory: Option<PathBuf>,
+    env_vars: HashMap<OsString, OsString>,
+    event_loop_tx: &mio_channel::Sender<Message>,
+    event_loop_rx: mio_channel::Receiver<Message>,
+    channel_event_proxy: ChannelEventListener,
+    model: Arc<FairMutex<TerminalModel>>,
+    ctx: &mut AppContext,
+) -> anyhow::Result<SpawnedPty> {
+    // In WSL, default to the WSL home directory, not the native Windows home directory.
+    let startup_directory = if let (ShellStarter::Wsl(wsl_shell_starter), None) =
+        (&shell_starter, &startup_directory)
+    {
+        wsl_shell_starter.home_directory()
+    } else {
+        startup_directory
+    };
+
+    model
+        .lock()
+        .set_login_shell_spawned(shell_starter.shell_type());
+
+    let shell_launch_data = match &shell_starter {
+        ShellStarter::Direct(shell_starter) => ShellLaunchData::Executable {
+            executable_path: shell_starter.logical_shell_path().to_owned(),
+            shell_type: shell_starter.shell_type(),
+        },
+        ShellStarter::DockerSandbox(docker_starter) => ShellLaunchData::Executable {
+            executable_path: docker_starter.logical_shell_path().to_owned(),
+            shell_type: docker_starter.shell_type(),
+        },
+        ShellStarter::Wsl(shell_starter) => ShellLaunchData::WSL {
+            distro: shell_starter.distribution().to_owned(),
+        },
+        ShellStarter::MSYS2(shell_starter) => ShellLaunchData::MSYS2 {
+            executable_path: shell_starter.logical_shell_path().to_owned(),
+            shell_type: shell_starter.shell_type(),
+        },
+    };
+
+    // This needs to be done before bootstrapping starts (i.e. before spawning the event loop).
+    model
+        .lock()
+        .set_pending_shell_launch_data(shell_launch_data.clone());
+
+    // Register the session ID generated during shell starter construction. For
+    // bash, fish, and PowerShell it is already baked into the command args; for
+    // zsh and MSYS2, `enqueue_init_script` injects this same ID.
+    let generated_session_id = match &shell_starter {
+        ShellStarter::Direct(starter) | ShellStarter::MSYS2(starter) => starter.session_id(),
+        ShellStarter::DockerSandbox(starter) => starter.session_id(),
+        ShellStarter::Wsl(starter) => starter.session_id(),
+    };
+    model.lock().register_session_id(generated_session_id);
+
+    let pty = enqueue_init_script(&shell_starter, generated_session_id, event_loop_tx)
+        .context("Failed to write shell init script to the pty")
+        .and_then(|_| {
+            TerminalManager::create_pty(
+                startup_directory,
+                shell_starter,
+                env_vars,
+                model.clone(),
+                #[cfg(windows)]
+                event_loop_tx.clone(),
+                ctx,
+            )
+        })?;
+
+    #[cfg(feature = "integration_tests")]
+    let pid = pty.get_pid();
+    #[cfg(unix)]
+    let fd = pty.get_fd();
+
+    let event_loop_handle =
+        TerminalManager::start_pty_event_loop(pty, event_loop_rx, model, channel_event_proxy);
+
+    Ok(SpawnedPty {
+        event_loop_handle,
+        shell_launch_data,
+        #[cfg(feature = "integration_tests")]
+        pid,
+        #[cfg(unix)]
+        fd,
+    })
+}
+
+/// Writes the shell init script (for shells that need it) to the PTY event loop.
+fn enqueue_init_script(
+    shell_starter: &ShellStarter,
+    session_id: SessionId,
+    event_loop_tx: &mio_channel::Sender<Message>,
+) -> Result<(), SendError<Message>> {
+    let shell_type = shell_starter.shell_type();
+    if shell_type == crate::terminal::shell::ShellType::Zsh
+        // For more on why this is necessary on Git Bash, see https://linear.app/warpdotdev/issue/CORE-3202.
+        || shell_starter.is_msys2()
+    {
+        let init_shell_script = crate::terminal::bootstrap::init_shell_script_for_shell(
+            shell_type,
+            &crate::ASSETS,
+            session_id,
+        );
+        event_loop_tx.send(Message::Input(init_shell_script.into_bytes().into()))?;
+        event_loop_tx.send(Message::Input(shell_type.execute_command_bytes().into()))
+    } else {
+        Ok(())
+    }
+}
+
 impl TerminalManager {
     /// Sends a shutdown message to the PTY event loop and waits for it to
     /// process that event.
@@ -986,63 +1114,23 @@ impl TerminalManager {
             })
         }
 
-        self.model()
-            .lock()
-            .set_login_shell_spawned(shell_starter.shell_type());
+        // The PTY sender: on Windows it is passed in (a clone of the raw
+        // sender); elsewhere it is cloned out of the manager's `Arc<Mutex>` so
+        // the spawn helper can enqueue the init script without holding the lock.
+        #[cfg(not(windows))]
+        let event_loop_tx = self.event_loop_tx.lock().clone();
 
-        let shell_launch_data = match &shell_starter {
-            ShellStarter::Direct(shell_starter) => ShellLaunchData::Executable {
-                executable_path: shell_starter.logical_shell_path().to_owned(),
-                shell_type: shell_starter.shell_type(),
-            },
-            ShellStarter::DockerSandbox(docker_starter) => ShellLaunchData::Executable {
-                executable_path: docker_starter.logical_shell_path().to_owned(),
-                shell_type: docker_starter.shell_type(),
-            },
-            ShellStarter::Wsl(shell_starter) => ShellLaunchData::WSL {
-                distro: shell_starter.distribution().to_owned(),
-            },
-            ShellStarter::MSYS2(shell_starter) => ShellLaunchData::MSYS2 {
-                executable_path: shell_starter.logical_shell_path().to_owned(),
-                shell_type: shell_starter.shell_type(),
-            },
-        };
-
-        // This needs to be done before bootstrapping starts (i.e. before spawning the event loop below).
-        self.model()
-            .lock()
-            .set_pending_shell_launch_data(shell_launch_data.clone());
-
-        // Register the session ID that was generated during shell starter construction.
-        // For bash, fish, and PowerShell, the session ID is already baked into the command
-        // args. For zsh and MSYS2, enqueue_init_script injects this same ID.
-        let generated_session_id = match &shell_starter {
-            ShellStarter::Direct(starter) | ShellStarter::MSYS2(starter) => starter.session_id(),
-            ShellStarter::DockerSandbox(starter) => starter.session_id(),
-            ShellStarter::Wsl(starter) => starter.session_id(),
-        };
-        self.model()
-            .lock()
-            .register_session_id(generated_session_id);
-
-        // Enqueue the init shell script (for shells that need it), then create
-        // the PTY and start its corresponding event loop.
-        let model = self.model();
-        let pty = match self
-            .enqueue_init_script(&shell_starter, generated_session_id)
-            .context("Failed to write shell init script to the pty")
-            .and_then(|_| {
-                Self::create_pty(
-                    startup_directory,
-                    shell_starter,
-                    env_vars,
-                    model.clone(),
-                    #[cfg(windows)]
-                    event_loop_tx,
-                    ctx,
-                )
-            }) {
-            Ok(pty) => pty,
+        let spawned = match spawn_pty(
+            shell_starter,
+            startup_directory,
+            env_vars,
+            &event_loop_tx,
+            event_loop_rx,
+            channel_event_proxy,
+            self.model(),
+            ctx,
+        ) {
+            Ok(spawned) => spawned,
             Err(err) => {
                 log::error!("Failed to spawn pty: {err:#}");
                 self.view.update(ctx, |terminal_view, ctx| {
@@ -1053,39 +1141,27 @@ impl TerminalManager {
             }
         };
 
-        #[cfg(feature = "integration_tests")]
-        let pid = pty.get_pid();
-        #[cfg(unix)]
-        let fd = pty.get_fd();
-
-        // Create the channel above and pass the receving side to the event loop.
-        let event_loop_handle = Self::start_pty_event_loop(
-            pty,
-            event_loop_rx,
-            model.clone(),
-            channel_event_proxy.clone(),
-        );
-
-        self.event_loop_handle = Some(event_loop_handle);
+        self.event_loop_handle = Some(spawned.event_loop_handle);
         #[cfg(feature = "integration_tests")]
         {
-            self.pid = Some(pid);
+            self.pid = Some(spawned.pid);
         }
 
         self.view.update(ctx, |terminal_view, ctx| {
             terminal_view.on_shell_determined(ctx);
-            terminal_view.on_active_shell_launch_data_updated(Some(shell_launch_data), ctx);
+            terminal_view.on_active_shell_launch_data_updated(Some(spawned.shell_launch_data), ctx);
         });
 
         // Initialize the terminal attributes poller.
         // TODO(CORE-2297): Implement TerminalPoller on Windows.
         #[cfg(unix)]
         {
-            let terminal_attributes_poller = ctx.add_model(|_| TerminalAttributesPoller::new(fd));
+            let terminal_attributes_poller =
+                ctx.add_model(|_| TerminalAttributesPoller::new(spawned.fd));
             TerminalManager::wire_up_terminal_attribute_poller_with_view(
                 &terminal_attributes_poller,
                 &self.view,
-                model.clone(),
+                self.model(),
                 ctx,
             );
 
@@ -1125,29 +1201,6 @@ impl TerminalManager {
                 auth_state.clone(),
                 ctx.background_executor().to_owned(),
             );
-        }
-    }
-
-    fn enqueue_init_script(
-        &self,
-        shell_starter: &ShellStarter,
-        session_id: SessionId,
-    ) -> Result<(), SendError<Message>> {
-        let shell_type = shell_starter.shell_type();
-        if shell_type == crate::terminal::shell::ShellType::Zsh
-            // For more on why this is necessary on Git Bash, see https://linear.app/warpdotdev/issue/CORE-3202.
-            || shell_starter.is_msys2()
-        {
-            let init_shell_script = crate::terminal::bootstrap::init_shell_script_for_shell(
-                shell_type,
-                &crate::ASSETS,
-                session_id,
-            );
-            let tx = self.event_loop_tx.lock();
-            tx.send(Message::Input(init_shell_script.into_bytes().into()))?;
-            tx.send(Message::Input(shell_type.execute_command_bytes().into()))
-        } else {
-            Ok(())
         }
     }
 
