@@ -2,33 +2,50 @@
 //! window is a [`RootTuiView`] rendered through the `tui`-gated WarpUI backend.
 //!
 //! `RootTuiView` composes two child views — a [`TuiTranscriptView`] filling the
-//! space above a bottom-anchored single-row [`TuiInputView`] — and routes the
-//! input's submission events into the transcript. No agent harness is wired up
-//! yet; submitting a prompt only appends it to the local transcript. [`init`] is
-//! called from `run_internal` once the headless app is up (see
-//! [`crate::run_tui`]). Ctrl-C quit is handled by the runtime's input loop.
+//! space above a bottom-anchored single-row [`TuiInputView`] — and routes
+//! submissions into the shared [`TuiTerminalSession`]. A leading `!` runs the
+//! rest as a command through the persistent `TerminalModel`; plain text is
+//! appended to the local transcript. Keystrokes are forwarded to the PTY when a
+//! command is running or the alt-screen is active. [`init`] is called from
+//! `run_internal` once the headless app is up (see [`crate::run_tui`]). Ctrl-C
+//! quit is handled by the runtime's input loop.
 
 mod command_output;
 mod input_view;
+mod session;
 mod transcript_view;
 
+use std::time::Duration;
+
 use input_view::{InputEvent, TuiInputView};
+use session::{encode_keydown, TuiTerminalSession};
 use transcript_view::TuiTranscriptView;
-use warpui_core::elements::tui::{TuiChildView, TuiColumn, TuiConstrainedBox, TuiElement};
+use warpui_core::elements::tui::{
+    TuiBuffer, TuiChildView, TuiColumn, TuiConstrainedBox, TuiConstraint, TuiElement,
+    TuiEventContext, TuiPresentationContext, TuiRect, TuiSize,
+};
 use warpui_core::platform::{TerminationMode, WindowStyle};
 use warpui_core::runtime::{spawn_tui_driver, TuiDriverHandle};
 use warpui_core::{
-    AddWindowOptions, AppContext, Entity, SingletonEntity, TuiView, TypedActionView, ViewContext,
-    ViewHandle,
+    AddWindowOptions, AppContext, Entity, Event, SingletonEntity, TuiView, TypedActionView,
+    ViewContext, ViewHandle,
 };
+
+use crate::terminal::model::terminal_model::TerminalInputState;
 
 /// The bottom input frame's height: one text row inside a single-cell rounded
 /// border (top + bottom), i.e. three rows total.
 const INPUT_ROWS: u16 = 3;
 
+/// The interrupt byte (Ctrl-C) sent to the PTY on Esc/Cancel.
+const INTERRUPT_BYTE: u8 = 0x03;
+
+/// How often the background task checks for terminal size changes.
+const RESIZE_POLL_INTERVAL: Duration = Duration::from_millis(200);
+
 /// The root TUI view: a transcript that grows upward above a fixed,
 /// bottom-anchored input. It owns both child views and forwards the input's
-/// submissions into the transcript.
+/// submissions into the shared terminal session.
 struct RootTuiView {
     transcript: ViewHandle<TuiTranscriptView>,
     input: ViewHandle<TuiInputView>,
@@ -36,24 +53,15 @@ struct RootTuiView {
 
 impl RootTuiView {
     fn new(ctx: &mut ViewContext<Self>) -> Self {
-        // The transcript has no typed actions, so a plain TUI view suffices; the
-        // input dispatches editing actions, so it must be a typed-action view.
         let transcript = ctx.add_tui_view(|_| TuiTranscriptView::default());
         let input = ctx.add_typed_action_tui_view(|_| TuiInputView::default());
 
-        // On submission, append the text to the transcript. Routing through the
-        // root (rather than wiring the transcript directly to the input) keeps
-        // the view-ownership boundaries explicit and proves child-view
-        // communication.
         ctx.subscribe_to_view(&input, |root, _input, event, ctx| match event {
             InputEvent::Submitted(text) => {
-                // A leading `!` is a local-shell escape hatch: run the rest as a
-                // shell command and stream its output into the transcript.
-                // Anything else is appended verbatim as a prompt entry.
                 if let Some(command) = text.strip_prefix('!') {
                     let command = command.to_string();
-                    root.transcript
-                        .update(ctx, |transcript, ctx| transcript.run_command(command, ctx));
+                    TuiTerminalSession::handle(ctx)
+                        .update(ctx, |session, ctx| session.run_command(&command, ctx));
                 } else {
                     let text = text.clone();
                     root.transcript
@@ -61,12 +69,42 @@ impl RootTuiView {
                 }
             }
             InputEvent::Cancel => {
-                root.transcript
-                    .update(ctx, |transcript, ctx| transcript.cancel_running(ctx));
+                TuiTerminalSession::handle(ctx).update(ctx, |session, ctx| {
+                    session.write_input_bytes(vec![INTERRUPT_BYTE], ctx);
+                });
             }
         });
 
         ctx.focus(&input);
+
+        // Periodically check the terminal size and resize the model + PTY when
+        // it changes. The TUI runtime invalidates on resize but doesn't call
+        // back into the session, so we poll from a background timer.
+        let (resize_tx, resize_rx) = async_channel::unbounded::<(usize, usize)>();
+        ctx.background_executor()
+            .spawn(async move {
+                let mut last = current_terminal_cells();
+                loop {
+                    warpui::r#async::Timer::after(RESIZE_POLL_INTERVAL).await;
+                    let now = current_terminal_cells();
+                    if now != last {
+                        last = now;
+                        if let Some((cols, rows)) = now {
+                            let _ = resize_tx.send((rows as usize, cols as usize)).await;
+                        }
+                    }
+                }
+            })
+            .detach();
+
+        ctx.spawn_stream_local(
+            resize_rx,
+            |_view, (rows, cols), ctx| {
+                TuiTerminalSession::handle(ctx)
+                    .update(ctx, |session, ctx| session.resize(rows, cols, ctx));
+            },
+            |_, _| {},
+        );
 
         Self { transcript, input }
     }
@@ -85,19 +123,103 @@ impl TuiView for RootTuiView {
         let transcript = TuiChildView::new(&self.transcript, ctx);
         let input = TuiChildView::new(&self.input, ctx);
 
-        // The transcript fills the space above the fixed-height input row.
         let column = TuiColumn::new()
             .flex_child(transcript)
             .child(TuiConstrainedBox::new(input).with_max_rows(INPUT_ROWS));
 
-        Box::new(column)
+        // Wrap the column in a key interceptor that forwards keystrokes to the
+        // PTY when a command is running or the alt-screen is active.
+        Box::new(TuiKeyInterceptor::new(Box::new(column)))
     }
 }
 
 impl TypedActionView for RootTuiView {
-    // The root handles no typed actions itself: editing actions are handled by
-    // the input view, and Ctrl-C quit is handled by the runtime input loop.
     type Action = ();
+}
+
+/// A wrapper element that intercepts `KeyDown` events before they reach the
+/// child. When the terminal is in `LongRunningCommand` or `AltScreen` state,
+/// keystrokes are encoded and forwarded to the PTY (the TUI behaves like a real
+/// terminal). In `InputEditor` or `NotBootstrapped` state, events pass through
+/// to the child unchanged.
+struct TuiKeyInterceptor {
+    child: Box<dyn TuiElement>,
+}
+
+impl TuiKeyInterceptor {
+    fn new(child: Box<dyn TuiElement>) -> Self {
+        Self { child }
+    }
+}
+
+impl TuiElement for TuiKeyInterceptor {
+    fn layout(&mut self, constraint: TuiConstraint) -> TuiSize {
+        self.child.layout(constraint)
+    }
+
+    fn render(&self, area: TuiRect, buffer: &mut TuiBuffer) {
+        self.child.render(area, buffer);
+    }
+
+    fn desired_height(&self, width: u16) -> u16 {
+        self.child.desired_height(width)
+    }
+
+    fn cursor_position(&self, area: TuiRect) -> Option<(u16, u16)> {
+        self.child.cursor_position(area)
+    }
+
+    fn present(&mut self, ctx: &mut TuiPresentationContext<'_>) {
+        self.child.present(ctx);
+    }
+
+    fn dispatch_event(
+        &mut self,
+        event: &Event,
+        area: TuiRect,
+        ctx: &mut TuiEventContext,
+        app: &AppContext,
+    ) -> bool {
+        if let Event::KeyDown {
+            keystroke,
+            chars,
+            details,
+            ..
+        } = event
+        {
+            let session = TuiTerminalSession::as_ref(app);
+            let model = session.model();
+            let input_state = model.lock().terminal_input_state();
+
+            if matches!(
+                input_state,
+                TerminalInputState::LongRunningCommand | TerminalInputState::AltScreen
+            ) {
+                let key_without_modifiers = details.key_without_modifiers.as_deref();
+                let bytes = encode_keydown(keystroke, key_without_modifiers, chars, &model)
+                    .or_else(|| {
+                        if chars.is_empty() {
+                            None
+                        } else {
+                            Some(chars.as_bytes().to_vec())
+                        }
+                    });
+
+                if let Some(bytes) = bytes {
+                    if !bytes.is_empty() {
+                        ctx.dispatch_app_update(move |ctx| {
+                            TuiTerminalSession::handle(ctx).update(ctx, |session, ctx| {
+                                session.write_input_bytes(bytes, ctx);
+                            });
+                        });
+                    }
+                }
+                return true;
+            }
+        }
+
+        self.child.dispatch_event(event, area, ctx, app)
+    }
 }
 
 /// Holds the live TUI session for the app's lifetime; dropping it on app
@@ -113,8 +235,11 @@ impl Entity for TuiSession {
 impl SingletonEntity for TuiSession {}
 
 /// Creates the TUI root window and starts the headless draw + input driver.
-/// Registered as a singleton so the session lives for the app's lifetime.
+/// The [`TuiTerminalSession`] singleton is registered first so the session core
+/// exists before any view renders or key events dispatch.
 pub fn init(ctx: &mut AppContext) {
+    TuiTerminalSession::register(ctx);
+
     let (window_id, root) = ctx.add_tui_window(
         AddWindowOptions {
             window_style: WindowStyle::NotStealFocus,
@@ -139,6 +264,11 @@ pub fn init(ctx: &mut AppContext) {
             ctx.terminate_app(TerminationMode::ForceTerminate, None);
         }
     }
+}
+
+/// Reads the current terminal size in cells from crossterm.
+fn current_terminal_cells() -> Option<(u16, u16)> {
+    crossterm::terminal::size().ok()
 }
 
 #[cfg(test)]

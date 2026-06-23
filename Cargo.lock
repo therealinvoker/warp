@@ -15037,6 +15037,7 @@ dependencies = [
  "counter 0.6.0",
  "crash-handler",
  "crc",
+ "crossterm",
  "csv",
  "ctor",
  "cvt",

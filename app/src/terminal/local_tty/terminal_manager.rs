@@ -99,12 +99,13 @@ use crate::terminal::shared_session::{
 };
 use crate::terminal::shell::ShellName;
 use crate::terminal::view::{ConversationRestorationInNewPaneType, Event as TerminalViewEvent};
+use crate::terminal::writeable_pty;
 use crate::terminal::writeable_pty::pty_controller::{EventLoopSendError, EventLoopSender};
 use crate::terminal::writeable_pty::terminal_manager_util::{
     init_pty_controller_model, init_remote_server_controller, wire_up_pty_controller_with_view,
     wire_up_remote_server_controller_with_view,
 };
-use crate::terminal::writeable_pty::{self, Message};
+pub(crate) use crate::terminal::writeable_pty::{Message, PtyControllerEvent};
 use crate::terminal::{
     terminal_manager, ShellLaunchData, ShellLaunchState, TerminalManager as _, TerminalModel,
     TerminalView, PTY_READS_BROADCAST_CHANNEL_SIZE,
@@ -112,7 +113,7 @@ use crate::terminal::{
 use crate::view_components::ToastFlavor;
 use crate::{send_telemetry_on_executor, NetworkStatus};
 
-type PtyController = writeable_pty::PtyController<mio_channel::Sender<Message>>;
+pub(crate) type PtyController = writeable_pty::PtyController<mio_channel::Sender<Message>>;
 type RemoteServerController =
     writeable_pty::remote_server_controller::RemoteServerController<mio_channel::Sender<Message>>;
 
@@ -2801,7 +2802,7 @@ pub fn get_shell_starter(
         })
 }
 
-fn get_shell_starter_internal(
+pub(crate) fn get_shell_starter_internal(
     shell_starter_source: ShellStarterSource,
     background_executor: Arc<Background>,
     auth_state: &AuthState,
