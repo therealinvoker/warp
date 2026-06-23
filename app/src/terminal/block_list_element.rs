@@ -2623,13 +2623,13 @@ impl BlockListElement {
                         app,
                     );
                 } else {
-                    // Keep IME position cache current even when cursor is hidden.
-                    block.prompt_and_command_grid().cache_cursor_ime_position(
+                    // Keep position cache current even when cursor is hidden. IME position depends
+                    // on it.
+                    block.prompt_and_command_grid().cache_cursor_position(
                         command_origin,
                         &block_grid_params.grid_render_params,
                         ctx,
                         terminal_view_id,
-                        app,
                     );
                 }
             }
@@ -2716,9 +2716,8 @@ impl BlockListElement {
 
             if block.is_active_and_long_running() {
                 let show_cursor = block.is_mode_set(TermMode::SHOW_CURSOR);
-                // Don't draw the Warp cursor when rich input is hiding
-                // the CLI agent's cursor cell — agents like OpenCode and Codex
-                // rely on Warp's cursor, so we suppress it here too.
+                // Don't draw the Warp cursor when rich input is hiding the CLI agent's cursor cell.
+                // Agents like OpenCode and Codex rely on Warp's cursor, so we suppress it here too.
                 let hide_for_rich_input = block_grid_params.grid_render_params.hide_cursor_cell;
                 if show_cursor && !hide_for_rich_input {
                     block.output_grid().draw_cursor(
@@ -2749,16 +2748,13 @@ impl BlockListElement {
                         app,
                     );
                 } else if !hide_for_rich_input {
-                    // The terminal program has hidden its cursor (e.g., via `?25l`) but we
-                    // still need to keep the position cache updated for IME candidate window
-                    // positioning. When the rich input is open, IME position comes from
-                    // EditorView instead, so we skip this in that case.
-                    block.output_grid().cache_cursor_ime_position(
+                    // The terminal program has hidden its cursor, i.e. [`TermMode::SHOW_CURSOR`]
+                    // is false. We still need to keep the position cache updated, e.g. for the IME
+                    block.output_grid().cache_cursor_position(
                         *grid_origin,
                         &block_grid_params.grid_render_params,
                         ctx,
                         terminal_view_id,
-                        app,
                     );
                 }
             }

@@ -12,7 +12,9 @@ use super::model::grid::RespectDisplayedOutput;
 use super::model::image_map::StoredImageMetadata;
 use super::model::SecretHandle;
 use crate::settings::EnforceMinimumContrast;
-use crate::terminal::grid_renderer::{render_cursor, render_grid, CellGlyphCache};
+use crate::terminal::grid_renderer::{
+    cache_cursor_position, render_cursor, render_grid, CellGlyphCache,
+};
 use crate::terminal::model::blockgrid::{BlockGrid, CursorDisplayPoint};
 use crate::terminal::model::grid::grid_handler::Link;
 use crate::terminal::model::index::Point;
@@ -152,41 +154,30 @@ impl BlockGrid {
         )
     }
 
-    /// Updates the cursor position cache for IME positioning without visually rendering the cursor.
+    /// Updates the cursor position cache without visually rendering the cursor.
     ///
-    /// Some terminal programs (like Claude Code) hide the terminal cursor via `?25l` while
-    /// rendering their TUI, clearing `SHOW_CURSOR`. This prevents `draw_cursor` from being called,
-    /// leaving the position cache stale. Calling this method keeps the IME candidate window
-    /// anchored to the actual cursor location even when the cursor is visually hidden.
-    pub fn cache_cursor_ime_position(
+    /// Cursor position cache is still depended upon for some things even when the cursor is hidden,
+    /// i.e. when [`TermMode::SHOW_CURSOR`] is false.
+    pub fn cache_cursor_position(
         &self,
         grid_origin: Vector2F,
         grid_render_params: &GridRenderParams,
         ctx: &mut PaintContext,
         terminal_view_id: EntityId,
-        app: &AppContext,
     ) {
         let cursor_display_point = match self.cursor_display_point() {
             Some(CursorDisplayPoint::Visible(pt) | CursorDisplayPoint::HiddenCache(pt)) => pt,
             None => return,
         };
-        let cursor_style = CursorStyle {
-            shape: CursorShape::Hidden,
-            ..self.cursor_style()
-        };
-        render_cursor(
+        cache_cursor_position(
             grid_render_params,
             cursor_display_point,
-            false, // is_cursor_on_wide_char doesn't affect the position origin
-            cursor_style,
+            self.grid_handler().is_cursor_on_wide_char(),
             grid_render_params.size_info.padding_x_px(),
             grid_origin,
-            ColorU::default(),
             ctx,
             terminal_view_id,
-            None,
-            app,
-        )
+        );
     }
 
     #[allow(clippy::too_many_arguments)]
