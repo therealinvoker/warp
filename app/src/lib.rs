@@ -1171,11 +1171,6 @@ pub(crate) fn initialize_app(
         LaunchMode::App { api_key, .. } if ChannelState::channel().is_dogfood() => api_key.clone(),
         _ => None,
     };
-    let api_key = if FeatureFlag::APIKeyAuthentication.is_enabled() {
-        api_key
-    } else {
-        None
-    };
 
     let auth_state = Arc::new(AuthState::initialize(ctx, api_key));
     timer.mark_interval_end("AUTH_MANAGER_SET_USER");
