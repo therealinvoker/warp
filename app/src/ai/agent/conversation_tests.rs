@@ -136,8 +136,10 @@ fn custom_endpoint_usage_metadata(
         summarized: false,
         token_usage: vec![],
         tool_usage_metadata: None,
+        total_input_tokens: 0,
         warp_token_usage: HashMap::new(),
         byok_token_usage: HashMap::new(),
+        context_window_segments: Vec::new(),
         custom_endpoint_token_usage: HashMap::from([(
             config_key.to_string(),
             api::response_event::stream_finished::ModelTokenUsage {
@@ -372,6 +374,7 @@ fn footer_model_token_usage_keeps_custom_endpoint_usage_distinct_from_same_label
             #[allow(deprecated)]
             token_usage: vec![],
             tool_usage_metadata: None,
+            total_input_tokens: 0,
             warp_token_usage: HashMap::new(),
             byok_token_usage: HashMap::from([(
                 "Resolved custom".to_string(),
@@ -389,6 +392,7 @@ fn footer_model_token_usage_keeps_custom_endpoint_usage_distinct_from_same_label
                     token_usage_by_category: HashMap::from([(category.clone(), 6)]),
                 },
             )]),
+            context_window_segments: Vec::new(),
         };
 
         let model_usage =
@@ -436,6 +440,7 @@ fn footer_model_token_usage_preserves_unresolved_custom_endpoint_usage_with_fall
             #[allow(deprecated)]
             token_usage: vec![],
             tool_usage_metadata: None,
+            total_input_tokens: 0,
             warp_token_usage: HashMap::new(),
             byok_token_usage: HashMap::new(),
             custom_endpoint_token_usage: HashMap::from([(
@@ -446,6 +451,7 @@ fn footer_model_token_usage_preserves_unresolved_custom_endpoint_usage_with_fall
                     token_usage_by_category: HashMap::from([(category.clone(), 9)]),
                 },
             )]),
+            context_window_segments: Vec::new(),
         };
 
         let model_usage =
