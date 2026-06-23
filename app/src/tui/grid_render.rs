@@ -56,6 +56,18 @@ pub fn cell_to_style(cell: &Cell, colors: &color::List) -> TuiStyle {
     style
 }
 
+/// Returns the cell's display glyph, substituting a space for empty or
+/// control-character content. ratatui panics if asked to render a control
+/// character, and terminal grids can contain them (e.g. in padding cells).
+pub fn sanitized_symbol(cell: &Cell) -> String {
+    let raw = cell.content_for_display().to_string();
+    if raw.is_empty() || raw.chars().any(char::is_control) {
+        " ".to_string()
+    } else {
+        raw
+    }
+}
+
 /// Renders a `GridHandler` into `buffer` at `area`, iterating displayed rows
 /// and columns, writing each cell's glyph with its style.
 pub fn render_grid(
@@ -83,10 +95,9 @@ pub fn render_grid(
             let x = area.x + col_idx as u16;
             let cell = &row[col_idx];
             let style = cell_to_style(cell, colors);
-            let content = cell.content_for_display();
-            let symbol = content.to_string();
+            let symbol = sanitized_symbol(cell);
             if let Some(buffer_cell) = buffer.cell_mut((x, y)) {
-                buffer_cell.set_symbol(if symbol.is_empty() { " " } else { &symbol });
+                buffer_cell.set_symbol(&symbol);
                 buffer_cell.set_style(style);
             }
         }

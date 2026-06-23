@@ -33,7 +33,9 @@ use warpui_core::{
     ViewContext, ViewHandle,
 };
 
+use crate::ai::blocklist::agent_view::AgentViewState;
 use crate::terminal::color;
+use crate::terminal::model::block::Block;
 use crate::terminal::model::terminal_model::{TerminalInputState, TerminalModel};
 
 /// The bottom input frame's height: one text row inside a single-cell rounded
@@ -277,17 +279,19 @@ impl TuiBlockListElement {
         Self { model, colors }
     }
 
-    /// Computes the displayed height of each block (prompt+command + output).
+    /// Computes the displayed height of each block (prompt+command + output),
+    /// skipping blocks the TUI does not render (see `block_display_rows`).
     fn block_heights(&self) -> Vec<u16> {
         let model = self.model.lock();
+        let agent_view_state = model.block_list().agent_view_state();
         model
             .block_list()
             .blocks()
             .iter()
             .map(|block| {
-                let pc = block.prompt_and_command_grid().len_displayed() as u16;
-                let out = block.output_grid().len_displayed() as u16;
-                pc.saturating_add(out)
+                block_display_rows(block, agent_view_state)
+                    .map(|(pc, out)| pc.saturating_add(out))
+                    .unwrap_or(0)
             })
             .collect()
     }
@@ -304,15 +308,16 @@ impl TuiElement for TuiBlockListElement {
         }
         let model = self.model.lock();
         let blocks = model.block_list().blocks();
+        let agent_view_state = model.block_list().agent_view_state();
         let width = area.width;
 
-        // Compute each block's height.
+        // Compute each block's height (skipping blocks the TUI doesn't render).
         let heights: Vec<u16> = blocks
             .iter()
             .map(|block| {
-                let pc = block.prompt_and_command_grid().len_displayed() as u16;
-                let out = block.output_grid().len_displayed() as u16;
-                pc.saturating_add(out)
+                block_display_rows(block, agent_view_state)
+                    .map(|(pc, out)| pc.saturating_add(out))
+                    .unwrap_or(0)
             })
             .collect();
         let total: u16 = heights.iter().copied().fold(0, u16::saturating_add);
@@ -339,8 +344,7 @@ impl TuiElement for TuiBlockListElement {
             }
             // Partially clipped block: skip the clipped rows.
             let skip = top_clip.saturating_sub(src_y);
-            let pc_rows = block.prompt_and_command_grid().len_displayed() as u16;
-            let out_rows = block.output_grid().len_displayed() as u16;
+            let (pc_rows, out_rows) = block_display_rows(block, agent_view_state).unwrap_or((0, 0));
 
             // Render prompt+command grid.
             let pc_skip = skip.min(pc_rows);
@@ -418,6 +422,27 @@ impl TuiElement for TuiAltScreenElement {
     }
 }
 
+/// Returns the (prompt+command rows, output rows) the TUI should paint for
+/// `block`, or `None` to skip it: blocks the GUI hides (bootstrap, empty,
+/// agent-only) via `is_visible`, and the idle current-prompt block (no command
+/// started or finished), which the TUI surfaces through its own input view.
+fn block_display_rows(block: &Block, agent_view_state: &AgentViewState) -> Option<(u16, u16)> {
+    if !block.is_visible(agent_view_state) || !(block.started() || block.finished()) {
+        return None;
+    }
+    let pc = if block.should_hide_command_grid() {
+        0
+    } else {
+        block.prompt_and_command_grid().len_displayed() as u16
+    };
+    let out = if block.should_hide_output_grid() {
+        0
+    } else {
+        block.output_grid().len_displayed() as u16
+    };
+    Some((pc, out))
+}
+
 /// Renders a `BlockGrid` starting from `skip_rows` into `area`.
 fn render_block_grid(
     block_grid: &crate::terminal::model::blockgrid::BlockGrid,
@@ -429,7 +454,12 @@ fn render_block_grid(
     use crate::terminal::model::grid::Dimensions as _;
 
     let grid = block_grid.grid_handler();
-    let num_rows = grid.len_displayed().unwrap_or(0);
+    // Use `BlockGrid::len_displayed()` (falls back to the grid's full length
+    // when there is no displayed-output filter) so the painted row count matches
+    // the height reserved in `TuiBlockListElement`. The raw `GridHandler`
+    // `len_displayed()` returns `None` for an ordinary block, which would paint
+    // zero rows even though the block reserved space.
+    let num_rows = block_grid.len_displayed();
     let num_cols = grid.columns().min(area.width as usize);
 
     for (i, row_idx) in (skip_rows..num_rows).enumerate() {
@@ -444,10 +474,9 @@ fn render_block_grid(
             let x = area.x + col_idx as u16;
             let cell = &row[col_idx];
             let style = grid_render::cell_to_style(cell, colors);
-            let content = cell.content_for_display();
-            let symbol = content.to_string();
+            let symbol = grid_render::sanitized_symbol(cell);
             if let Some(buffer_cell) = buffer.cell_mut((x, y)) {
-                buffer_cell.set_symbol(if symbol.is_empty() { " " } else { &symbol });
+                buffer_cell.set_symbol(&symbol);
                 buffer_cell.set_style(style);
             }
         }
