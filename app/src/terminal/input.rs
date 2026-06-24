@@ -368,6 +368,12 @@ impl DropTargetData for InputDropTargetData {
         self
     }
 }
+struct ViewerPromptUpload {
+    server_conversation_token: Option<ServerConversationToken>,
+    prompt: String,
+    base_attachments: Vec<AgentAttachment>,
+    clear_pending_attachments_after_upload: bool,
+}
 
 pub const DEBOUNCE_INPUT_DECORATION_PERIOD: Duration = Duration::from_millis(10);
 pub const DEBOUNCE_AI_QUERY_PREDICTION_PERIOD: Duration = Duration::from_millis(250);
@@ -13553,11 +13559,16 @@ impl Input {
             if self.editor.as_ref(ctx).buffer_text(ctx).is_empty() {
                 self.freeze_input_in_loading_state_with_text(&prompt, ctx);
             }
-            ctx.emit(Event::SendAgentPrompt {
+            let prompt_attachments = QueuedQueryModel::as_ref(ctx)
+                .attachments_for(conversation_id, query_id)
+                .to_vec();
+            self.upload_and_send_viewer_prompt(
                 server_conversation_token,
                 prompt,
-                attachments: vec![],
-            });
+                prompt_attachments,
+                /*clear_pending_attachments_after_upload*/ false,
+                ctx,
+            );
             return;
         }
 
@@ -13934,6 +13945,30 @@ impl Input {
                     .map(ServerConversationToken::from_uuid)
             });
 
+        let prompt_attachments = self
+            .ai_context_model
+            .as_ref(ctx)
+            .pending_attachments()
+            .to_vec();
+        self.upload_and_send_viewer_prompt(
+            server_conversation_token,
+            prompt,
+            prompt_attachments,
+            /*clear_pending_attachments_after_upload*/ true,
+            ctx,
+        );
+
+        true
+    }
+
+    fn upload_and_send_viewer_prompt(
+        &mut self,
+        server_conversation_token: Option<ServerConversationToken>,
+        prompt: String,
+        prompt_attachments: Vec<PendingAttachment>,
+        clear_pending_attachments_after_upload: bool,
+        ctx: &mut ViewContext<Self>,
+    ) {
         let ambient_agent_task_id = self
             .ambient_agent_view_model()
             .and_then(|ambient_agent_model| ambient_agent_model.as_ref(ctx).task_id());
@@ -13957,19 +13992,19 @@ impl Input {
             })
             .collect();
 
-        let pending_images: Vec<_> = self
-            .ai_context_model
-            .as_ref(ctx)
-            .pending_images()
-            .into_iter()
-            .cloned()
+        let pending_images: Vec<_> = prompt_attachments
+            .iter()
+            .filter_map(|attachment| match attachment {
+                PendingAttachment::Image(image) => Some(image.clone()),
+                PendingAttachment::File(_) => None,
+            })
             .collect();
-        let pending_files: Vec<_> = self
-            .ai_context_model
-            .as_ref(ctx)
-            .pending_files()
-            .into_iter()
-            .cloned()
+        let pending_files: Vec<_> = prompt_attachments
+            .iter()
+            .filter_map(|attachment| match attachment {
+                PendingAttachment::Image(_) => None,
+                PendingAttachment::File(file) => Some(file.clone()),
+            })
             .collect();
 
         let has_uploads = (!pending_images.is_empty() || !pending_files.is_empty())
@@ -13979,9 +14014,12 @@ impl Input {
             // Upload files first, then send prompt with file references in callback
             Self::upload_files_then_send_prompt(
                 task_id,
-                server_conversation_token,
-                prompt,
-                attachments,
+                ViewerPromptUpload {
+                    server_conversation_token,
+                    prompt,
+                    base_attachments: attachments,
+                    clear_pending_attachments_after_upload,
+                },
                 &pending_images,
                 &pending_files,
                 ctx,
@@ -13997,19 +14035,13 @@ impl Input {
                 attachments,
             });
         }
-
-        true
     }
 
     /// Uploads image and file attachments to GCS via presigned URLs, then emits `SendAgentPrompt`
     /// with the resulting `FileReference` attachments appended.
     fn upload_files_then_send_prompt(
         task_id: crate::ai::ambient_agents::AmbientAgentTaskId,
-        server_conversation_token: Option<
-            session_sharing_protocol::common::ServerConversationToken,
-        >,
-        prompt: String,
-        base_attachments: Vec<AgentAttachment>,
+        upload: ViewerPromptUpload,
         pending_images: &[crate::ai::agent::ImageContext],
         pending_files: &[crate::ai::blocklist::PendingFile],
         ctx: &mut ViewContext<Self>,
@@ -14136,17 +14168,19 @@ impl Input {
                     return;
                 };
 
-                // Upload succeeded — clear pending attachments now.
-                input.ai_context_model.update(ctx, |context_model, ctx| {
-                    context_model.clear_pending_attachments(ctx);
-                });
+                if upload.clear_pending_attachments_after_upload {
+                    // Upload succeeded — clear pending attachments now.
+                    input.ai_context_model.update(ctx, |context_model, ctx| {
+                        context_model.clear_pending_attachments(ctx);
+                    });
+                }
 
-                let mut all_attachments = base_attachments;
+                let mut all_attachments = upload.base_attachments;
                 all_attachments.extend(uploaded_files);
 
                 ctx.emit(Event::SendAgentPrompt {
-                    server_conversation_token,
-                    prompt,
+                    server_conversation_token: upload.server_conversation_token,
+                    prompt: upload.prompt,
                     attachments: all_attachments,
                 });
             },
