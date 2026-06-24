@@ -3781,13 +3781,30 @@ impl ansi::Handler for BlockList {
 
         // Depending on whether or not there's a background block active, the previous
         // completed block is at blocks.len - 2 or blocks.len - 3.
-        let previous_block = [2usize, 3usize]
+        let previous_block_index = [2usize, 3usize]
             .into_iter()
             .flat_map(|offset| self.blocks.len().checked_sub(offset))
-            .map(|idx| &self.blocks[idx])
-            .find(|block| !block.is_background());
-        if let Some(previous_block) = previous_block {
-            self.send_after_block_completed_event(previous_block, block_finished_to_precmd_delay);
+            .find(|&idx| !self.blocks[idx].is_background());
+        if let Some(previous_block_index) = previous_block_index {
+            self.send_after_block_completed_event(
+                &self.blocks[previous_block_index],
+                block_finished_to_precmd_delay,
+            );
+
+            // Avoid unbounded memory growth from hidden in-band generator command
+            // blocks (issue #12694). When in-band command blocks aren't shown, the
+            // just-finished in-band block is never rendered (it has zero height) and
+            // only its completion event matters; now that the event has been sent,
+            // drop the block so these don't accumulate over a long session. We do
+            // this here, after the event has fired, rather than in
+            // `finalize_block_and_advance_list`, so the positional lookup above still
+            // resolves to the correct block. When in-band blocks ARE shown, keep them
+            // so the debugging view continues to work.
+            if !self.show_in_band_command_blocks
+                && self.blocks[previous_block_index].is_for_in_band_command
+            {
+                self.remove_block_at_index(BlockIndex(previous_block_index));
+            }
         } else {
             self.event_proxy
                 .send_terminal_event(TerminalEvent::BootstrapPrecmdDone);
