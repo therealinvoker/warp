@@ -98,6 +98,22 @@ pub enum CodeReviewPaneEntrypoint {
     Other,
 }
 
+impl CodeReviewPaneEntrypoint {
+    /// Whether opening the code review pane via this entrypoint should reset the
+    /// shared per-repo diff state to uncommitted (`Head`) changes.
+    ///
+    /// Only the git-diff chip does: its label always shows the uncommitted
+    /// (vs-`HEAD`) change count, so the diff it opens must match. The
+    /// `DiffStateModel` is shared and cached per repo, so without this reset a
+    /// previously selected base (e.g. picking `master`, or importing PR
+    /// comments) would persist and the chip would reopen the whole-branch diff
+    /// — a mismatch between the chip's label and the diff shown. Every other
+    /// entrypoint preserves whatever base the user last selected.
+    pub(crate) fn resets_diff_to_uncommitted(self) -> bool {
+        matches!(self, Self::GitDiffChip)
+    }
+}
+
 impl Display for CodeReviewPaneEntrypoint {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -620,3 +636,7 @@ impl TelemetryEventDesc for CodeReviewTelemetryEventDiscriminants {
 }
 
 warp_core::register_telemetry_event!(CodeReviewTelemetryEvent);
+
+#[cfg(test)]
+#[path = "telemetry_event_tests.rs"]
+mod tests;

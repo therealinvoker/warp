@@ -251,7 +251,7 @@ use crate::code::editor::{add_color, remove_color};
 #[cfg(feature = "local_fs")]
 use crate::code::editor_management::CodeManager;
 use crate::code::editor_management::CodeSource;
-use crate::code_review::diff_state::DiffStateModel;
+use crate::code_review::diff_state::{DiffMode, DiffStateModel};
 use crate::code_review::telemetry_event::CodeReviewPaneEntrypoint;
 #[cfg(feature = "local_fs")]
 use crate::code_review::CodeReviewTelemetryEvent;
@@ -9286,6 +9286,34 @@ impl Workspace {
         cli_agent: Option<crate::terminal::CLIAgent>,
         ctx: &mut ViewContext<Self>,
     ) {
+        // The git-diff chip always advertises the uncommitted-vs-HEAD change
+        // count, so opening the review pane from it must show those same
+        // uncommitted changes. The per-repo `DiffStateModel` is shared and
+        // cached across opens, so a previously selected base (e.g. choosing
+        // `master` in the pane, or importing PR comments) would otherwise
+        // persist and the chip would reopen the whole-branch diff — a mismatch
+        // between the chip's label and the diff it shows. Reset to `Head` for
+        // this entrypoint only, leaving in-pane base selections untouched for
+        // every other entrypoint.
+        if entrypoint.resets_diff_to_uncommitted() {
+            let preferred_session = pane_group_handle.read(ctx, |pane_group, ctx| {
+                pane_group
+                    .active_session_view(ctx)
+                    .and_then(|terminal_view| terminal_view.as_ref(ctx).active_block_session_id())
+            });
+            context
+                .diff_state_model
+                .update(ctx, |diff_state_model, ctx| {
+                    diff_state_model.set_diff_mode(
+                        DiffMode::Head,
+                        false, /* should_fetch_base */
+                        false, /* track_load_duration */
+                        preferred_session,
+                        ctx,
+                    );
+                });
+        }
+
         if pane_group_handle.as_ref(ctx).right_panel_open {
             if let Some(repo_path) = &context.repo_path {
                 self.right_panel_view.update(ctx, |right_panel, ctx| {
