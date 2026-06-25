@@ -374,10 +374,6 @@ impl Element for EventHandler {
     }
 }
 
-// `EventHandler` is a transparent wrapper, so it forwards selection to its child
-// just like `ConstrainedBox` and `NewScrollable`. Without this, wrapping
-// selectable content in an `EventHandler` severs the selectable-element chain
-// walked by `SelectableArea`, making that content impossible to select.
 impl SelectableElement for EventHandler {
     fn get_selection(
         &self,
