@@ -147,6 +147,8 @@ pub struct PrivacySettings {
     pub is_telemetry_enabled: bool,
     pub is_crash_reporting_enabled: bool,
     pub is_cloud_conversation_storage_enabled: bool,
+    pub is_computer_use_artifact_storage_enabled: bool,
+    pub is_computer_use_pr_screenshot_attachment_enabled: bool,
     pub has_initialized_default_secret_regexes: HasInitializedDefaultSecretRegexes,
     /// List of user defined secret regexes.
     /// Enterprise-level secret regexes will always take precedence over user-level secrets,
@@ -176,11 +178,20 @@ pub struct PrivacySettingsSnapshot {
     // the default value won't override a value that the user previously set on a different device.
     // This is set to a non-option once the user manually changes this setting.
     cloud_conversation_storage_enabled: Option<bool>,
+    computer_use_artifact_storage_enabled: bool,
+    computer_use_pr_screenshot_attachment_enabled: bool,
 }
 
 impl PrivacySettingsSnapshot {
     pub fn cloud_conversation_storage_enabled(&self) -> Option<bool> {
         self.cloud_conversation_storage_enabled
+    }
+    pub fn computer_use_artifact_storage_enabled(&self) -> bool {
+        self.computer_use_artifact_storage_enabled
+    }
+
+    pub fn computer_use_pr_screenshot_attachment_enabled(&self) -> bool {
+        self.computer_use_pr_screenshot_attachment_enabled
     }
 
     pub fn is_telemetry_enabled(&self) -> bool {
@@ -210,6 +221,8 @@ impl PrivacySettingsSnapshot {
     pub fn mock() -> Self {
         Self {
             cloud_conversation_storage_enabled: None,
+            computer_use_artifact_storage_enabled: false,
+            computer_use_pr_screenshot_attachment_enabled: false,
             is_telemetry_enabled: true,
             is_crash_reporting_enabled: true,
             is_telemetry_force_enabled: true,
@@ -295,6 +308,8 @@ impl PrivacySettings {
             is_crash_reporting_enabled,
             is_telemetry_enabled,
             is_cloud_conversation_storage_enabled,
+            is_computer_use_artifact_storage_enabled: false,
+            is_computer_use_pr_screenshot_attachment_enabled: false,
             user_secret_regex_list,
             has_initialized_default_secret_regexes,
             is_telemetry_force_enabled: false,
@@ -365,6 +380,8 @@ impl PrivacySettings {
         self.is_telemetry_enabled = true;
         self.is_crash_reporting_enabled = true;
         self.is_cloud_conversation_storage_enabled = true;
+        self.is_computer_use_artifact_storage_enabled = false;
+        self.is_computer_use_pr_screenshot_attachment_enabled = false;
         self.is_telemetry_force_enabled = false;
         self.is_enterprise_secret_redaction_enabled = false;
     }
@@ -446,6 +463,24 @@ impl PrivacySettings {
                 ctx,
             );
         }
+
+        if self.is_computer_use_artifact_storage_enabled
+            != fetched_settings.is_computer_use_artifact_storage_enabled
+        {
+            self.set_is_computer_use_artifact_storage_enabled(
+                fetched_settings.is_computer_use_artifact_storage_enabled,
+                ctx,
+            );
+        }
+
+        if self.is_computer_use_pr_screenshot_attachment_enabled
+            != fetched_settings.is_computer_use_pr_screenshot_attachment_enabled
+        {
+            self.set_is_computer_use_pr_screenshot_attachment_enabled(
+                fetched_settings.is_computer_use_pr_screenshot_attachment_enabled,
+                ctx,
+            );
+        }
     }
 
     /// Constructor for tests only.
@@ -457,6 +492,8 @@ impl PrivacySettings {
             is_crash_reporting_enabled: true,
             is_telemetry_enabled: true,
             is_cloud_conversation_storage_enabled: true,
+            is_computer_use_artifact_storage_enabled: false,
+            is_computer_use_pr_screenshot_attachment_enabled: false,
             user_secret_regex_list: CustomSecretRegexList::new(None),
             has_initialized_default_secret_regexes: HasInitializedDefaultSecretRegexes::new(None),
             is_telemetry_force_enabled: false,
@@ -473,6 +510,9 @@ impl PrivacySettings {
         PrivacySettingsSnapshot {
             cloud_conversation_storage_enabled: (!self.is_cloud_conversation_storage_enabled)
                 .then_some(false),
+            computer_use_artifact_storage_enabled: self.is_computer_use_artifact_storage_enabled,
+            computer_use_pr_screenshot_attachment_enabled: self
+                .is_computer_use_pr_screenshot_attachment_enabled,
             is_telemetry_enabled: self.is_telemetry_enabled,
             is_crash_reporting_enabled: self.is_crash_reporting_enabled,
             is_telemetry_force_enabled: self.is_telemetry_force_enabled,
@@ -593,6 +633,76 @@ impl PrivacySettings {
         ctx.notify();
     }
 
+    pub fn set_is_computer_use_artifact_storage_enabled(
+        &mut self,
+        new_value: bool,
+        ctx: &mut ModelContext<PrivacySettings>,
+    ) {
+        let old_value = self.is_computer_use_artifact_storage_enabled;
+        if new_value == old_value {
+            return;
+        }
+
+        self.is_computer_use_artifact_storage_enabled = new_value;
+
+        if !new_value && self.is_computer_use_pr_screenshot_attachment_enabled {
+            self.set_is_computer_use_pr_screenshot_attachment_enabled(false, ctx);
+        }
+
+        if self.auth_state.is_logged_in() {
+            let auth_client = self.auth_client.clone();
+            let _ = ctx.spawn(
+                async move {
+                    auth_client
+                        .set_is_computer_use_artifact_storage_enabled(new_value)
+                        .await
+                },
+                |_, _, _| (),
+            );
+        }
+
+        ctx.emit(
+            PrivacySettingsChangedEvent::UpdateIsComputerUseArtifactStorageEnabled {
+                old_value,
+                new_value,
+            },
+        );
+        ctx.notify();
+    }
+
+    pub fn set_is_computer_use_pr_screenshot_attachment_enabled(
+        &mut self,
+        new_value: bool,
+        ctx: &mut ModelContext<PrivacySettings>,
+    ) {
+        let old_value = self.is_computer_use_pr_screenshot_attachment_enabled;
+        if new_value == old_value {
+            return;
+        }
+
+        self.is_computer_use_pr_screenshot_attachment_enabled = new_value;
+
+        if self.auth_state.is_logged_in() {
+            let auth_client = self.auth_client.clone();
+            let _ = ctx.spawn(
+                async move {
+                    auth_client
+                        .set_is_computer_use_pr_screenshot_attachment_enabled(new_value)
+                        .await
+                },
+                |_, _, _| (),
+            );
+        }
+
+        ctx.emit(
+            PrivacySettingsChangedEvent::UpdateIsComputerUsePrScreenshotAttachmentEnabled {
+                old_value,
+                new_value,
+            },
+        );
+        ctx.notify();
+    }
+
     pub fn remove_user_secret_regex(&mut self, idx: &usize, ctx: &mut ModelContext<Self>) {
         let mut new_user_secret_regex_list = self.user_secret_regex_list.to_vec();
         new_user_secret_regex_list.remove(*idx);
@@ -684,6 +794,12 @@ impl PrivacySettings {
                             crash_reporting_enabled: Some(snapshot.is_crash_reporting_enabled()),
                             cloud_conversation_storage_enabled: snapshot
                                 .cloud_conversation_storage_enabled(),
+                            computer_use_artifact_storage_enabled: Some(
+                                snapshot.computer_use_artifact_storage_enabled(),
+                            ),
+                            computer_use_pr_screenshot_attachment_enabled: Some(
+                                snapshot.computer_use_pr_screenshot_attachment_enabled(),
+                            ),
                         })
                         .await;
                     if let Err(err) = result {
@@ -822,6 +938,14 @@ pub enum PrivacySettingsChangedEvent {
         new_value: bool,
     },
     UpdateIsCloudConversationStorageEnabled {
+        old_value: bool,
+        new_value: bool,
+    },
+    UpdateIsComputerUseArtifactStorageEnabled {
+        old_value: bool,
+        new_value: bool,
+    },
+    UpdateIsComputerUsePrScreenshotAttachmentEnabled {
         old_value: bool,
         new_value: bool,
     },
