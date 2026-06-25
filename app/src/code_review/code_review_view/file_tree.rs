@@ -22,7 +22,10 @@ use warpui::Element;
 use super::{CodeReviewAction, CodeReviewView, FileState, LoadedState};
 use crate::appearance::Appearance;
 use crate::code::editor::{add_color, remove_color};
-use crate::code::file_tree::row_renderer::{render_tree_row, TreeRowConfig, FOLDER_INDENT, ITEM_FONT_SIZE, ITEM_PADDING};
+use crate::code::file_tree::ordering::compare_file_tree_entries;
+use crate::code::file_tree::row_renderer::{
+    render_tree_row, TreeRowConfig, FOLDER_INDENT, ITEM_FONT_SIZE, ITEM_PADDING,
+};
 use crate::ui_components::icons::Icon;
 use crate::ui_components::item_highlight::{ImageOrIcon, ItemHighlightState};
 
@@ -146,18 +149,16 @@ fn insert_into_tree(
     }
 }
 
-/// Sorts nodes at every level: directories first (alphabetically), then files
-/// (alphabetically).  Matches the ordering used by the left-panel file tree.
+/// Sorts nodes at every level using the same directory-first, dotfile-first,
+/// natural ordering as the left-panel file tree.
 fn sort_nodes(nodes: &mut [CodeReviewTreeNode]) {
     for node in nodes.iter_mut() {
         if let CodeReviewTreeNode::Dir { children, .. } = node {
             sort_nodes(children);
         }
     }
-    nodes.sort_by(|a, b| match (a.is_dir(), b.is_dir()) {
-        (true, false) => std::cmp::Ordering::Less,
-        (false, true) => std::cmp::Ordering::Greater,
-        _ => a.name().cmp(b.name()),
+    nodes.sort_by(|a, b| {
+        compare_file_tree_entries(a.is_dir(), Some(a.name()), b.is_dir(), Some(b.name()))
     });
 }
 
@@ -415,9 +416,13 @@ impl CodeReviewView {
             row.add_child(
                 Shrinkable::new(
                     1.,
-                    Text::new_inline(file_name.clone(), appearance.ui_font_family(), ITEM_FONT_SIZE)
-                        .with_color(text_color)
-                        .finish(),
+                    Text::new_inline(
+                        file_name.clone(),
+                        appearance.ui_font_family(),
+                        ITEM_FONT_SIZE,
+                    )
+                    .with_color(text_color)
+                    .finish(),
                 )
                 .finish(),
             );
@@ -490,4 +495,61 @@ fn render_change_counts(
     }
 
     Some(text.finish())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{sort_nodes, CodeReviewTreeNode};
+
+    fn file(name: &str) -> CodeReviewTreeNode {
+        CodeReviewTreeNode::File {
+            name: name.to_string(),
+            file_path: name.to_string(),
+            additions: 0,
+            deletions: 0,
+            file_index: 0,
+        }
+    }
+
+    fn dir(name: &str) -> CodeReviewTreeNode {
+        CodeReviewTreeNode::Dir {
+            name: name.to_string(),
+            path: name.to_string(),
+            children: Vec::new(),
+        }
+    }
+
+    fn node_names(nodes: &[CodeReviewTreeNode]) -> Vec<&str> {
+        nodes.iter().map(CodeReviewTreeNode::name).collect()
+    }
+
+    #[test]
+    fn sort_nodes_matches_project_explorer_ordering() {
+        let mut nodes = vec![
+            file("file10.rs"),
+            dir("src2"),
+            file(".env"),
+            dir(".config"),
+            file("file1.rs"),
+            dir("src10"),
+            file("file2.rs"),
+            dir("src1"),
+        ];
+
+        sort_nodes(&mut nodes);
+
+        assert_eq!(
+            node_names(&nodes),
+            [
+                ".config",
+                "src1",
+                "src2",
+                "src10",
+                ".env",
+                "file1.rs",
+                "file2.rs",
+                "file10.rs",
+            ]
+        );
+    }
 }

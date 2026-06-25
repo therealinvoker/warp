@@ -4520,7 +4520,12 @@ impl CodeReviewView {
         // When the flag is off, sidebar goes on the left (legacy).
         if !sidebar_on_right && self.file_sidebar_expanded && !state.file_states.is_empty() {
             sidebar_and_diffs_row.add_child(
-                Container::new(self.render_file_tree_sidebar(&self.cached_sidebar_tree, state, appearance)).finish(),
+                Container::new(self.render_file_tree_sidebar(
+                    &self.cached_sidebar_tree,
+                    state,
+                    appearance,
+                ))
+                .finish(),
             );
 
             let vertical_separator = ConstrainedBox::new(
@@ -4578,7 +4583,12 @@ impl CodeReviewView {
 
             sidebar_and_diffs_row.add_child(vertical_separator);
             sidebar_and_diffs_row.add_child(
-                Container::new(self.render_file_tree_sidebar(&self.cached_sidebar_tree, state, appearance)).finish(),
+                Container::new(self.render_file_tree_sidebar(
+                    &self.cached_sidebar_tree,
+                    state,
+                    appearance,
+                ))
+                .finish(),
             );
         }
 
