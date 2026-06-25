@@ -3763,6 +3763,35 @@ impl ansi::Handler for BlockList {
             self.early_output.precmd();
         }
 
+        // Identify the block whose `AfterBlockCompleted` event this precmd emits.
+        // Depending on whether or not there's a background block active, the previous
+        // completed block is at blocks.len - 2 or blocks.len - 3. The active-block
+        // `precmd` delegate below doesn't change the block count, so computing this up
+        // front is equivalent to computing it afterwards.
+        let previous_block_index = [2usize, 3usize]
+            .into_iter()
+            .flat_map(|offset| self.blocks.len().checked_sub(offset))
+            .find(|&idx| !self.blocks[idx].is_background());
+
+        // Avoid unbounded memory growth from hidden in-band generator command blocks
+        // (issue #12694). When in-band command blocks aren't shown, the just-finished
+        // in-band block is never rendered (it has zero height) and only its completion
+        // event matters, so we drop it. This must happen *before* the active block's
+        // `precmd` delegate emits `BlockMetadataReceived`: removing the block reindexes
+        // the active block down by one, so emitting its metadata first would hand
+        // subscribers a stale `block_index`. When in-band blocks ARE shown, keep them
+        // so the debugging view continues to work.
+        let in_band_block_to_remove = previous_block_index.filter(|&idx| {
+            !self.show_in_band_command_blocks && self.blocks[idx].is_for_in_band_command
+        });
+        if let Some(in_band_block_index) = in_band_block_to_remove {
+            self.send_after_block_completed_event(
+                &self.blocks[in_band_block_index],
+                block_finished_to_precmd_delay,
+            );
+            self.remove_block_at_index(BlockIndex(in_band_block_index));
+        }
+
         // If this is the Precmd following an in-band command, the payload is not populated. If the payload
         // is not populated, use the last populated Precmd payload to initialize the new active block.
         //
@@ -3779,35 +3808,20 @@ impl ansi::Handler for BlockList {
             self.last_populated_precmd_payload = Some(data);
         }
 
-        // Depending on whether or not there's a background block active, the previous
-        // completed block is at blocks.len - 2 or blocks.len - 3.
-        let previous_block_index = [2usize, 3usize]
-            .into_iter()
-            .flat_map(|offset| self.blocks.len().checked_sub(offset))
-            .find(|&idx| !self.blocks[idx].is_background());
-        if let Some(previous_block_index) = previous_block_index {
-            self.send_after_block_completed_event(
-                &self.blocks[previous_block_index],
-                block_finished_to_precmd_delay,
-            );
-
-            // Avoid unbounded memory growth from hidden in-band generator command
-            // blocks (issue #12694). When in-band command blocks aren't shown, the
-            // just-finished in-band block is never rendered (it has zero height) and
-            // only its completion event matters; now that the event has been sent,
-            // drop the block so these don't accumulate over a long session. We do
-            // this here, after the event has fired, rather than in
-            // `finalize_block_and_advance_list`, so the positional lookup above still
-            // resolves to the correct block. When in-band blocks ARE shown, keep them
-            // so the debugging view continues to work.
-            if !self.show_in_band_command_blocks
-                && self.blocks[previous_block_index].is_for_in_band_command
-            {
-                self.remove_block_at_index(BlockIndex(previous_block_index));
+        // For the normal path (no in-band block removed above), emit the previous
+        // block's completion event after the active block's `precmd`, preserving the
+        // original event ordering. The in-band removal path already emitted it above,
+        // before reindexing the active block.
+        if in_band_block_to_remove.is_none() {
+            if let Some(previous_block_index) = previous_block_index {
+                self.send_after_block_completed_event(
+                    &self.blocks[previous_block_index],
+                    block_finished_to_precmd_delay,
+                );
+            } else {
+                self.event_proxy
+                    .send_terminal_event(TerminalEvent::BootstrapPrecmdDone);
             }
-        } else {
-            self.event_proxy
-                .send_terminal_event(TerminalEvent::BootstrapPrecmdDone);
         }
     }
 

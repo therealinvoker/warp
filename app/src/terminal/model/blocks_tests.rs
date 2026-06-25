@@ -2210,6 +2210,57 @@ fn test_in_band_command_blocks_are_retained_when_shown() {
     assert!(!in_band_blocks[0].should_hide_block(&AgentViewState::Inactive));
 }
 
+// Regression test for the PR #13028 review: removing the hidden in-band block must
+// happen *before* the active block's `precmd` emits `BlockMetadataReceived`, so the
+// event never carries a stale (pre-removal) block index. Removal reindexes the
+// active block down by one; emitting metadata first would point subscribers at the
+// wrong (now out-of-bounds) block.
+#[test]
+fn test_active_block_metadata_index_valid_after_in_band_removal() {
+    let (events_tx, events_rx) = async_channel::unbounded();
+    let mut block_list = new_bootstrapped_block_list(
+        None,
+        None,
+        ChannelEventListener::builder_for_test()
+            .with_terminal_events_tx(events_tx)
+            .build(),
+    );
+    // Drain events from bootstrapping.
+    while events_rx.try_recv().is_ok() {}
+
+    block_list.start_active_block_for_in_band_command();
+    block_list.preexec(PreexecValue {
+        command: "warp_run_generator_command 1234 foo".to_owned(),
+        session_id: None,
+    });
+    command_finished_and_precmd(&mut block_list);
+
+    // The hidden in-band block has been removed; the active block is now last.
+    let active_block_index = block_list.active_block_index();
+    let block_count = block_list.blocks().len();
+
+    // Every BlockMetadataReceived emitted during the in-band command's precmd must
+    // reference a block that still exists, and the active block's metadata must point
+    // at the post-removal active block (not a stale, pre-removal index).
+    let mut saw_active_metadata = false;
+    while let Ok(event) = events_rx.try_recv() {
+        if let Event::BlockMetadataReceived(event) = event {
+            assert!(
+                event.block_index.0 < block_count,
+                "BlockMetadataReceived carried out-of-bounds block_index {:?} (len {block_count})",
+                event.block_index
+            );
+            if event.block_index == active_block_index {
+                saw_active_metadata = true;
+            }
+        }
+    }
+    assert!(
+        saw_active_metadata,
+        "expected BlockMetadataReceived for the active block at {active_block_index:?}"
+    );
+}
+
 #[test]
 fn test_background_blocks_finished() {
     let (events_tx, events_rx) = async_channel::unbounded();
