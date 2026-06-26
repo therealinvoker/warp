@@ -15822,7 +15822,9 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "num-traits",
+ "rangemap",
  "string-offset",
+ "syntax_tree",
  "vec1",
  "warp",
  "warp_channel_config",

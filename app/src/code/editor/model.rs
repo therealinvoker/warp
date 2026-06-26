@@ -617,6 +617,18 @@ impl CodeEditorModel {
         &self.diff
     }
 
+    /// Returns a handle to the syntax tree state backing this editor.
+    ///
+    /// Exposed for the `warp_tui` TUI front-end, which reads syntax highlight
+    /// colors directly via [`SyntaxTreeState::highlights_in_ranges`] and installs
+    /// a fixed terminal [`ColorMap`] via [`SyntaxTreeState::set_color_map`] (the
+    /// GUI path derives its color map from `Appearance`, which is not registered
+    /// in lightweight TUI contexts).
+    #[cfg(feature = "tui")]
+    pub fn syntax_tree(&self) -> &ModelHandle<SyntaxTreeState> {
+        &self.syntax_tree
+    }
+
     pub fn hovered_symbol_range(&self) -> Option<&HoverableLink> {
         self.hovered_symbol_range.as_ref()
     }

@@ -44,9 +44,17 @@ warp_editor.workspace = true
 warpui_core = { workspace = true, features = ["tui"] }
 
 [dev-dependencies]
+# Used by the `tui_file_viewer_demo` example to read syntax-highlight colors and
+# install a fixed terminal color map.
+rangemap.workspace = true
+syntax_tree.workspace = true
 
 [[example]]
 name = "tui_input_demo"
+required-features = []
+
+[[example]]
+name = "tui_file_viewer_demo"
 required-features = []
 
 [features]
