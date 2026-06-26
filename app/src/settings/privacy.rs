@@ -119,6 +119,26 @@ define_settings_group!(WarpDrivePrivacySettings, settings: [
         toml_path: "agents.cloud_conversation_storage_enabled",
         description: "Whether conversations are stored in the cloud.",
     },
+    is_computer_use_artifact_storage_enabled: IsComputerUseArtifactStorageEnabled {
+        type: bool,
+        default: false,
+        supported_platforms: SupportedPlatforms::ALL,
+        sync_to_cloud: SyncToCloud::Never,
+        private: false,
+        storage_key: "ComputerUseArtifactStorageEnabled",
+        toml_path: "agents.warp_agent.computer_use.artifact_storage_enabled",
+        description: "Whether Computer Use artifacts are stored.",
+    },
+    is_computer_use_pr_screenshot_attachment_enabled: IsComputerUsePrScreenshotAttachmentEnabled {
+        type: bool,
+        default: false,
+        supported_platforms: SupportedPlatforms::ALL,
+        sync_to_cloud: SyncToCloud::Never,
+        private: false,
+        storage_key: "ComputerUsePrScreenshotAttachmentEnabled",
+        toml_path: "agents.warp_agent.computer_use.pr_screenshot_attachment_enabled",
+        description: "Whether Computer Use screenshots are attached to PRs.",
+    },
 ]);
 
 maybe_define_setting!(CustomSecretRegexList, group: PrivacySettings, {
@@ -264,6 +284,12 @@ impl PrivacySettings {
         let is_cloud_conversation_storage_enabled = *warp_drive_privacy
             .is_cloud_conversation_storage_enabled
             .value();
+        let is_computer_use_artifact_storage_enabled = *warp_drive_privacy
+            .is_computer_use_artifact_storage_enabled
+            .value();
+        let is_computer_use_pr_screenshot_attachment_enabled = *warp_drive_privacy
+            .is_computer_use_pr_screenshot_attachment_enabled
+            .value();
 
         // Listen for changes to the cloud model and update ourselves when they happen.
         ctx.subscribe_to_model(
@@ -293,6 +319,26 @@ impl PrivacySettings {
                             ctx,
                         );
                     }
+                    WarpDrivePrivacySettingsChangedEvent::IsComputerUseArtifactStorageEnabled {
+                        ..
+                    } => {
+                        me.set_is_computer_use_artifact_storage_enabled(
+                            *privacy_settings
+                                .is_computer_use_artifact_storage_enabled
+                                .value(),
+                            ctx,
+                        );
+                    }
+                    WarpDrivePrivacySettingsChangedEvent::IsComputerUsePrScreenshotAttachmentEnabled {
+                        ..
+                    } => {
+                        me.set_is_computer_use_pr_screenshot_attachment_enabled(
+                            *privacy_settings
+                                .is_computer_use_pr_screenshot_attachment_enabled
+                                .value(),
+                            ctx,
+                        );
+                    }
                 }
             },
         );
@@ -308,8 +354,8 @@ impl PrivacySettings {
             is_crash_reporting_enabled,
             is_telemetry_enabled,
             is_cloud_conversation_storage_enabled,
-            is_computer_use_artifact_storage_enabled: false,
-            is_computer_use_pr_screenshot_attachment_enabled: false,
+            is_computer_use_artifact_storage_enabled,
+            is_computer_use_pr_screenshot_attachment_enabled,
             user_secret_regex_list,
             has_initialized_default_secret_regexes,
             is_telemetry_force_enabled: false,
@@ -654,6 +700,15 @@ impl PrivacySettings {
 
         self.is_computer_use_artifact_storage_enabled = new_value;
         self.is_computer_use_pr_screenshot_attachment_enabled = new_value;
+        WarpDrivePrivacySettings::handle(ctx).update(ctx, |settings, ctx| {
+            log::info!("Setting is_computer_use_artifacts_enabled to {new_value}");
+            report_if_error!(settings
+                .is_computer_use_artifact_storage_enabled
+                .set_value(new_value, ctx));
+            report_if_error!(settings
+                .is_computer_use_pr_screenshot_attachment_enabled
+                .set_value(new_value, ctx));
+        });
 
         if self.auth_state.is_logged_in() {
             let auth_client = self.auth_client.clone();
@@ -704,6 +759,12 @@ impl PrivacySettings {
 
         self.is_computer_use_artifact_storage_enabled = new_value;
 
+        WarpDrivePrivacySettings::handle(ctx).update(ctx, |settings, ctx| {
+            log::info!("Setting is_computer_use_artifact_storage_enabled to {new_value}");
+            report_if_error!(settings
+                .is_computer_use_artifact_storage_enabled
+                .set_value(new_value, ctx));
+        });
         if !new_value && self.is_computer_use_pr_screenshot_attachment_enabled {
             self.set_is_computer_use_pr_screenshot_attachment_enabled(false, ctx);
         }
@@ -740,6 +801,13 @@ impl PrivacySettings {
         }
 
         self.is_computer_use_pr_screenshot_attachment_enabled = new_value;
+
+        WarpDrivePrivacySettings::handle(ctx).update(ctx, |settings, ctx| {
+            log::info!("Setting is_computer_use_pr_screenshot_attachment_enabled to {new_value}");
+            report_if_error!(settings
+                .is_computer_use_pr_screenshot_attachment_enabled
+                .set_value(new_value, ctx));
+        });
 
         if self.auth_state.is_logged_in() {
             let auth_client = self.auth_client.clone();
