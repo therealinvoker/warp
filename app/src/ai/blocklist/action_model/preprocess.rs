@@ -27,6 +27,11 @@ impl PendingPreprocessedActions {
         self.0.iter().any(|action| action.contains(action_id))
     }
 
+    /// Returns whether there are no in-flight preprocessing batches.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
     /// Returns the actions that are ready to be queued now that the group of actions identified by [`PreprocessId`] have completed.
     /// NOTE this may return actions that have been completed earlier to maintain the invariant that actions are returned in the
     /// order they are added.

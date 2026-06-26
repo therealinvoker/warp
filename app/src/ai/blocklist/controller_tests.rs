@@ -1,13 +1,15 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use uuid::Uuid;
 use warpui::{App, SingletonEntity};
 
-use crate::ai::agent::conversation::AIConversationId;
+use crate::ai::agent::conversation::{AIConversationId, ConversationStatus};
 use crate::ai::agent::task::TaskId;
 use crate::ai::agent::{
-    AIAgentAttachment, AIAgentContext, AIAgentInput, CancellationReason, ImageContext,
-    PassiveSuggestionTrigger, UserQueryMode,
+    AIAgentAction, AIAgentActionId, AIAgentActionResult, AIAgentActionResultType,
+    AIAgentActionType, AIAgentAttachment, AIAgentContext, AIAgentInput, CancellationReason,
+    ImageContext, PassiveSuggestionTrigger, RequestCommandOutputResult, UserQueryMode,
 };
 use crate::ai::ambient_agents::AmbientAgentTaskId;
 use crate::ai::blocklist::{BlocklistAIHistoryModel, PendingAttachment, PendingFile};
@@ -200,6 +202,93 @@ fn cancelling_conversation_aborts_pending_auto_resume() {
                     .pending_auto_resume_handles
                     .contains_key(&conversation_id));
             });
+        });
+    });
+}
+
+/// Regression test for orphaned conversations: when an action's preprocessing
+/// completes but enqueues nothing (here, because a result for the action already
+/// exists and the dedup guard drops it), the conversation must not be left stuck
+/// `InProgress` with no in-flight stream and no pending/running actions. It should
+/// resolve to a terminal status (or trigger a follow-up).
+#[test]
+fn success_with_actions_that_drop_in_preprocessing_does_not_orphan_conversation() {
+    App::test((), |mut app| async move {
+        initialize_app_for_terminal_view(&mut app);
+        let terminal = add_window_with_terminal(&mut app, None);
+
+        let action_id = AIAgentActionId::from("orphan-action".to_owned());
+        let task_id = TaskId::new("orphan-task".to_owned());
+
+        let conversation_id = terminal.update(&mut app, |terminal, ctx| {
+            let conversation_id =
+                BlocklistAIHistoryModel::handle(ctx).update(ctx, |history_model, ctx| {
+                    history_model.start_new_conversation(terminal.id(), false, false, false, ctx)
+                });
+
+            let action_model = terminal.ai_controller().as_ref(ctx).action_model.clone();
+
+            // Seed a finished result for `action_id` so the preprocessing dedup guard drops
+            // the action when it is queued below, enqueuing nothing executable. A cancelled
+            // result keeps resolution offline (it won't trigger a follow-up request).
+            action_model.update(ctx, |action_model, _| {
+                action_model.insert_finished_action_result_for_test(
+                    conversation_id,
+                    Arc::new(AIAgentActionResult {
+                        id: action_id.clone(),
+                        task_id: task_id.clone(),
+                        result: AIAgentActionResultType::RequestCommandOutput(
+                            RequestCommandOutputResult::CancelledBeforeExecution,
+                        ),
+                    }),
+                );
+            });
+
+            // Queue an action sharing that id. Preprocessing is spawned but has not yet run.
+            action_model.update(ctx, |action_model, ctx| {
+                action_model.queue_actions(
+                    vec![AIAgentAction {
+                        id: action_id.clone(),
+                        task_id: task_id.clone(),
+                        action: AIAgentActionType::InitProject,
+                        requires_result: true,
+                    }],
+                    conversation_id,
+                    ctx,
+                );
+            });
+
+            conversation_id
+        });
+
+        // Until preprocessing drains, the conversation is still in progress.
+        terminal.update(&mut app, |_terminal, ctx| {
+            assert!(
+                BlocklistAIHistoryModel::as_ref(ctx)
+                    .conversation(&conversation_id)
+                    .expect("conversation exists")
+                    .status()
+                    .is_in_progress(),
+                "conversation should be InProgress before preprocessing drains"
+            );
+        });
+
+        // Drive the spawned preprocessing future to completion.
+        for _ in 0..5 {
+            futures_lite::future::yield_now().await;
+        }
+
+        terminal.update(&mut app, |_terminal, ctx| {
+            let status = BlocklistAIHistoryModel::as_ref(ctx)
+                .conversation(&conversation_id)
+                .expect("conversation exists")
+                .status()
+                .clone();
+            assert!(
+                !matches!(status, ConversationStatus::InProgress),
+                "conversation whose only action dropped during preprocessing must not remain \
+                 InProgress; got {status:?}"
+            );
         });
     });
 }

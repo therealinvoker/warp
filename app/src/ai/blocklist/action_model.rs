@@ -589,7 +589,14 @@ impl BlocklistAIActionModel {
             .running_actions
             .get(&conversation_id)
             .is_some_and(|running| !running.is_empty());
-        has_pending || has_running
+        // In-flight preprocessing counts as unfinished: a batch still being preprocessed may
+        // yet enqueue executable actions, so resolving the conversation now would be premature
+        // (and would also misfire the orphan-recovery net).
+        let has_preprocessing = self
+            .pending_preprocessed_actions
+            .get(&conversation_id)
+            .is_some_and(|preprocessing| !preprocessing.is_empty());
+        has_pending || has_running || has_preprocessing
     }
 
     /// Returns finished action results received from the most recent AI output for the active conversation.
@@ -598,6 +605,21 @@ impl BlocklistAIActionModel {
         conversation_id: AIConversationId,
     ) -> Option<&Vec<Arc<AIAgentActionResult>>> {
         self.finished_action_results.get(&conversation_id)
+    }
+
+    /// Test-only helper: seeds a finished action result without emitting events or
+    /// updating conversation status, so tests can reproduce the preprocessing dedup
+    /// path (where a result already exists for an action that is about to be queued).
+    #[cfg(test)]
+    pub(super) fn insert_finished_action_result_for_test(
+        &mut self,
+        conversation_id: AIConversationId,
+        result: Arc<AIAgentActionResult>,
+    ) {
+        self.finished_action_results
+            .entry(conversation_id)
+            .or_default()
+            .push(result);
     }
 
     /// Returns the `AIActionStatus` for the action corresponding to the given `id`, if any.
@@ -957,6 +979,7 @@ impl BlocklistAIActionModel {
             .or_default()
             .handle_preprocess_actions_result(preprocess_id, actions);
 
+        let mut enqueued_executable_action = false;
         for action in actions_to_enqueue {
             let action_id = action.id.clone();
             // Some actions may already have results. This can happen in session sharing when
@@ -990,8 +1013,34 @@ impl BlocklistAIActionModel {
                 .or_default()
                 .push_back(action);
             ctx.emit(BlocklistAIActionEvent::QueuedAction(action_id));
+            enqueued_executable_action = true;
         }
         self.try_to_execute_available_actions(conversation_id, ctx);
+
+        // Orphan guard: if this preprocessing batch enqueued nothing executable and no other
+        // actions remain unfinished for the conversation (including in-flight preprocessing),
+        // then no `FinishedAction` will ever be emitted for this drain. Without it, the
+        // controller's resolver never runs and the conversation can stay `InProgress` forever
+        // with no in-flight stream. Re-emit `FinishedAction` for an already-settled action so
+        // the controller resolves the conversation (sends a follow-up or sets a terminal
+        // status). Reusing a finished action id is semantically valid because that action *is*
+        // finished, and avoids introducing an event variant that lacks an action id.
+        if !enqueued_executable_action
+            && !self.has_unfinished_actions_for_conversation(conversation_id)
+        {
+            if let Some(settled_action_id) = self
+                .finished_action_results
+                .get(&conversation_id)
+                .and_then(|results| results.last())
+                .map(|result| result.id.clone())
+            {
+                ctx.emit(BlocklistAIActionEvent::FinishedAction {
+                    action_id: settled_action_id,
+                    conversation_id,
+                    cancellation_reason: None,
+                });
+            }
+        }
     }
 
     /// Apply a finished action result to the conversation.

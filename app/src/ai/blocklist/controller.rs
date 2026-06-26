@@ -448,113 +448,11 @@ impl BlocklistAIController {
             else {
                 return;
             };
-            let action_model = me.action_model.as_ref(ctx);
-            if action_model.has_unfinished_actions_for_conversation(*conversation_id) {
-                return;
-            }
-
-            let history_model = BlocklistAIHistoryModel::handle(ctx);
-            let Some((is_viewing_shared_session, is_entirely_passive_code_diff)) = history_model
-                .as_ref(ctx)
-                .conversation(conversation_id)
-                .map(|conversation| {
-                    (
-                        conversation.is_viewing_shared_session(),
-                        conversation.is_entirely_passive_code_diff(),
-                    )
-                })
-            else {
-                return;
-            };
-
-            // Viewer sessions should not send follow-ups.
-            // They only act as passive viewers of the action stream.
-            if is_viewing_shared_session {
-                return;
-            }
-
-            let Some(finished_action_results) =
-                action_model.get_finished_action_results(*conversation_id)
-            else {
-                return;
-            };
-            let is_passive_code_diff = is_entirely_passive_code_diff
-                && finished_action_results.last().is_some_and(|result| {
-                    matches!(result.result, AIAgentActionResultType::RequestFileEdits(_))
-                });
-            let has_manual_follow_up = me.pending_passive_follow_ups.contains(conversation_id);
-
-            let is_lrc_command_completed =
-                cancellation_reason.is_some_and(|reason| reason.is_lrc_command_completed());
-            let should_preserve_in_progress_status = cancellation_reason
-                .is_some_and(|reason| reason.should_preserve_in_progress_status());
-            let should_trigger_follow_up_request = (!is_passive_code_diff
-                && !is_lrc_command_completed
-                && finished_action_results
-                    .iter()
-                    .any(|result| result.result.should_trigger_request_upon_completion()))
-                || has_manual_follow_up;
-            if !should_trigger_follow_up_request {
-                if should_preserve_in_progress_status {
-                    return;
-                }
-                // We also check if there's an in-flight req, because it's possible that this
-                // subscription callback was queued in response to auto-cancelling pending actions
-                // in the process of constructing a request. In such cases, we don't want to update
-                // conversation status to Cancelled/Success.
-                if !me
-                    .in_flight_response_streams
-                    .has_active_stream_for_conversation(*conversation_id, ctx)
-                {
-                    // If the completed actions do not trigger a follow-up request, update conversation
-                    // status based on the outcome of the actions.
-                    //
-                    // (It would otherwise remain `InProgress`, which would be correct, since we'd be
-                    // immediately triggering a follow-up request).
-                    //
-                    // In practice, the only time where this codepath gets triggered is upon completion
-                    // of a passive code diff action, where we don't autosend the next request.
-                    //
-                    // With passive code diffs, its most appropriate to mark the conversation
-                    // successful if the passive diff was accepted. In practice, there's only ever
-                    // one RequestFileEdits action, so `finished_action_results` at this point
-                    // should only have a single element.
-                    //
-                    // If the user does end up following up on the passive diff-originated conversation,
-                    // the status will once again be updated to `InProgress`.
-                    let updated_conversation_status = if finished_action_results
-                        .iter()
-                        .all(|result| result.result.is_successful())
-                        || is_lrc_command_completed
-                    {
-                        ConversationStatus::Success
-                    } else {
-                        // This is an imperfect heuristic that practically speaking should have no effect.
-                        //
-                        // If we actually need to differentiate between the state of a conversation
-                        // where actions completed with mixed result statuses (e.g. a mix of
-                        // cancelled, error, and success) _and_ we don't automatically send back action
-                        // results to the agent, then it'd be worth considering adding a new status
-                        // variant.
-                        ConversationStatus::Cancelled
-                    };
-                    history_model.update(ctx, |history_model, ctx| {
-                        history_model.update_conversation_status(
-                            me.terminal_view_id,
-                            *conversation_id,
-                            updated_conversation_status,
-                            ctx,
-                        );
-                    });
-                }
-                return;
-            }
-            let trigger = if has_manual_follow_up {
-                FollowUpTrigger::UserRequested
-            } else {
-                FollowUpTrigger::Auto
-            };
-            me.send_follow_up_for_conversation(*conversation_id, trigger, ctx);
+            me.resolve_conversation_after_actions_settled(
+                *conversation_id,
+                *cancellation_reason,
+                ctx,
+            );
         });
 
         ctx.subscribe_to_model(&agent_view_controller, |me, _, event, ctx| {
@@ -1624,6 +1522,133 @@ impl BlocklistAIController {
         self.pending_passive_follow_ups.remove(&conversation_id);
     }
 
+    /// Resolves a conversation once all of its actions have settled (no pending,
+    /// running, or in-flight preprocessing actions).
+    ///
+    /// This enforces the invariant that a conversation must never remain `InProgress`
+    /// with no in-flight stream and nothing left to do: it either sends a follow-up
+    /// request with the finished action results, or transitions the conversation to a
+    /// terminal status.
+    ///
+    /// This is the shared resolution path invoked both by the action model's
+    /// `FinishedAction` event and by the orphan-recovery safety net.
+    fn resolve_conversation_after_actions_settled(
+        &mut self,
+        conversation_id: AIConversationId,
+        cancellation_reason: Option<CancellationReason>,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        let action_model = self.action_model.as_ref(ctx);
+        if action_model.has_unfinished_actions_for_conversation(conversation_id) {
+            return;
+        }
+        // Treat missing finished results as empty so an orphaned conversation still resolves
+        // to a terminal status instead of early-returning. In the normal `FinishedAction`
+        // flow results are always present, so this is equivalent to the prior behavior there.
+        let finished_action_results = action_model
+            .get_finished_action_results(conversation_id)
+            .cloned()
+            .unwrap_or_default();
+
+        let history_model = BlocklistAIHistoryModel::handle(ctx);
+        let Some((is_viewing_shared_session, is_entirely_passive_code_diff)) = history_model
+            .as_ref(ctx)
+            .conversation(&conversation_id)
+            .map(|conversation| {
+                (
+                    conversation.is_viewing_shared_session(),
+                    conversation.is_entirely_passive_code_diff(),
+                )
+            })
+        else {
+            return;
+        };
+
+        // Viewer sessions should not send follow-ups.
+        // They only act as passive viewers of the action stream.
+        if is_viewing_shared_session {
+            return;
+        }
+
+        let is_passive_code_diff = is_entirely_passive_code_diff
+            && finished_action_results.last().is_some_and(|result| {
+                matches!(result.result, AIAgentActionResultType::RequestFileEdits(_))
+            });
+        let has_manual_follow_up = self.pending_passive_follow_ups.contains(&conversation_id);
+
+        let is_lrc_command_completed =
+            cancellation_reason.is_some_and(|reason| reason.is_lrc_command_completed());
+        let should_preserve_in_progress_status =
+            cancellation_reason.is_some_and(|reason| reason.should_preserve_in_progress_status());
+        let should_trigger_follow_up_request = (!is_passive_code_diff
+            && !is_lrc_command_completed
+            && finished_action_results
+                .iter()
+                .any(|result| result.result.should_trigger_request_upon_completion()))
+            || has_manual_follow_up;
+        if !should_trigger_follow_up_request {
+            if should_preserve_in_progress_status {
+                return;
+            }
+            // We also check if there's an in-flight req, because it's possible that this
+            // resolution was triggered in response to auto-cancelling pending actions
+            // in the process of constructing a request. In such cases, we don't want to update
+            // conversation status to Cancelled/Success.
+            if !self
+                .in_flight_response_streams
+                .has_active_stream_for_conversation(conversation_id, ctx)
+            {
+                // If the completed actions do not trigger a follow-up request, update conversation
+                // status based on the outcome of the actions.
+                //
+                // (It would otherwise remain `InProgress`, which would be correct, since we'd be
+                // immediately triggering a follow-up request).
+                //
+                // In practice, the only time where this codepath gets triggered is upon completion
+                // of a passive code diff action, where we don't autosend the next request.
+                //
+                // With passive code diffs, its most appropriate to mark the conversation
+                // successful if the passive diff was accepted. In practice, there's only ever
+                // one RequestFileEdits action, so `finished_action_results` at this point
+                // should only have a single element.
+                //
+                // If the user does end up following up on the passive diff-originated conversation,
+                // the status will once again be updated to `InProgress`.
+                let updated_conversation_status = if finished_action_results
+                    .iter()
+                    .all(|result| result.result.is_successful())
+                    || is_lrc_command_completed
+                {
+                    ConversationStatus::Success
+                } else {
+                    // This is an imperfect heuristic that practically speaking should have no effect.
+                    //
+                    // If we actually need to differentiate between the state of a conversation
+                    // where actions completed with mixed result statuses (e.g. a mix of
+                    // cancelled, error, and success) _and_ we don't automatically send back action
+                    // results to the agent, then it'd be worth considering adding a new status
+                    // variant.
+                    ConversationStatus::Cancelled
+                };
+                history_model.update(ctx, |history_model, ctx| {
+                    history_model.update_conversation_status(
+                        self.terminal_view_id,
+                        conversation_id,
+                        updated_conversation_status,
+                        ctx,
+                    );
+                });
+            }
+            return;
+        }
+        let trigger = if has_manual_follow_up {
+            FollowUpTrigger::UserRequested
+        } else {
+            FollowUpTrigger::Auto
+        };
+        self.send_follow_up_for_conversation(conversation_id, trigger, ctx);
+    }
+
     fn conversation_ready_for_pending_events(
         &self,
         conversation_id: AIConversationId,
@@ -1909,6 +1934,12 @@ impl BlocklistAIController {
         ctx: &mut ModelContext<Self>,
     ) {
         if !self.conversation_ready_for_pending_events(conversation_id, ctx) {
+            // Safety net: this is one of the few hooks that fires after stream cleanup, so it's
+            // a convenient place to catch a conversation that has been left orphaned —
+            // `InProgress` with no in-flight stream, no pending/running/preprocessing actions,
+            // and no scheduled resume. Nothing else would ever move such a conversation out of
+            // `InProgress`, so recover it here. Readiness behavior is otherwise unchanged.
+            self.recover_orphaned_conversation_if_needed(conversation_id, ctx);
             return;
         }
 
@@ -1921,6 +1952,49 @@ impl BlocklistAIController {
         }
 
         self.inject_pending_events_for_request(conversation_id, ctx);
+    }
+
+    /// Detects and recovers an orphaned conversation: one left `InProgress` with no
+    /// in-flight stream, no pending/running/preprocessing actions, and no scheduled
+    /// auto-resume. Such a conversation would otherwise hang indefinitely. Recovery
+    /// routes through the shared `resolve_conversation_after_actions_settled` path so
+    /// the conversation reaches a terminal status (or sends a follow-up).
+    fn recover_orphaned_conversation_if_needed(
+        &mut self,
+        conversation_id: AIConversationId,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        let is_in_progress = BlocklistAIHistoryModel::as_ref(ctx)
+            .conversation(&conversation_id)
+            .is_some_and(|conversation| conversation.status().is_in_progress());
+        if !is_in_progress {
+            return;
+        }
+        if self
+            .in_flight_response_streams
+            .has_active_stream_for_conversation(conversation_id, ctx)
+        {
+            return;
+        }
+        if self
+            .action_model
+            .as_ref(ctx)
+            .has_unfinished_actions_for_conversation(conversation_id)
+        {
+            return;
+        }
+        // A scheduled auto-resume will move the conversation out of `InProgress` on its own.
+        if self
+            .pending_auto_resume_handles
+            .contains_key(&conversation_id)
+        {
+            return;
+        }
+
+        log::warn!(
+            "Recovering orphaned conversation stuck InProgress with no stream or pending work: conversation_id={conversation_id:?}"
+        );
+        self.resolve_conversation_after_actions_settled(conversation_id, None, ctx);
     }
 
     fn handle_dormant_claude_wake_ready(
