@@ -218,16 +218,13 @@ impl TuiView for FileViewerView {
 
             if let Some(highlights) = highlights.as_ref() {
                 for (col, _) in line.chars().enumerate() {
-                    // The buffer has a BlockMarker sentinel at CharOffset(1),
-                    // so the first visible char is at CharOffset(2).
-                    // String index i → CharOffset(i + 2).
                     let offset = CharOffset::from(global + col + 2);
                     if let Some(color) = highlights.get(&offset) {
-                        // Map to the nearest 256-color index for maximum
-                        // terminal compatibility (truecolor RGB also works but
-                        // requires COLORTERM=truecolor).
-                        let tui_color = rgb_to_256color(color.r, color.g, color.b);
-                        color_cells.push((row_in_area, gutter_width + col as u16, tui_color));
+                        color_cells.push((
+                            row_in_area,
+                            gutter_width + col as u16,
+                            Color::Rgb(color.r, color.g, color.b),
+                        ));
                     }
                 }
             }
@@ -340,21 +337,6 @@ impl TuiElement for FileViewerElement {
             }
         }
     }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Color helpers
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Map an sRGB triple to the nearest xterm-256 color index.
-/// Falls back to the 6×6×6 color cube (indices 16–231) which is supported by
-/// virtually every modern terminal emulator.
-fn rgb_to_256color(r: u8, g: u8, b: u8) -> Color {
-    // Map each channel to a 0-5 index in the 6×6×6 cube.
-    let ri = ((r as u16 * 5 + 127) / 255) as u8;
-    let gi = ((g as u16 * 5 + 127) / 255) as u8;
-    let bi = ((b as u16 * 5 + 127) / 255) as u8;
-    Color::Indexed(16 + 36 * ri + 6 * gi + bi)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
