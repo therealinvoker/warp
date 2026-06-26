@@ -19485,6 +19485,16 @@ impl Workspace {
     /// tab's max width (tabs have flex 1 and max width of 200).
     const GROUP_EDGE_SPACER_MAX_WIDTH: f32 = Self::GROUP_EDGE_SPACER_FLEX * 200.0;
 
+    /// Flex of the trailing slot when a group is pinned (it holds the divider
+    /// and the pin). Icon-width / compact-threshold, so the slot reaches the
+    /// icon size right as members go icon-only and the pin hides in step.
+    const GROUP_PIN_FLEX: f32 = TAB_PIN_INDICATOR_ICON_SIZE / COMPACT_TAB_WIDTH_THRESHOLD;
+    /// Cap on the pinned trailing slot, mirroring the edge spacer's cap.
+    const GROUP_PIN_MAX_WIDTH: f32 = Self::GROUP_PIN_FLEX * 200.0;
+    /// Trailing room on a collapsed pinned header so the name fades before the
+    /// right-justified pin overlay.
+    const GROUP_HEADER_PIN_RESERVED_WIDTH: f32 = 20.0;
+
     /// Renders a contiguous run of grouped tabs as one tab-bar slot: header
     /// + (when expanded) member tabs.
     #[allow(clippy::too_many_arguments)]
@@ -19571,24 +19581,38 @@ impl Workspace {
             }
         }
 
-        // Pinned + expanded: trailing pin indicator after the last member.
         let group_pinned = FeatureFlag::PinnedTabs.is_enabled() && group.pinned;
-        if group_pinned && !is_collapsed {
-            row.add_child(render_horizontal_group_pin_indicator(appearance));
-        }
 
         if !is_collapsed {
-            // Matching edge spacer after the last member. The trailing divider
-            // lives inside this spacer's own flex slot (drawn at its right edge,
-            // which is the group's far edge), so it doesn't steal width from the
-            // members the way a border on the group container would. Same loose
-            // flex cap as the leading spacer so the group shrink-wraps instead
-            // of this spacer ballooning out toward the bar's trailing edge.
+            // Trailing slot carrying the group's divider (right border at the
+            // group's far edge). When pinned it also holds the pin it reserves
+            // extra flex and hides once it is too narrow to render the icon.
+            let (trailing_flex, trailing_max, trailing_inner): (f32, f32, Box<dyn Element>) =
+                if group_pinned {
+                    (
+                        Self::GROUP_PIN_FLEX,
+                        Self::GROUP_PIN_MAX_WIDTH,
+                        SizeConstraintSwitch::new(
+                            Align::new(render_horizontal_group_pin_indicator(appearance)).finish(),
+                            vec![(
+                                SizeConstraintCondition::WidthLessThan(TAB_PIN_INDICATOR_ICON_SIZE),
+                                Empty::new().finish(),
+                            )],
+                        )
+                        .finish(),
+                    )
+                } else {
+                    (
+                        Self::GROUP_EDGE_SPACER_FLEX,
+                        Self::GROUP_EDGE_SPACER_MAX_WIDTH,
+                        Empty::new().finish(),
+                    )
+                };
             row.add_child(
                 Shrinkable::new(
-                    Self::GROUP_EDGE_SPACER_FLEX,
+                    trailing_flex,
                     ConstrainedBox::new(
-                        Container::new(Empty::new().finish())
+                        Container::new(trailing_inner)
                             .with_border(
                                 Border::all(1.)
                                     .with_sides(false, false, false, true)
@@ -19598,7 +19622,7 @@ impl Workspace {
                             )
                             .finish(),
                     )
-                    .with_max_width(Self::GROUP_EDGE_SPACER_MAX_WIDTH)
+                    .with_max_width(trailing_max)
                     .finish(),
                 )
                 .finish(),
@@ -19639,7 +19663,13 @@ impl Workspace {
         let group_flex = if is_collapsed {
             1.0
         } else {
-            1.0 + run_len as f32 + 2.0 * Self::GROUP_EDGE_SPACER_FLEX
+            // leading spacer + trailing slot (pin flex when pinned, else spacer).
+            let trailing_flex = if group_pinned {
+                Self::GROUP_PIN_FLEX
+            } else {
+                Self::GROUP_EDGE_SPACER_FLEX
+            };
+            1.0 + run_len as f32 + Self::GROUP_EDGE_SPACER_FLEX + trailing_flex
         };
         Shrinkable::new(group_flex, positioned_container).finish()
     }
@@ -19695,7 +19725,7 @@ impl Workspace {
 
         // Full header: collage + name, with the horizontal padding inside it so
         // the size switch below measures the full slot width, like a tab.
-        let mut full_row = Flex::row()
+        let full_row = Flex::row()
             // Fill the slot and center the icon + title.
             .with_main_axis_size(MainAxisSize::Max)
             .with_main_axis_alignment(MainAxisAlignment::Center)
@@ -19707,15 +19737,18 @@ impl Workspace {
                 appearance,
             ))
             .with_child(Shrinkable::new(1.0, name_element).finish());
-        // Collapsed + pinned: pin indicator to the right of the name, where an
-        // ungrouped tab would show its close button. Expanded groups show the
-        // pin after their last member instead.
-        if FeatureFlag::PinnedTabs.is_enabled() && group.pinned && is_collapsed {
-            full_row.add_child(render_horizontal_group_pin_indicator(appearance));
-        }
+        // Collapsed + pinned: the pin is a right-justified overlay (added at the
+        // end), not inline with the collage + name.
+        let header_pin = FeatureFlag::PinnedTabs.is_enabled() && group.pinned && is_collapsed;
         let full_content = Container::new(full_row.finish())
             .with_padding_left(8.)
-            .with_padding_right(if is_collapsed { 8. } else { 9. })
+            .with_padding_right(if header_pin {
+                8. + Self::GROUP_HEADER_PIN_RESERVED_WIDTH
+            } else if is_collapsed {
+                8.
+            } else {
+                9.
+            })
             .finish();
 
         // Compact header (narrow slot): just the collage at the tab's compact
@@ -19785,7 +19818,24 @@ impl Workspace {
                 anchor: TabContextMenuAnchor::Pointer(position),
             });
         });
-        header.finish()
+
+        let header = header.finish();
+        if header_pin {
+            // Right-justify the pin like a regular tab's close-button slot.
+            let mut stack = Stack::new().with_child(header);
+            stack.add_positioned_child(
+                render_horizontal_group_pin_indicator(appearance),
+                OffsetPositioning::offset_from_parent(
+                    vec2f(-8.0, 0.0),
+                    ParentOffsetBounds::ParentByPosition,
+                    ParentAnchor::MiddleRight,
+                    ChildAnchor::MiddleRight,
+                ),
+            );
+            stack.finish()
+        } else {
+            header
+        }
     }
 
     /// Returns up to 4 distinct pane-kind icons for the group's collage.
@@ -20623,7 +20673,14 @@ impl Workspace {
                     if members == 0 {
                         0.0
                     } else {
-                        members as f32 + 2.0 * Self::GROUP_EDGE_SPACER_FLEX
+                        // Pinned groups' trailing slot is the pin slot, not a spacer.
+                        let trailing_flex =
+                            if FeatureFlag::PinnedTabs.is_enabled() && group.pinned {
+                                Self::GROUP_PIN_FLEX
+                            } else {
+                                Self::GROUP_EDGE_SPACER_FLEX
+                            };
+                        members as f32 + Self::GROUP_EDGE_SPACER_FLEX + trailing_flex
                     }
                 })
                 .sum()
