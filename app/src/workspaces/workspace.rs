@@ -937,4 +937,56 @@ pub struct WorkspaceSettings {
     pub enable_warp_attribution: AdminEnablementSetting,
     #[serde(default)]
     pub default_host_slug: Option<String>,
+    /// Secret-less mirror of the server's `teamByo` projection (team-managed
+    /// BYOK/BYOE). Populated from the synced workspace settings and refreshed on
+    /// team change. `None` for non-enterprise teams or teams without team-managed
+    /// BYO configured. Contains only display/reference metadata — never an API
+    /// key, endpoint base URL, or ciphertext — and is never written to secure
+    /// storage.
+    #[serde(default)]
+    pub team_byo: Option<TeamByoSettings>,
+}
+
+/// Secret-less mirror of the server's `teamByo` projection.
+///
+/// This intentionally contains ONLY display/reference metadata. It must never
+/// gain a field for an API key, endpoint base URL, or ciphertext: team secrets
+/// live encrypted server-side and are injected at the inference seam, never
+/// synced to clients or persisted to secure storage.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct TeamByoSettings {
+    pub first_party_enabled: bool,
+    pub endpoints_enabled: bool,
+    pub allow_user_keys: bool,
+    pub allow_user_endpoints: bool,
+    pub first_party: TeamByoFirstPartyKeys,
+    pub endpoints: Vec<TeamByoEndpoint>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct TeamByoFirstPartyKeys {
+    pub openai_configured: bool,
+    pub anthropic_configured: bool,
+    pub google_configured: bool,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct TeamByoEndpoint {
+    pub id: String,
+    pub name: String,
+    pub enabled: bool,
+    pub models: Vec<TeamByoEndpointModel>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct TeamByoEndpointModel {
+    /// Stable request identifier for this team endpoint model. Equals the
+    /// server-side `config_key` and is what the picker selection sends as
+    /// `ModelConfig.base`; the server maps it back to the team endpoint and
+    /// injects the endpoint secret. No secret is carried here.
+    pub config_key: String,
+    pub slug: String,
+    pub alias: Option<String>,
+    pub display_name: String,
+    pub enabled: bool,
 }

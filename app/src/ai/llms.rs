@@ -764,6 +764,11 @@ impl LLMPreferences {
     }
 
     /// Returns the set of LLMs available for Agent Mode use.
+    ///
+    /// Server-provided team endpoint models (team-managed BYOE) arrive here as
+    /// ordinary `agent_mode` catalog entries with `id == config_key`. They are
+    /// neither local custom endpoints nor custom routers, so they pass the
+    /// filters below and surface in the picker like any other server model.
     pub fn get_base_llm_choices_for_agent_mode(
         &self,
         app: &AppContext,

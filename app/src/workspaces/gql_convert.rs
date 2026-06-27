@@ -33,7 +33,11 @@ use warp_graphql::workspace::{
     ComputerUseAutonomyValue as GqlComputerUseAutonomyValue, EmailInvite as GqlEmailInvite,
     HostEnablementSetting as GqlHostEnablementSetting,
     InviteLinkDomainRestriction as GqlInviteLinkDomainRestriction,
-    MembershipRole as GqlMembershipRole, Team as GqlTeam, TeamMember as GqlTeamMember,
+    MembershipRole as GqlMembershipRole, Team as GqlTeam,
+    TeamByoEndpointMetaData as GqlTeamByoEndpointMetaData,
+    TeamByoEndpointModelMetaData as GqlTeamByoEndpointModelMetaData,
+    TeamByoFirstPartyKeys as GqlTeamByoFirstPartyKeys, TeamByoSettings as GqlTeamByoSettings,
+    TeamMember as GqlTeamMember,
     UgcCollectionEnablementSetting as GqlUgcCollectionEnablementSetting, Workspace as GqlWorkspace,
     WorkspaceMember as GqlWorkspaceMember, WorkspaceMemberUsageInfo as GqlWorkspaceMemberUsageInfo,
     WorkspaceSettings as GqlWorkspaceSettings,
@@ -49,12 +53,12 @@ use super::workspace::{
     CodebaseContextSettings, CustomerType, DelinquencyStatus, EmailInvite, EnterpriseSecretRegex,
     HostEnablementSetting, InstanceShape, InviteLinkDomainRestriction, LinkSharingSettings,
     LlmSettings, MaxPriorCycles, SandboxedAgentSettings, SecretRedactionSettings,
-    SessionSharingPolicy, SharedNotebooksPolicy, SharedWorkflowsPolicy,
-    TelemetryDataCollectionPolicy, TelemetrySettings, Tier, UgcCollectionEnablementSetting,
-    UgcCollectionSettings, UgcDataCollectionPolicy, UsageBasedPricingPolicy,
-    UsageVisibilityGranularity, UsageVisibilityPolicy, WarpAiPolicy, Workspace,
-    WorkspaceInviteCode, WorkspaceMember, WorkspaceMemberUsageInfo, WorkspaceSettings,
-    WorkspaceSizePolicy,
+    SessionSharingPolicy, SharedNotebooksPolicy, SharedWorkflowsPolicy, TeamByoEndpoint,
+    TeamByoEndpointModel, TeamByoFirstPartyKeys, TeamByoSettings, TelemetryDataCollectionPolicy,
+    TelemetrySettings, Tier, UgcCollectionEnablementSetting, UgcCollectionSettings,
+    UgcDataCollectionPolicy, UsageBasedPricingPolicy, UsageVisibilityGranularity,
+    UsageVisibilityPolicy, WarpAiPolicy, Workspace, WorkspaceInviteCode, WorkspaceMember,
+    WorkspaceMemberUsageInfo, WorkspaceSettings, WorkspaceSizePolicy,
 };
 use crate::ai::blocklist::usage::conversation_usage_view::ConversationUsageInfo;
 use crate::ai::execution_profiles::{
@@ -806,6 +810,52 @@ impl From<warp_graphql::workspace::LlmSettings> for LlmSettings {
     }
 }
 
+impl From<GqlTeamByoSettings> for TeamByoSettings {
+    fn from(gql: GqlTeamByoSettings) -> Self {
+        Self {
+            first_party_enabled: gql.first_party_enabled,
+            endpoints_enabled: gql.endpoints_enabled,
+            allow_user_keys: gql.allow_user_keys,
+            allow_user_endpoints: gql.allow_user_endpoints,
+            first_party: gql.first_party.into(),
+            endpoints: gql.endpoints.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl From<GqlTeamByoFirstPartyKeys> for TeamByoFirstPartyKeys {
+    fn from(gql: GqlTeamByoFirstPartyKeys) -> Self {
+        Self {
+            openai_configured: gql.openai_configured,
+            anthropic_configured: gql.anthropic_configured,
+            google_configured: gql.google_configured,
+        }
+    }
+}
+
+impl From<GqlTeamByoEndpointMetaData> for TeamByoEndpoint {
+    fn from(gql: GqlTeamByoEndpointMetaData) -> Self {
+        Self {
+            id: gql.id,
+            name: gql.name,
+            enabled: gql.enabled,
+            models: gql.models.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl From<GqlTeamByoEndpointModelMetaData> for TeamByoEndpointModel {
+    fn from(gql: GqlTeamByoEndpointModelMetaData) -> Self {
+        Self {
+            config_key: gql.config_key,
+            slug: gql.slug,
+            alias: gql.alias,
+            display_name: gql.display_name,
+            enabled: gql.enabled,
+        }
+    }
+}
+
 impl From<GqlWorkspaceSettings> for WorkspaceSettings {
     fn from(gql_workspace_settings: GqlWorkspaceSettings) -> WorkspaceSettings {
         Self {
@@ -942,6 +992,8 @@ impl From<GqlWorkspaceSettings> for WorkspaceSettings {
                 .ambient_agent_settings
                 .as_ref()
                 .and_then(|s| s.default_host_slug.clone()),
+            // Secret-less team BYO projection; `None` for non-enterprise teams.
+            team_byo: gql_workspace_settings.team_byo.map(Into::into),
         }
     }
 }
