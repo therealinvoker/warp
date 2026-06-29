@@ -852,9 +852,14 @@ impl<V: EditorView> EditorWrapper<V> {
                 .map(|decoration| decoration.overlay)
                 .next();
 
-            let Some(height) = model.first_line_height(&**block) else {
+            let Some(first_line_height) = model.first_line_height(&**block) else {
                 continue;
             };
+            // Size the gutter element (and therefore its diff indicator and hover
+            // target) to the block's full height so the indicator spans every visual
+            // row of a soft-wrapped line, matching the removed-line blocks and VS
+            // Code. The line number itself stays one row tall at the top.
+            let gutter_height = block.viewport_item().content_size.y();
 
             // Check if this line is part of any diff hunk when diff hunks are expanded and hovered
             let is_diff_line = self.diff_hunks_are_expanded() && diff_hunk.is_some();
@@ -916,8 +921,8 @@ impl<V: EditorView> EditorWrapper<V> {
                 should_show_comment_button,
                 is_comment_on_current_line,
                 attached_comment,
-                height,
-                height,
+                first_line_height,
+                first_line_height,
                 &line,
                 overlay,
                 is_diff_line,
@@ -931,7 +936,7 @@ impl<V: EditorView> EditorWrapper<V> {
             };
             elements.push(GutterElement {
                 element,
-                height,
+                height: gutter_height,
                 offset,
                 hovered: range_hovered,
                 // We can skip rendering this removal gutter element if its hunk is expanded since
