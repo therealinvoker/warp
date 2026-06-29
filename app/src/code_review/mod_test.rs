@@ -1,3 +1,4 @@
+use warpui::keymap::Context;
 use warpui::App;
 
 use crate::util::bindings::keybinding_name_to_keystroke;
@@ -28,6 +29,21 @@ fn test_open_branch_selector_binding_is_editable_with_no_default() {
                 None,
                 keybinding_name_to_keystroke("code_review:open_branch_selector", ctx),
                 "an unassigned editable binding should resolve to no keystroke"
+            );
+
+            let mut editing_context = Context::default();
+            editing_context.set.insert("CodeReviewView");
+            assert!(
+                !binding.in_context(&editing_context),
+                "code_review:open_branch_selector should not be active while editing"
+            );
+
+            let mut not_editing_context = Context::default();
+            not_editing_context.set.insert("CodeReviewView");
+            not_editing_context.set.insert("CodeReviewView_NotEditing");
+            assert!(
+                binding.in_context(&not_editing_context),
+                "code_review:open_branch_selector should be active in the non-editing code review context"
             );
         });
     });
