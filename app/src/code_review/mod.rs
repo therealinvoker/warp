@@ -36,6 +36,7 @@ use crate::terminal::view::TerminalView;
 use crate::terminal::CLIAgent;
 use crate::util::bindings::CustomAction;
 
+#[cfg(feature = "local_fs")]
 pub const OPEN_BRANCH_SELECTOR_BINDING_NAME: &str = "code_review:open_branch_selector";
 
 /// Arguments needed to open or toggle the code review panel.

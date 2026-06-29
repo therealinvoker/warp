@@ -46,6 +46,7 @@ use warpui::AppContext;
 
 use crate::ai::blocklist::NEW_AGENT_PANE_LABEL;
 use crate::channel::{Channel, ChannelState};
+#[cfg(feature = "local_fs")]
 use crate::code_review::OPEN_BRANCH_SELECTOR_BINDING_NAME;
 use crate::features::FeatureFlag;
 use crate::palette::PaletteMode;
@@ -55,6 +56,7 @@ use crate::tab::{uses_vertical_tabs, NewSessionMenuItem};
 use crate::util::bindings::{self, cmd_or_ctrl_shift, is_binding_pty_compliant, CustomAction};
 use crate::{code, modal, notebooks, tab_configs};
 
+#[cfg(feature = "local_fs")]
 pub(crate) const WORKSPACE_CODE_REVIEW_PANEL_OPEN_NOT_EDITING: &str =
     "Workspace_CodeReviewPanelOpen_NotEditing";
 #[cfg(feature = "local_fs")]
