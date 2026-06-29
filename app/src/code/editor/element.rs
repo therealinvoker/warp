@@ -367,11 +367,13 @@ impl LineNumberConfig {
 
     /// The 0-based logical (buffer) line number for a block starting at `offset`,
     /// if a buffer is available. Keeps gutter numbers and diff lookups aligned
-    /// with the buffer's logical lines under soft wrap.
+    /// with the buffer's logical lines under soft wrap. `to_buffer_point` rows are
+    /// already 0-based, matching the render model's visual line index in the
+    /// no-wrap case, so it is used directly.
     fn logical_line_count(&self, offset: CharOffset, app: &AppContext) -> Option<LineCount> {
         let buffer = self.buffer.as_ref()?;
         let row = offset.to_buffer_point(buffer.as_ref(app)).row;
-        Some(LineCount::from(row.saturating_sub(1) as usize))
+        Some(LineCount::from(row as usize))
     }
 
     pub fn display_line_number(&self, line_count: LineCount) -> usize {
