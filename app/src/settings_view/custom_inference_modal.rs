@@ -630,6 +630,11 @@ impl CustomEndpointModal {
         let api_key = self.api_key_editor.as_ref(ctx).buffer_text(ctx);
 
         // Guard: only run when both fields are filled and the URL passes validation.
+        // Note: `validate_url` inspects the host at parse time and blocks known private/
+        // loopback addresses, but DNS resolution happens later inside `reqwest`. A public
+        // hostname that resolves to a private IP (DNS rebinding) is not blocked here.
+        // This is an accepted V0 trade-off; future hardening could pin-check the resolved
+        // address before sending the request.
         if url.trim().is_empty() || api_key.trim().is_empty() || validate_url(&url).is_err() {
             return;
         }
@@ -665,11 +670,7 @@ impl CustomEndpointModal {
             },
             |me, confirmed, ctx| {
                 me.connection_test_handle = None;
-                me.connection_test_status = if confirmed {
-                    ConnectionTestStatus::Confirmed
-                } else {
-                    ConnectionTestStatus::Failed
-                };
+                me.connection_test_status = connection_status_from_result(confirmed);
                 ctx.notify();
             },
         );
@@ -828,7 +829,9 @@ impl View for CustomEndpointModal {
                 let mut test_btn = appearance
                     .ui_builder()
                     .button(ButtonVariant::Link, self.test_connection_mouse_state.clone())
-                    .with_text_label("Test connection".to_string())
+                    .with_text_label(
+                        if is_testing { "Testing\u{2026}" } else { "Test connection" }.to_string(),
+                    )
                     .with_style(UiComponentStyles {
                         font_size: Some(LABEL_FONT_SIZE),
                         ..Default::default()
@@ -1113,6 +1116,21 @@ fn is_ipv6_unique_local(ip: Ipv6Addr) -> bool {
 fn is_ipv6_link_local(ip: Ipv6Addr) -> bool {
     ip.segments()[0] & 0xffc0 == 0xfe80
 }
+
+/// Converts the raw HTTP probe result into a `ConnectionTestStatus`.
+///
+/// `success` is `true` when the server responds with a 2xx status code, and
+/// `false` for any non-2xx response or a network/transport error. Extracted as
+/// a module-level helper so the status-determination logic can be tested
+/// independently of the `ViewContext` machinery.
+fn connection_status_from_result(success: bool) -> ConnectionTestStatus {
+    if success {
+        ConnectionTestStatus::Confirmed
+    } else {
+        ConnectionTestStatus::Failed
+    }
+}
+
 impl TypedActionView for CustomEndpointModal {
     type Action = CustomEndpointModalAction;
 

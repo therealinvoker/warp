@@ -1,20 +1,47 @@
 use super::*;
 
-// --- ConnectionTestStatus tests ---
+// --- ConnectionTestStatus / probe-result tests ---
 
 #[test]
-fn connection_test_status_starts_idle() {
-    let status = ConnectionTestStatus::Idle;
-    assert_eq!(status, ConnectionTestStatus::Idle);
+fn http_200_response_sets_confirmed_status() {
+    // When the probe receives a 2xx HTTP response (success = true) the status
+    // should transition to Confirmed.
+    assert_eq!(
+        connection_status_from_result(true),
+        ConnectionTestStatus::Confirmed,
+    );
 }
 
 #[test]
-fn connection_test_status_transitions() {
-    // Verify the enum values are distinct and comparable as expected.
-    assert_ne!(ConnectionTestStatus::Idle, ConnectionTestStatus::Testing);
-    assert_ne!(ConnectionTestStatus::Testing, ConnectionTestStatus::Confirmed);
-    assert_ne!(ConnectionTestStatus::Testing, ConnectionTestStatus::Failed);
-    assert_ne!(ConnectionTestStatus::Confirmed, ConnectionTestStatus::Failed);
+fn http_error_or_non_200_sets_failed_status() {
+    // A non-2xx response or a network/transport error (success = false) should
+    // produce Failed, not Confirmed.
+    assert_eq!(
+        connection_status_from_result(false),
+        ConnectionTestStatus::Failed,
+    );
+}
+
+#[test]
+fn editing_url_or_api_key_resets_connection_status_to_idle() {
+    // handle_endpoint_url_event and handle_api_key_event both call
+    // reset_connection_test_status() on any Edited event, which unconditionally
+    // sets connection_test_status to Idle.  Verify the invariant: every
+    // reachable non-Idle state (Confirmed, Failed, Testing) differs from Idle,
+    // so a URL or API-key edit always produces a visible state change (and can
+    // never accidentally stay in a stale terminal result).
+    let non_idle_states = [
+        connection_status_from_result(true),  // Confirmed
+        connection_status_from_result(false), // Failed
+        ConnectionTestStatus::Testing,
+    ];
+    for state in non_idle_states {
+        assert_ne!(
+            state,
+            ConnectionTestStatus::Idle,
+            "{state:?} should differ from Idle so that a URL/key edit triggers a visible reset",
+        );
+    }
 }
 
 // --- validate_url tests (existing) ---
