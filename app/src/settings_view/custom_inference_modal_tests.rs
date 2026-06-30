@@ -24,22 +24,47 @@ fn http_error_or_non_200_sets_failed_status() {
 
 #[test]
 fn editing_url_or_api_key_resets_connection_status_to_idle() {
-    // handle_endpoint_url_event and handle_api_key_event both call
-    // reset_connection_test_status() on any Edited event, which unconditionally
-    // sets connection_test_status to Idle.  Verify the invariant: every
-    // reachable non-Idle state (Confirmed, Failed, Testing) differs from Idle,
-    // so a URL or API-key edit always produces a visible state change (and can
-    // never accidentally stay in a stale terminal result).
-    let non_idle_states = [
-        connection_status_from_result(true),  // Confirmed
-        connection_status_from_result(false), // Failed
-        ConnectionTestStatus::Testing,
-    ];
-    for state in non_idle_states {
-        assert_ne!(
-            state,
+    // `handle_endpoint_url_event` and `handle_api_key_event` both call
+    // `reset_connection_test_status()` on any `Edited` event, which sets
+    // `connection_test_status` to `Idle`.
+    //
+    // This test exercises the reset path through `apply_connection_result`: once
+    // the status is `Idle` (i.e. a reset has occurred), any in-flight result
+    // that arrives afterwards must be dropped — verifying both that the reset
+    // took effect and that the race guard preserves it.
+    for success in [true, false] {
+        assert_eq!(
+            apply_connection_result(ConnectionTestStatus::Idle, success),
             ConnectionTestStatus::Idle,
-            "{state:?} should differ from Idle so that a URL/key edit triggers a visible reset",
+            "after URL/key edit resets status to Idle, a stale result (success={success}) must be dropped",
+        );
+    }
+}
+
+#[test]
+fn stale_result_is_dropped_when_status_is_not_testing() {
+    // `SpawnedFutureHandle::abort()` cancels a future only on its next poll.
+    // A request that resolves just before a URL/API-key edit delivers its
+    // completion callback *after* `reset_connection_test_status` has set the
+    // status to `Idle`. `apply_connection_result` must not overwrite that reset.
+    //
+    // Covers all non-Testing statuses that could be present when a stale result
+    // arrives.
+    let non_testing_statuses = [
+        ConnectionTestStatus::Idle,
+        ConnectionTestStatus::Confirmed,
+        ConnectionTestStatus::Failed,
+    ];
+    for status in non_testing_statuses {
+        assert_eq!(
+            apply_connection_result(status.clone(), true),
+            status,
+            "stale Confirmed result must not overwrite status {status:?}",
+        );
+        assert_eq!(
+            apply_connection_result(status.clone(), false),
+            status,
+            "stale Failed result must not overwrite status {status:?}",
         );
     }
 }

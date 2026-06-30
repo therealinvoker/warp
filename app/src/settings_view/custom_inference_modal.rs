@@ -670,7 +670,14 @@ impl CustomEndpointModal {
             },
             |me, confirmed, ctx| {
                 me.connection_test_handle = None;
-                me.connection_test_status = connection_status_from_result(confirmed);
+                // Guard: only apply the result when still in Testing state.
+                // `SpawnedFutureHandle::abort()` cancels a future only on its
+                // next poll, so a request that resolves just before the user
+                // edits a field can still deliver its result here after
+                // `reset_connection_test_status` has already set status to Idle.
+                // Dropping the stale result preserves the Idle reset.
+                me.connection_test_status =
+                    apply_connection_result(me.connection_test_status.clone(), confirmed);
                 ctx.notify();
             },
         );
@@ -1123,11 +1130,34 @@ fn is_ipv6_link_local(ip: Ipv6Addr) -> bool {
 /// `false` for any non-2xx response or a network/transport error. Extracted as
 /// a module-level helper so the status-determination logic can be tested
 /// independently of the `ViewContext` machinery.
-fn connection_status_from_result(success: bool) -> ConnectionTestStatus {
+pub(crate) fn connection_status_from_result(success: bool) -> ConnectionTestStatus {
     if success {
         ConnectionTestStatus::Confirmed
     } else {
         ConnectionTestStatus::Failed
+    }
+}
+
+/// Applies a completed connection-test result to the current status, returning
+/// the new status.
+///
+/// The result is applied **only when** `current` is `Testing`. If the status
+/// has already been reset to `Idle` (e.g. by a URL / API-key edit while the
+/// request was in-flight), the stale `Confirmed` or `Failed` result is dropped
+/// and `current` is returned unchanged. This guards against the race where
+/// `SpawnedFutureHandle::abort()` cannot cancel a request that resolved just
+/// before the abort was delivered.
+///
+/// Extracted as a pure helper so the race-guard logic can be unit-tested
+/// without a live `ViewContext`.
+pub(crate) fn apply_connection_result(
+    current: ConnectionTestStatus,
+    success: bool,
+) -> ConnectionTestStatus {
+    if current == ConnectionTestStatus::Testing {
+        connection_status_from_result(success)
+    } else {
+        current
     }
 }
 
