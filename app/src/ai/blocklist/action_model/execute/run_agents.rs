@@ -196,9 +196,23 @@ impl RunAgentsExecutor {
                     return receiver;
                 }
                 OrchestrationInvalidModelBehavior::AutoSelect => {
-                    // Substitute the user's configured fallback model (or the Oz
-                    // default); an empty result means "inherit the default".
-                    request.model_id = resolve_orchestration_fallback_model_id(ctx);
+                    // Substitute the configured fallback (or Oz default) only when
+                    // it's valid for this run target; otherwise inherit the default
+                    // (empty). This avoids handing an Oz model id to a non-Oz
+                    // harness. Mirrors `maybe_auto_select_valid_model`.
+                    let fallback = resolve_orchestration_fallback_model_id(ctx);
+                    request.model_id = if unavailable_model_reason(
+                        &fallback,
+                        &request.harness_type,
+                        is_local,
+                        ctx,
+                    )
+                    .is_none()
+                    {
+                        fallback
+                    } else {
+                        String::new()
+                    };
                 }
             }
         }
