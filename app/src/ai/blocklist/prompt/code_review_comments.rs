@@ -2,7 +2,7 @@
 //!
 //! This mirrors [`crate::ai::blocklist::prompt::plan_and_todo_list::PlanAndTodoListView`]
 //! (the chip) and [`crate::ai::agent::todos::popup::AgentTodosPopupView`] (the popup),
-//! but is driven by the active conversation's [`CodeReview`] state instead of its todo list.
+//! but is driven by the active conversation's `CodeReview` state instead of its todo list.
 //!
 //! The chip shows `resolved / total` review-comment counts (where "resolved" means the
 //! agent has addressed the comment, i.e. it moved from `pending_comments` to
@@ -35,7 +35,7 @@ use warpui::{
     View, ViewContext, ViewHandle,
 };
 
-use crate::ai::agent::comment::{CodeReview, ReviewComment};
+use crate::ai::agent::comment::ReviewComment;
 use crate::ai::blocklist::{BlocklistAIContextEvent, BlocklistAIContextModel};
 use crate::code_review::comments::CommentId;
 use crate::terminal::input::{MenuPositioning, MenuPositioningProvider};
@@ -43,24 +43,6 @@ use crate::ui_components::blended_colors;
 use crate::BlocklistAIHistoryModel;
 
 const COMMENTS_BUTTON_SAVE_POSITION_ID: &str = "code_review_comments::comments_button";
-
-/// Reads the active conversation's code review state, if any.
-fn selected_code_review<'a>(
-    context_model: &ModelHandle<BlocklistAIContextModel>,
-    app: &'a AppContext,
-) -> Option<&'a CodeReview> {
-    context_model
-        .as_ref(app)
-        .selected_conversation(app)
-        .and_then(|conversation| conversation.code_review())
-}
-
-/// Returns `(resolved, total)` review comment counts for the active conversation.
-fn resolved_and_total(code_review: &CodeReview) -> (usize, usize) {
-    let resolved = code_review.addressed_comments.len();
-    let total = resolved + code_review.pending_comments.len();
-    (resolved, total)
-}
 
 pub fn init(app: &mut AppContext) {
     use warpui::keymap::macros::*;
@@ -142,9 +124,14 @@ impl CodeReviewCommentsView {
         if !FeatureFlag::CodeReviewCommentsChip.is_enabled() {
             return false;
         }
-        selected_code_review(&self.context_model, app)
-            .map(resolved_and_total)
-            .is_some_and(|(_, total)| total > 0)
+        self.context_model
+            .as_ref(app)
+            .selected_conversation(app)
+            .and_then(|conversation| conversation.code_review())
+            .is_some_and(|code_review| {
+                !code_review.addressed_comments.is_empty()
+                    || !code_review.pending_comments.is_empty()
+            })
     }
 
     fn render_comments_button(
@@ -301,11 +288,16 @@ impl View for CodeReviewCommentsView {
     fn render(&self, app: &AppContext) -> Box<dyn warpui::Element> {
         let appearance = Appearance::as_ref(app);
 
-        let Some((resolved, total)) =
-            selected_code_review(&self.context_model, app).map(resolved_and_total)
+        let Some(code_review) = self
+            .context_model
+            .as_ref(app)
+            .selected_conversation(app)
+            .and_then(|conversation| conversation.code_review())
         else {
             return Empty::new().finish();
         };
+        let resolved = code_review.addressed_comments.len();
+        let total = resolved + code_review.pending_comments.len();
         if total == 0 || !FeatureFlag::CodeReviewCommentsChip.is_enabled() {
             return Empty::new().finish();
         }
@@ -527,11 +519,17 @@ impl View for CodeReviewCommentsPopupView {
     }
 
     fn render(&self, app: &warpui::AppContext) -> Box<dyn warpui::Element> {
-        let Some(code_review) = selected_code_review(&self.ai_context_model, app) else {
+        let Some(code_review) = self
+            .ai_context_model
+            .as_ref(app)
+            .selected_conversation(app)
+            .and_then(|conversation| conversation.code_review())
+        else {
             // No empty state: the popup is only shown when there are comments.
             return Empty::new().finish();
         };
-        let (resolved, total) = resolved_and_total(code_review);
+        let resolved = code_review.addressed_comments.len();
+        let total = resolved + code_review.pending_comments.len();
         if total == 0 {
             return Empty::new().finish();
         }

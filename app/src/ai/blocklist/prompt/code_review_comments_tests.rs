@@ -1,35 +1,7 @@
 use warp_core::features::FeatureFlag;
 
-use super::resolved_and_total;
-use crate::ai::agent::comment::{CodeReview, ReviewComment, ReviewDiff};
 use crate::ai::blocklist::agent_view::agent_input_footer::toolbar_item::AgentToolbarItemKind;
-use crate::code_review::comments::CommentId;
 use crate::context_chips::{agent_footer_available_chips, ContextChipKind};
-
-fn comment(content: &str) -> ReviewComment {
-    ReviewComment {
-        id: CommentId::default(),
-        content: content.to_string(),
-        diff: ReviewDiff {
-            file_path: None,
-            line_number: None,
-        },
-        head_title: None,
-    }
-}
-
-#[test]
-fn resolved_and_total_counts_addressed_then_total() {
-    let code_review = CodeReview {
-        pending_comments: vec![comment("a"), comment("b")],
-        addressed_comments: vec![comment("c")],
-    };
-    // resolved == addressed, total == addressed + pending.
-    assert_eq!(resolved_and_total(&code_review), (1, 3));
-
-    let empty = CodeReview::default();
-    assert_eq!(resolved_and_total(&empty), (0, 0));
-}
 
 #[test]
 fn chip_is_available_but_not_default_when_flag_enabled() {
