@@ -96,7 +96,7 @@ use crate::terminal::view::ambient_agent::{
     AmbientAgentViewModel, ModelSelector, ModelSelectorEvent,
 };
 use crate::terminal::view::init::OPEN_CLI_AGENT_RICH_INPUT_KEYBINDING;
-use crate::terminal::view::TerminalAction;
+use crate::terminal::view::{resolve_cloud_followup_routing, CloudFollowupRouting, TerminalAction};
 #[cfg(not(target_family = "wasm"))]
 use crate::terminal::ShellLaunchData;
 use crate::terminal::{CLIAgent, TerminalModel};
@@ -123,6 +123,11 @@ const FAST_FORWARD_LOCKED_TOOLTIP: &str =
 
 const START_REMOTE_CONTROL_TOOLTIP: &str = "Start remote control";
 const START_REMOTE_CONTROL_LOGIN_REQUIRED_TOOLTIP: &str = "Log in to use /remote-control";
+
+const LIVE_REMOTE_VM_INDICATOR_TOOLTIP: &str =
+    "Connected to a live cloud agent session. Your next prompt continues on the running remote machine.";
+const NEW_CLOUD_VM_INDICATOR_TOOLTIP: &str =
+    "Not connected to cloud agent. Your next prompt starts a new cloud machine to continue this conversation.";
 
 const CLOUD_MODE_V2_FOOTER_GAP: f32 = 4.;
 
@@ -199,6 +204,11 @@ pub struct AgentInputFooter {
     start_remote_control_button: ViewHandle<ActionButton>,
     stop_remote_control_button: ViewHandle<ActionButton>,
     context_window_button: ViewHandle<ActionButton>,
+    /// Non-interactive indicators for a cloud follow-up pane: one shown when attached to a live
+    /// remote VM, one when the next follow-up will start a new cloud VM. See
+    /// [`CloudFollowupRouting`].
+    live_session_indicator: ViewHandle<ActionButton>,
+    new_cloud_vm_indicator: ViewHandle<ActionButton>,
     model_selector: ViewHandle<ProfileModelSelector>,
     environment_selector: Option<ViewHandle<EnvironmentSelector>>,
     handoff_environment_selector: ViewHandle<EnvironmentSelector>,
@@ -612,6 +622,23 @@ impl AgentInputFooter {
                 .with_tooltip_alignment(TooltipAlignment::Left)
         });
 
+        // Non-interactive cloud follow-up indicators. Only one is rendered at a time, chosen by
+        // `CloudFollowupRouting` at render time.
+        let live_session_indicator = ctx.add_typed_action_view(|_ctx| {
+            ActionButton::new("", AgentInputButtonTheme)
+                .with_icon(Icon::CloudFilled)
+                .with_tooltip(LIVE_REMOTE_VM_INDICATOR_TOOLTIP)
+                .with_size(button_size)
+                .with_tooltip_alignment(TooltipAlignment::Left)
+        });
+        let new_cloud_vm_indicator = ctx.add_typed_action_view(|_ctx| {
+            ActionButton::new("", AgentInputButtonTheme)
+                .with_icon(Icon::CloudOffline)
+                .with_tooltip(NEW_CLOUD_VM_INDICATOR_TOOLTIP)
+                .with_size(button_size)
+                .with_tooltip_alignment(TooltipAlignment::Left)
+        });
+
         let profile_model_selector_full = ctx.add_typed_action_view(|ctx| {
             let mut selector = ProfileModelSelector::new(
                 menu_positioning_provider.clone(),
@@ -847,6 +874,8 @@ impl AgentInputFooter {
             plugin_operation_in_progress: false,
             plugin_chip_ready: false,
             context_window_button,
+            live_session_indicator,
+            new_cloud_vm_indicator,
             model_selector: profile_model_selector_full,
             environment_selector,
             handoff_environment_selector,
@@ -2159,6 +2188,42 @@ impl AgentInputFooter {
         }
     }
 
+    /// Overlays a small status dot on the top-right of `chip`, mirroring the context-window
+    /// chip's notification dot. `color` is resolved against the active terminal theme.
+    fn status_dot_overlay(
+        chip: Box<dyn Element>,
+        color: AnsiColorIdentifier,
+        app: &AppContext,
+    ) -> Box<dyn Element> {
+        let appearance = Appearance::as_ref(app);
+        let dot = Container::new(
+            ConstrainedBox::new(Empty::new().finish())
+                .with_width(6.)
+                .with_height(6.)
+                .finish(),
+        )
+        .with_corner_radius(CornerRadius::with_all(Radius::Percentage(50.)))
+        .with_background(Fill::Solid(
+            color
+                .to_ansi_color(&appearance.theme().terminal_colors().normal)
+                .into(),
+        ))
+        .finish();
+
+        let mut stack = Stack::new();
+        stack.add_child(chip);
+        stack.add_positioned_overlay_child(
+            dot,
+            OffsetPositioning::offset_from_parent(
+                vec2f(3., -3.),
+                ParentOffsetBounds::WindowByPosition,
+                ParentAnchor::TopRight,
+                ChildAnchor::TopRight,
+            ),
+        );
+        stack.finish()
+    }
+
     #[cfg(test)]
     pub fn displayed_chip_kinds(
         &self,
@@ -2242,6 +2307,28 @@ impl View for AgentInputFooter {
         );
         let is_conversation_transcript_context =
             is_conversation_transcript_context(self.terminal_view_id, &terminal_model, app);
+
+        // Indicate whether the next follow-up continues on the live remote VM or starts a new one.
+        // A top-right status dot reads green when connected to a live session and yellow otherwise,
+        // mirroring the context-window chip's notification dot.
+        match resolve_cloud_followup_routing(
+            self.terminal_view_id,
+            self.ambient_agent_view_model.as_ref(),
+            &terminal_model,
+            app,
+        ) {
+            CloudFollowupRouting::LiveRemoteVm => {
+                let chip = ChildView::new(&self.live_session_indicator).finish();
+                left_buttons
+                    .add_child(Self::status_dot_overlay(chip, AnsiColorIdentifier::Green, app));
+            }
+            CloudFollowupRouting::NewCloudVm { .. } => {
+                let chip = ChildView::new(&self.new_cloud_vm_indicator).finish();
+                left_buttons
+                    .add_child(Self::status_dot_overlay(chip, AnsiColorIdentifier::Yellow, app));
+            }
+            CloudFollowupRouting::ReadOnly | CloudFollowupRouting::Local => {}
+        }
 
         for item in &left_items {
             if let Some(element) = self.render_toolbar_item(

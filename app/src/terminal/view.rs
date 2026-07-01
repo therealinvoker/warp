@@ -122,6 +122,9 @@ use session_sharing_protocol::sharer::{
 };
 use settings::{Setting, ToggleableSetting};
 use shared_session::cloud_conversation_continuation::CloudConversationContinuationUiState;
+pub(crate) use shared_session::cloud_conversation_continuation::{
+    resolve_cloud_followup_routing, CloudFollowupRouting,
+};
 use shared_session::{SharedSessionAdapter, Viewer};
 use ssh_file_upload::{FileUpload, FileUploadEvent};
 use sum_tree::SeekBias;

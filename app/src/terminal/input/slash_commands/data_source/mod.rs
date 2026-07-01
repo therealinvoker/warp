@@ -59,6 +59,10 @@ struct ActiveCommandsContext {
     active_conversation_is_cloud_oz: bool,
     has_default_host: bool,
     is_cli_agent_input: bool,
+    /// True when this pane is a disconnected cloud follow-up composer: commands that would
+    /// continue the conversation on the local agent are hidden so a follow-up starts a new cloud
+    /// VM instead.
+    is_disconnected_cloud_followup: bool,
 }
 
 pub struct SlashCommandDataSource {
@@ -214,6 +218,15 @@ impl SlashCommandDataSource {
                     .is_some_and(|model| model.as_ref(ctx).is_ambient_agent()))
     }
 
+    /// True when this pane is a disconnected cloud follow-up composer (an existing cloud run with
+    /// no live session, ready to accept a follow-up prompt). Used to hide slash commands and
+    /// skills that would otherwise continue the conversation on the local agent.
+    fn is_disconnected_cloud_followup(&self, ctx: &AppContext) -> bool {
+        self.ambient_agent_view_model
+            .as_ref()
+            .is_some_and(|model| model.as_ref(ctx).is_ready_for_cloud_followup_prompt())
+    }
+
     fn recompute_active_commands(&mut self, ctx: &mut ModelContext<Self>) {
         let active_commands_context = self.active_commands_context(ctx);
 
@@ -320,6 +333,7 @@ impl SlashCommandDataSource {
             active_conversation_is_cloud_oz: self.active_conversation_is_cloud_oz(ctx),
             has_default_host,
             is_cli_agent_input,
+            is_disconnected_cloud_followup: self.is_disconnected_cloud_followup(ctx),
         }
     }
 
@@ -329,6 +343,13 @@ impl SlashCommandDataSource {
         context: &ActiveCommandsContext,
     ) -> bool {
         if !command.is_active(context.session_context) {
+            return false;
+        }
+        // On a disconnected cloud follow-up composer, hide commands that would continue the
+        // conversation on the local agent; a follow-up must start a new cloud VM instead.
+        if context.is_disconnected_cloud_followup
+            && super::slash_command_continues_conversation_locally(command)
+        {
             return false;
         }
         if command.name == commands::ORCHESTRATE_NAME && !context.is_orchestration_enabled {
@@ -518,8 +539,13 @@ impl SyncDataSource for SlashCommandDataSource {
         }
 
         // Also search skills — when CLI agent input is open, filter to natively supported providers.
-        // Skills are invoked by the agent, so they're hidden entirely when AI is globally off.
-        if FeatureFlag::ListSkills.is_enabled() && AISettings::as_ref(app).is_any_ai_enabled(app) {
+        // Skills are invoked by the agent, so they're hidden entirely when AI is globally off, and
+        // on a disconnected cloud follow-up composer (a skill would run locally; a follow-up must
+        // start a new cloud VM instead).
+        if FeatureFlag::ListSkills.is_enabled()
+            && AISettings::as_ref(app).is_any_ai_enabled(app)
+            && !self.is_disconnected_cloud_followup(app)
+        {
             let cli_agent_providers = self.active_cli_agent_providers(app);
             let active_session = self.active_session.as_ref(app);
             let cwd_path = active_session.current_working_directory_location(app);

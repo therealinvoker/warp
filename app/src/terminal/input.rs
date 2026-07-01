@@ -308,7 +308,7 @@ use crate::terminal::view::ambient_agent::{
     HarnessSelector, HarnessSelectorEvent, HostSelector, HostSelectorEvent, NakedHeaderButtonTheme,
 };
 use crate::terminal::view::inline_banner::{PromptSuggestionsEvent, PromptSuggestionsView};
-use crate::terminal::view::CodeDiffAction;
+use crate::terminal::view::{resolve_cloud_followup_routing, CloudFollowupRouting, CodeDiffAction};
 use crate::terminal::CLIAgent;
 use crate::ui_components::blended_colors;
 use crate::ui_components::icons::Icon;
@@ -3896,6 +3896,19 @@ impl Input {
             .map(AmbientAgentViewState::view_model)
     }
 
+    /// Classifies how a follow-up prompt for this pane would be routed. Used to keep
+    /// conversation-continuing submissions (slash/skill commands) from running on the local
+    /// agent when the pane is a disconnected/read-only remote cloud conversation.
+    fn cloud_followup_routing(&self, ctx: &AppContext) -> CloudFollowupRouting {
+        let model = self.model.lock();
+        resolve_cloud_followup_routing(
+            self.terminal_view_id,
+            self.ambient_agent_view_model(),
+            &model,
+            ctx,
+        )
+    }
+
     fn harness_selector(&self) -> Option<&ViewHandle<HarnessSelector>> {
         self.ambient_agent_view_state
             .as_ref()
@@ -5526,6 +5539,25 @@ impl Input {
         conversation_id_override: Option<AIConversationId>,
         ctx: &mut ViewContext<Self>,
     ) -> bool {
+        // Never continue a remote cloud conversation on the local agent. A skill invocation
+        // resolves and runs locally, so it must not run when this pane is a disconnected cloud
+        // follow-up composer or a read-only cloud transcript. Skills are also hidden from the
+        // slash menu in that state; this no-op covers typed/keybinding execution.
+        if self.cloud_followup_routing(ctx).blocks_local_continuation() {
+            let window_id = ctx.window_id();
+            ToastStack::handle(ctx).update(ctx, |toast_stack, ctx| {
+                toast_stack.add_ephemeral_toast(
+                    DismissibleToast::default(
+                        "Skills run locally and aren't available for a cloud conversation. Send a prompt to continue in the cloud."
+                            .to_owned(),
+                    ),
+                    window_id,
+                    ctx,
+                );
+            });
+            return true;
+        }
+
         let is_queued_prompt = queued_query_id.is_some();
         // Resolve the skill from the catalog selected by the active session's host,
         // so remote sessions invoke the host-rendered bundled skill.
