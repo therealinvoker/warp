@@ -220,7 +220,7 @@ mod model_availability_gate_tests {
     use crate::server::cloud_objects::update_manager::UpdateManager;
     use crate::server::server_api::ServerApiProvider;
     use crate::server::sync_queue::SyncQueue;
-    use crate::settings::{AISettings, OrchestrationInvalidModelBehavior};
+    use crate::settings::{AISettings, CloudAgentInvalidModelBehavior};
     use crate::test_util::settings::initialize_settings_for_tests;
     use crate::workspaces::team_tester::TeamTesterStatus;
     use crate::workspaces::user_workspaces::UserWorkspaces;
@@ -266,10 +266,10 @@ mod model_availability_gate_tests {
         });
     }
 
-    fn set_behavior(app: &mut App, behavior: OrchestrationInvalidModelBehavior) {
+    fn set_behavior(app: &mut App, behavior: CloudAgentInvalidModelBehavior) {
         AISettings::handle(app).update(app, |settings, ctx| {
             settings
-                .orchestration_invalid_model_behavior
+                .cloud_agent_invalid_model_behavior
                 .set_value(behavior, ctx)
                 .expect("set invalid-model behavior");
         });
@@ -295,7 +295,7 @@ mod model_availability_gate_tests {
     fn block_disables_accept_for_unavailable_cloud_model() {
         App::test((), |mut app| async move {
             setup(&mut app, catalog("valid-a", &["valid-a", "valid-b"]));
-            set_behavior(&mut app, OrchestrationInvalidModelBehavior::Block);
+            set_behavior(&mut app, CloudAgentInvalidModelBehavior::Block);
 
             app.update(|ctx| {
                 let mut state = remote_oz_state("bad-model");
@@ -317,7 +317,7 @@ mod model_availability_gate_tests {
     fn auto_select_allows_and_substitutes_unavailable_cloud_model() {
         App::test((), |mut app| async move {
             setup(&mut app, catalog("valid-a", &["valid-a", "valid-b"]));
-            set_behavior(&mut app, OrchestrationInvalidModelBehavior::AutoSelect);
+            set_behavior(&mut app, CloudAgentInvalidModelBehavior::AutoSelect);
 
             app.update(|ctx| {
                 let mut state = remote_oz_state("bad-model");
@@ -334,14 +334,14 @@ mod model_availability_gate_tests {
     fn valid_cloud_model_is_not_blocked_or_substituted() {
         App::test((), |mut app| async move {
             setup(&mut app, catalog("valid-a", &["valid-a", "valid-b"]));
-            set_behavior(&mut app, OrchestrationInvalidModelBehavior::Block);
+            set_behavior(&mut app, CloudAgentInvalidModelBehavior::Block);
 
             app.update(|ctx| {
                 let state = remote_oz_state("valid-b");
                 assert_eq!(accept_disabled_reason_with_auth(&state, ctx), None);
             });
 
-            set_behavior(&mut app, OrchestrationInvalidModelBehavior::AutoSelect);
+            set_behavior(&mut app, CloudAgentInvalidModelBehavior::AutoSelect);
             app.update(|ctx| {
                 let mut state = remote_oz_state("valid-b");
                 assert!(!maybe_auto_select_valid_model(&mut state, ctx));
@@ -354,7 +354,7 @@ mod model_availability_gate_tests {
     fn empty_and_auto_models_are_always_allowed() {
         App::test((), |mut app| async move {
             setup(&mut app, catalog("valid-a", &["valid-a", "valid-b"]));
-            set_behavior(&mut app, OrchestrationInvalidModelBehavior::Block);
+            set_behavior(&mut app, CloudAgentInvalidModelBehavior::Block);
 
             app.update(|ctx| {
                 assert_eq!(
@@ -374,7 +374,7 @@ mod model_availability_gate_tests {
         App::test((), |mut app| async move {
             let _custom_inference = FeatureFlag::CustomInferenceEndpoints.override_enabled(true);
             setup(&mut app, catalog("valid-a", &["valid-a", "valid-b"]));
-            set_behavior(&mut app, OrchestrationInvalidModelBehavior::Block);
+            set_behavior(&mut app, CloudAgentInvalidModelBehavior::Block);
 
             let custom_id = "custom-model-config-key";
             ai::api_keys::ApiKeyManager::handle(&app).update(&mut app, |api_key_manager, ctx| {
@@ -410,7 +410,7 @@ mod model_availability_gate_tests {
     fn set_fallback_model(app: &mut App, model_id: &str) {
         AISettings::handle(app).update(app, |settings, ctx| {
             settings
-                .orchestration_fallback_model_id
+                .cloud_agent_fallback_model_id
                 .set_value(model_id.to_string(), ctx)
                 .expect("set fallback model");
         });
@@ -420,7 +420,7 @@ mod model_availability_gate_tests {
     fn auto_select_uses_configured_fallback_model() {
         App::test((), |mut app| async move {
             setup(&mut app, catalog("valid-a", &["valid-a", "valid-b"]));
-            set_behavior(&mut app, OrchestrationInvalidModelBehavior::AutoSelect);
+            set_behavior(&mut app, CloudAgentInvalidModelBehavior::AutoSelect);
             // Configure an explicit fallback distinct from the catalog default.
             set_fallback_model(&mut app, "valid-b");
 
@@ -437,7 +437,7 @@ mod model_availability_gate_tests {
     fn auto_select_falls_back_to_default_when_configured_fallback_unavailable() {
         App::test((), |mut app| async move {
             setup(&mut app, catalog("valid-a", &["valid-a", "valid-b"]));
-            set_behavior(&mut app, OrchestrationInvalidModelBehavior::AutoSelect);
+            set_behavior(&mut app, CloudAgentInvalidModelBehavior::AutoSelect);
             // A configured fallback that isn't a valid cloud model is ignored in
             // favor of the Oz default.
             set_fallback_model(&mut app, "also-bad");

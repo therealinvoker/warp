@@ -26,7 +26,7 @@ use crate::ai::blocklist::handoff::touched_repos::TouchedWorkspace;
 #[cfg(all(feature = "local_fs", not(target_family = "wasm")))]
 use crate::ai::blocklist::handoff::PendingCloudLaunch;
 use crate::ai::blocklist::inline_action::orchestration_controls::{
-    resolve_orchestration_fallback_model_id, unavailable_model_reason,
+    resolve_cloud_agent_fallback_model_id, unavailable_model_reason,
 };
 use crate::ai::blocklist::BlocklistAIHistoryModel;
 use crate::ai::cloud_environments::CloudAmbientAgentEnvironment;
@@ -47,7 +47,7 @@ use crate::server::server_api::ai::{
 use crate::server::server_api::{
     AIApiError, ClientError, CloudAgentCapacityError, ServerApiProvider,
 };
-use crate::settings::{AISettings, OrchestrationInvalidModelBehavior, PrivacySettings};
+use crate::settings::{AISettings, CloudAgentInvalidModelBehavior, PrivacySettings};
 use crate::terminal::view::ambient_agent::{SetupCommandGroupId, SetupCommandState};
 use crate::terminal::CLIAgent;
 use crate::workspaces::user_workspaces::UserWorkspaces;
@@ -1299,14 +1299,14 @@ impl AmbientAgentViewModel {
                 .and_then(|c| c.model_id.clone())
                 .unwrap_or_default();
             if let Some(reason) = unavailable_model_reason(&model_id, "oz", false, ctx) {
-                let behavior = AISettings::as_ref(ctx).orchestration_invalid_model_behavior;
+                let behavior = AISettings::as_ref(ctx).cloud_agent_invalid_model_behavior;
                 match behavior {
-                    OrchestrationInvalidModelBehavior::Block => {
+                    CloudAgentInvalidModelBehavior::Block => {
                         self.handle_spawn_error(reason, ctx);
                         return;
                     }
-                    OrchestrationInvalidModelBehavior::AutoSelect => {
-                        let fallback = resolve_orchestration_fallback_model_id(ctx);
+                    CloudAgentInvalidModelBehavior::AutoSelect => {
+                        let fallback = resolve_cloud_agent_fallback_model_id(ctx);
                         let substitute =
                             if unavailable_model_reason(&fallback, "oz", false, ctx).is_none() {
                                 (!fallback.is_empty()).then_some(fallback)

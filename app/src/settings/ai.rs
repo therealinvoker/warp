@@ -471,7 +471,7 @@ impl OrchestrationMessageDisplayMode {
     }
 }
 
-/// Controls what happens when an orchestration run-wide model is not available
+/// Controls what happens when an cloud agent run-wide model is not available
 /// for the chosen run target (e.g. a cloud agent run requesting a model Oz does
 /// not accept, or a local-only model selected for a cloud run).
 #[derive(
@@ -487,10 +487,10 @@ impl OrchestrationMessageDisplayMode {
     settings_value::SettingsValue,
 )]
 #[schemars(
-    description = "What happens when an orchestration model is unavailable for the run target.",
+    description = "What happens when a cloud agent model is unavailable for the run target.",
     rename_all = "snake_case"
 )]
-pub enum OrchestrationInvalidModelBehavior {
+pub enum CloudAgentInvalidModelBehavior {
     /// Block the run and surface a clear error so the user can pick a valid
     /// model (default).
     #[default]
@@ -500,31 +500,31 @@ pub enum OrchestrationInvalidModelBehavior {
 }
 
 settings::macros::implement_setting_for_enum!(
-    OrchestrationInvalidModelBehavior,
+    CloudAgentInvalidModelBehavior,
     AISettings,
     SupportedPlatforms::ALL,
     SyncToCloud::Globally(RespectUserSyncSetting::Yes),
     private: false,
-    toml_path: "agents.warp_agent.other.orchestration_invalid_model_behavior",
-    description: "What happens when an orchestration model is unavailable for the run target.",
+    toml_path: "agents.warp_agent.other.cloud_agent_invalid_model_behavior",
+    description: "What happens when a cloud agent model is unavailable for the run target.",
 );
 
-impl OrchestrationInvalidModelBehavior {
+impl CloudAgentInvalidModelBehavior {
     /// Display name for the settings dropdown.
     pub fn display_name(&self) -> &'static str {
         match self {
-            OrchestrationInvalidModelBehavior::Block => "Block the run",
-            OrchestrationInvalidModelBehavior::AutoSelect => "Use a fallback model",
+            CloudAgentInvalidModelBehavior::Block => "Block the run",
+            CloudAgentInvalidModelBehavior::AutoSelect => "Use a fallback model",
         }
     }
 
     pub fn command_palette_description(&self) -> &'static str {
         match self {
-            OrchestrationInvalidModelBehavior::Block => {
-                "Set unavailable orchestration model behavior: block the run"
+            CloudAgentInvalidModelBehavior::Block => {
+                "Set unavailable cloud model behavior: block the run"
             }
-            OrchestrationInvalidModelBehavior::AutoSelect => {
-                "Set unavailable orchestration model behavior: use a fallback model"
+            CloudAgentInvalidModelBehavior::AutoSelect => {
+                "Set unavailable cloud model behavior: use a fallback model"
             }
         }
     }
@@ -1537,21 +1537,21 @@ define_settings_group!(AISettings, settings: [
     // Controls how orchestration message bodies are expanded by default.
     orchestration_message_display_mode: OrchestrationMessageDisplayMode,
 
-    // Controls what happens when an orchestration run-wide model is unavailable
+    // Controls what happens when an cloud agent run-wide model is unavailable
     // for the chosen run target (block the run vs. use a fallback model).
-    orchestration_invalid_model_behavior: OrchestrationInvalidModelBehavior,
+    cloud_agent_invalid_model_behavior: CloudAgentInvalidModelBehavior,
 
-    // The model to fall back to when an orchestration model is unavailable and
-    // `orchestration_invalid_model_behavior` is `Use a fallback model`. An empty
+    // The model to fall back to when a cloud agent model is unavailable and
+    // `cloud_agent_invalid_model_behavior` is `Use a fallback model`. An empty
     // value means "let Warp pick the default".
-    orchestration_fallback_model_id: OrchestrationFallbackModelId {
+    cloud_agent_fallback_model_id: CloudAgentFallbackModelId {
         type: String,
         default: String::new(),
         supported_platforms: SupportedPlatforms::ALL,
         sync_to_cloud: SyncToCloud::Globally(RespectUserSyncSetting::Yes),
         private: false,
-        toml_path: "agents.warp_agent.other.orchestration_fallback_model_id",
-        description: "The model to fall back to when an orchestration model is unavailable and auto-select is enabled. Empty means use the default.",
+        toml_path: "agents.warp_agent.other.cloud_agent_fallback_model_id",
+        description: "The model to fall back to when a cloud agent model is unavailable and auto-select is enabled. Empty means use the default.",
     }
 
     // Default behavior when the user submits a new prompt while the agent is still

@@ -28,7 +28,7 @@ use crate::ai::agent::{
 };
 use crate::ai::auth_secret_types::auth_secret_types_for_harness;
 use crate::ai::blocklist::inline_action::orchestration_controls::{
-    resolve_orchestration_fallback_model_id, unavailable_model_reason, OrchestrationEditState,
+    resolve_cloud_agent_fallback_model_id, unavailable_model_reason, OrchestrationEditState,
 };
 use crate::ai::blocklist::{BlocklistAIHistoryModel, BlocklistAIPermissions};
 use crate::ai::cloud_agent_settings::CloudAgentSettings;
@@ -36,7 +36,7 @@ use crate::ai::document::plan_publication::{
     prepare_plan_publications, wait_for_plan_publications,
 };
 use crate::ai::local_harness_setup::local_harness_product_disabled_message;
-use crate::settings::{AISettings, OrchestrationInvalidModelBehavior};
+use crate::settings::{AISettings, CloudAgentInvalidModelBehavior};
 
 /// Per-child spawn timeout. If a child agent doesn't report back within
 /// this window (e.g. binary not found, server error), the slot is failed
@@ -189,18 +189,18 @@ impl RunAgentsExecutor {
         if let Some(reason) =
             unavailable_model_reason(&request.model_id, &request.harness_type, is_local, ctx)
         {
-            match AISettings::as_ref(ctx).orchestration_invalid_model_behavior {
-                OrchestrationInvalidModelBehavior::Block => {
+            match AISettings::as_ref(ctx).cloud_agent_invalid_model_behavior {
+                CloudAgentInvalidModelBehavior::Block => {
                     log::warn!("RunAgentsExecutor: unavailable model: {reason}");
                     let _ = sender.try_send(RunAgentsResult::Failure { error: reason });
                     return receiver;
                 }
-                OrchestrationInvalidModelBehavior::AutoSelect => {
+                CloudAgentInvalidModelBehavior::AutoSelect => {
                     // Substitute the configured fallback (or Oz default) only when
                     // it's valid for this run target; otherwise inherit the default
                     // (empty). This avoids handing an Oz model id to a non-Oz
                     // harness. Mirrors `maybe_auto_select_valid_model`.
-                    let fallback = resolve_orchestration_fallback_model_id(ctx);
+                    let fallback = resolve_cloud_agent_fallback_model_id(ctx);
                     request.model_id = if unavailable_model_reason(
                         &fallback,
                         &request.harness_type,

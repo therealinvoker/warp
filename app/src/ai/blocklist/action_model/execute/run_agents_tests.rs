@@ -610,10 +610,10 @@ fn seed_loaded_llm_catalog(app: &mut App) {
     });
 }
 
-fn set_invalid_model_behavior(app: &mut App, behavior: OrchestrationInvalidModelBehavior) {
+fn set_invalid_model_behavior(app: &mut App, behavior: CloudAgentInvalidModelBehavior) {
     AISettings::handle(app).update(app, |settings, ctx| {
         settings
-            .orchestration_invalid_model_behavior
+            .cloud_agent_invalid_model_behavior
             .set_value(behavior, ctx)
             .expect("setting invalid-model behavior should succeed");
     });
@@ -669,7 +669,7 @@ fn dispatch_auto_selects_cloud_invalid_model_and_proceeds() {
     App::test((), |mut app| async move {
         let state = initialize_run_agents_test(&mut app, ExecutionMode::App);
         seed_loaded_llm_catalog(&mut app);
-        set_invalid_model_behavior(&mut app, OrchestrationInvalidModelBehavior::AutoSelect);
+        set_invalid_model_behavior(&mut app, CloudAgentInvalidModelBehavior::AutoSelect);
         let action_id = AIAgentActionId::from("run-agents-action".to_string());
         let request = remote_oz_request("gpt-nonexistent");
 

@@ -90,16 +90,15 @@ use crate::settings::{
     AIAutoDetectionEnabled, AICommandDenylist, AISettingsChangedEvent,
     AgentModeCodingPermissionsType, AgentModeCommandExecutionDenylist,
     AgentModeCommandExecutionPredicate, AgentModeQuerySuggestionsEnabled, AwsBedrockAutoLogin,
-    AwsBedrockCredentialsEnabled, CanUseWarpCreditsForFallback, CodeSettings,
-    CodebaseContextEnabled, FileBasedMcpEnabled, GitOperationsAutogenEnabled,
-    IncludeAgentCommandsInHistory, InputSettings, IntelligentAutosuggestionsEnabled,
-    LongRunningCommandSubmissionMode, MemoryEnabled, NLDInTerminalEnabled,
-    NaturalLanguageAutosuggestionsEnabled, OrchestrationFallbackModelId,
-    OrchestrationInvalidModelBehavior, OrchestrationMessageDisplayMode, PromptSubmissionMode,
-    RuleSuggestionsEnabled, SharedBlockTitleGenerationEnabled, ShouldRenderCLIAgentToolbar,
-    ShouldRenderUseAgentToolbarForUserCommands, ShouldShowOzUpdatesInZeroState, ShowAgentTips,
-    ShowConversationHistory, ShowHintText, ThinkingDisplayMode, VoiceInputEnabled,
-    WarpDriveContextEnabled,
+    AwsBedrockCredentialsEnabled, CanUseWarpCreditsForFallback, CloudAgentFallbackModelId,
+    CloudAgentInvalidModelBehavior, CodeSettings, CodebaseContextEnabled, FileBasedMcpEnabled,
+    GitOperationsAutogenEnabled, IncludeAgentCommandsInHistory, InputSettings,
+    IntelligentAutosuggestionsEnabled, LongRunningCommandSubmissionMode, MemoryEnabled,
+    NLDInTerminalEnabled, NaturalLanguageAutosuggestionsEnabled, OrchestrationMessageDisplayMode,
+    PromptSubmissionMode, RuleSuggestionsEnabled, SharedBlockTitleGenerationEnabled,
+    ShouldRenderCLIAgentToolbar, ShouldRenderUseAgentToolbarForUserCommands,
+    ShouldShowOzUpdatesInZeroState, ShowAgentTips, ShowConversationHistory, ShowHintText,
+    ThinkingDisplayMode, VoiceInputEnabled, WarpDriveContextEnabled,
 };
 use crate::terminal::session_settings::{SessionSettings, SessionSettingsChangedEvent};
 use crate::terminal::CLIAgent;
@@ -171,7 +170,7 @@ const PRIMARY_HEADER_FONT_SIZE: f32 = 24.;
 
 const AI_SETTINGS_DROPDOWN_WIDTH: f32 = 250.;
 const AI_SETTINGS_DROPDOWN_MAX_HEIGHT: f32 = 250.;
-const ORCHESTRATION_FALLBACK_DEFAULT_LABEL: &str = "Use the recommended default";
+const CLOUD_AGENT_FALLBACK_DEFAULT_LABEL: &str = "Use the recommended default";
 const CONTEXT_WINDOW_SLIDER_WIDTH: f32 = 220.;
 const CONTEXT_WINDOW_INPUT_BOX_WIDTH: f32 = 120.;
 
@@ -384,20 +383,18 @@ pub fn init_actions_from_parent_view<T: Action + Clone>(
         use warpui::keymap::FixedBinding;
 
         let ai_context = context.clone() & id!(flags::IS_ANY_AI_ENABLED);
-        let mode_bindings: Vec<FixedBinding> = OrchestrationInvalidModelBehavior::iter()
+        let mode_bindings: Vec<FixedBinding> = CloudAgentInvalidModelBehavior::iter()
             .map(|mode| {
                 let context_flag = match mode {
-                    OrchestrationInvalidModelBehavior::Block => {
-                        flags::ORCHESTRATION_INVALID_MODEL_BLOCK
-                    }
-                    OrchestrationInvalidModelBehavior::AutoSelect => {
-                        flags::ORCHESTRATION_INVALID_MODEL_AUTO_SELECT
+                    CloudAgentInvalidModelBehavior::Block => flags::CLOUD_AGENT_INVALID_MODEL_BLOCK,
+                    CloudAgentInvalidModelBehavior::AutoSelect => {
+                        flags::CLOUD_AGENT_INVALID_MODEL_AUTO_SELECT
                     }
                 };
                 FixedBinding::empty(
                     mode.command_palette_description(),
                     builder(SettingsAction::AI(
-                        AISettingsPageAction::SetOrchestrationInvalidModelBehavior(mode),
+                        AISettingsPageAction::SetCloudAgentInvalidModelBehavior(mode),
                     )),
                     ai_context.clone() & !id!(context_flag),
                 )
@@ -739,8 +736,8 @@ pub struct AISettingsPageView {
 
     thinking_display_mode_dropdown: ViewHandle<Dropdown<AISettingsPageAction>>,
     orchestration_message_display_mode_dropdown: ViewHandle<Dropdown<AISettingsPageAction>>,
-    orchestration_invalid_model_behavior_dropdown: ViewHandle<Dropdown<AISettingsPageAction>>,
-    orchestration_fallback_model_dropdown: ViewHandle<Dropdown<AISettingsPageAction>>,
+    cloud_agent_invalid_model_behavior_dropdown: ViewHandle<Dropdown<AISettingsPageAction>>,
+    cloud_agent_fallback_model_dropdown: ViewHandle<Dropdown<AISettingsPageAction>>,
     default_prompt_submission_mode_dropdown: ViewHandle<Dropdown<AISettingsPageAction>>,
     lrc_submission_mode_dropdown: ViewHandle<Dropdown<AISettingsPageAction>>,
     #[cfg(feature = "local_fs")]
@@ -919,29 +916,26 @@ impl AISettingsPageView {
                 );
             });
         }
-        let orchestration_invalid_model_behavior_dropdown =
-            OtherAIWidget::create_orchestration_invalid_model_behavior_dropdown(ctx);
+        let cloud_agent_invalid_model_behavior_dropdown =
+            OtherAIWidget::create_cloud_agent_invalid_model_behavior_dropdown(ctx);
         {
-            let current_mode = AISettings::as_ref(ctx).orchestration_invalid_model_behavior;
-            orchestration_invalid_model_behavior_dropdown.update(ctx, |dropdown, ctx| {
+            let current_mode = AISettings::as_ref(ctx).cloud_agent_invalid_model_behavior;
+            cloud_agent_invalid_model_behavior_dropdown.update(ctx, |dropdown, ctx| {
                 dropdown.set_selected_by_action(
-                    AISettingsPageAction::SetOrchestrationInvalidModelBehavior(current_mode),
+                    AISettingsPageAction::SetCloudAgentInvalidModelBehavior(current_mode),
                     ctx,
                 );
             });
         }
 
-        let orchestration_fallback_model_dropdown = ctx.add_typed_action_view(|ctx| {
+        let cloud_agent_fallback_model_dropdown = ctx.add_typed_action_view(|ctx| {
             let mut dropdown = Dropdown::new(ctx);
             dropdown.set_top_bar_max_width(AI_SETTINGS_DROPDOWN_WIDTH);
             dropdown.set_menu_width(AI_SETTINGS_DROPDOWN_WIDTH, ctx);
             dropdown.set_menu_max_height(AI_SETTINGS_DROPDOWN_MAX_HEIGHT, ctx);
             dropdown
         });
-        Self::refresh_orchestration_fallback_model_menu(
-            &orchestration_fallback_model_dropdown,
-            ctx,
-        );
+        Self::refresh_cloud_agent_fallback_model_menu(&cloud_agent_fallback_model_dropdown, ctx);
 
         let default_prompt_submission_mode_dropdown =
             OtherAIWidget::create_default_prompt_submission_mode_dropdown(ctx);
@@ -1200,8 +1194,8 @@ impl AISettingsPageView {
                 LLMPreferencesEvent::UpdatedAvailableLLMs => {
                     Self::refresh_base_model_menu(&me.base_model_dropdown, ctx);
                     Self::refresh_coding_model_menu(&me.coding_model_dropdown, ctx);
-                    Self::refresh_orchestration_fallback_model_menu(
-                        &me.orchestration_fallback_model_dropdown,
+                    Self::refresh_cloud_agent_fallback_model_menu(
+                        &me.cloud_agent_fallback_model_dropdown,
                         ctx,
                     );
                     me.sync_context_window_editor(ctx, false);
@@ -1301,8 +1295,8 @@ impl AISettingsPageView {
                     );
                     Self::refresh_base_model_menu(&me.base_model_dropdown, ctx);
                     Self::refresh_coding_model_menu(&me.coding_model_dropdown, ctx);
-                    Self::refresh_orchestration_fallback_model_menu(
-                        &me.orchestration_fallback_model_dropdown,
+                    Self::refresh_cloud_agent_fallback_model_menu(
+                        &me.cloud_agent_fallback_model_dropdown,
                         ctx,
                     );
                     Self::refresh_mcp_allowlist_dropdown(&me.mcp_allowlist_dropdown, ctx);
@@ -1392,23 +1386,21 @@ impl AISettingsPageView {
                             );
                         });
                 }
-                AISettingsChangedEvent::OrchestrationInvalidModelBehavior { .. } => {
-                    let current_mode = AISettings::as_ref(ctx).orchestration_invalid_model_behavior;
-                    me.orchestration_invalid_model_behavior_dropdown.update(
-                        ctx,
-                        |dropdown, ctx| {
+                AISettingsChangedEvent::CloudAgentInvalidModelBehavior { .. } => {
+                    let current_mode = AISettings::as_ref(ctx).cloud_agent_invalid_model_behavior;
+                    me.cloud_agent_invalid_model_behavior_dropdown
+                        .update(ctx, |dropdown, ctx| {
                             dropdown.set_selected_by_action(
-                                AISettingsPageAction::SetOrchestrationInvalidModelBehavior(
+                                AISettingsPageAction::SetCloudAgentInvalidModelBehavior(
                                     current_mode,
                                 ),
                                 ctx,
                             );
-                        },
-                    );
+                        });
                 }
-                AISettingsChangedEvent::OrchestrationFallbackModelId { .. } => {
-                    Self::refresh_orchestration_fallback_model_menu(
-                        &me.orchestration_fallback_model_dropdown,
+                AISettingsChangedEvent::CloudAgentFallbackModelId { .. } => {
+                    Self::refresh_cloud_agent_fallback_model_menu(
+                        &me.cloud_agent_fallback_model_dropdown,
                         ctx,
                     );
                 }
@@ -2046,8 +2038,8 @@ impl AISettingsPageView {
             mcp_denylist_mouse_state_handles,
             thinking_display_mode_dropdown,
             orchestration_message_display_mode_dropdown,
-            orchestration_invalid_model_behavior_dropdown,
-            orchestration_fallback_model_dropdown,
+            cloud_agent_invalid_model_behavior_dropdown,
+            cloud_agent_fallback_model_dropdown,
             default_prompt_submission_mode_dropdown,
             lrc_submission_mode_dropdown,
             #[cfg(feature = "local_fs")]
@@ -3187,7 +3179,7 @@ impl AISettingsPageView {
     /// Populates the orchestration fallback-model dropdown with a "use the
     /// recommended default" entry followed by the models available for cloud
     /// agents, selecting the currently-configured fallback.
-    pub fn refresh_orchestration_fallback_model_menu(
+    pub fn refresh_cloud_agent_fallback_model_menu(
         menu: &ViewHandle<Dropdown<AISettingsPageAction>>,
         ctx: &mut ViewContext<Self>,
     ) {
@@ -3199,8 +3191,8 @@ impl AISettingsPageView {
             }
 
             let mut items = vec![DropdownItem::new(
-                ORCHESTRATION_FALLBACK_DEFAULT_LABEL,
-                AISettingsPageAction::SetOrchestrationFallbackModelId(String::new()),
+                CLOUD_AGENT_FALLBACK_DEFAULT_LABEL,
+                AISettingsPageAction::SetCloudAgentFallbackModelId(String::new()),
             )];
             let models: Vec<(String, String)> = LLMPreferences::as_ref(ctx)
                 .oz_cloud_agent_models()
@@ -3210,17 +3202,17 @@ impl AISettingsPageView {
             for (display_name, id) in models {
                 items.push(DropdownItem::new(
                     display_name,
-                    AISettingsPageAction::SetOrchestrationFallbackModelId(id),
+                    AISettingsPageAction::SetCloudAgentFallbackModelId(id),
                 ));
             }
             menu.set_items(items, ctx);
 
             let current = AISettings::as_ref(ctx)
-                .orchestration_fallback_model_id
+                .cloud_agent_fallback_model_id
                 .value()
                 .clone();
             menu.set_selected_by_action(
-                AISettingsPageAction::SetOrchestrationFallbackModelId(current),
+                AISettingsPageAction::SetCloudAgentFallbackModelId(current),
                 ctx,
             );
             ctx.notify();
@@ -3709,8 +3701,8 @@ pub enum AISettingsPageAction {
     ToggleShowOzUpdatesInZeroState,
     SetThinkingDisplayMode(ThinkingDisplayMode),
     SetOrchestrationMessageDisplayMode(OrchestrationMessageDisplayMode),
-    SetOrchestrationInvalidModelBehavior(OrchestrationInvalidModelBehavior),
-    SetOrchestrationFallbackModelId(String),
+    SetCloudAgentInvalidModelBehavior(CloudAgentInvalidModelBehavior),
+    SetCloudAgentFallbackModelId(String),
     SetPromptSubmissionMode(PromptSubmissionMode),
     SetLongRunningCommandSubmissionMode(LongRunningCommandSubmissionMode),
     AttemptLoginGatedUpgrade,
@@ -4185,18 +4177,18 @@ impl TypedActionView for AISettingsPageView {
                 });
                 ctx.notify();
             }
-            AISettingsPageAction::SetOrchestrationInvalidModelBehavior(mode) => {
+            AISettingsPageAction::SetCloudAgentInvalidModelBehavior(mode) => {
                 AISettings::handle(ctx).update(ctx, |settings, ctx| {
                     report_if_error!(settings
-                        .orchestration_invalid_model_behavior
+                        .cloud_agent_invalid_model_behavior
                         .set_value(*mode, ctx));
                 });
                 ctx.notify();
             }
-            AISettingsPageAction::SetOrchestrationFallbackModelId(model_id) => {
+            AISettingsPageAction::SetCloudAgentFallbackModelId(model_id) => {
                 AISettings::handle(ctx).update(ctx, |settings, ctx| {
                     report_if_error!(settings
-                        .orchestration_fallback_model_id
+                        .cloud_agent_fallback_model_id
                         .set_value(model_id.clone(), ctx));
                 });
                 ctx.notify();
@@ -7384,18 +7376,17 @@ impl OtherAIWidget {
         })
     }
 
-    fn create_orchestration_invalid_model_behavior_dropdown(
+    fn create_cloud_agent_invalid_model_behavior_dropdown(
         ctx: &mut ViewContext<AISettingsPageView>,
     ) -> ViewHandle<Dropdown<AISettingsPageAction>> {
-        let items: Vec<DropdownItem<AISettingsPageAction>> =
-            OrchestrationInvalidModelBehavior::iter()
-                .map(|mode| {
-                    DropdownItem::new(
-                        mode.display_name(),
-                        AISettingsPageAction::SetOrchestrationInvalidModelBehavior(mode),
-                    )
-                })
-                .collect();
+        let items: Vec<DropdownItem<AISettingsPageAction>> = CloudAgentInvalidModelBehavior::iter()
+            .map(|mode| {
+                DropdownItem::new(
+                    mode.display_name(),
+                    AISettingsPageAction::SetCloudAgentInvalidModelBehavior(mode),
+                )
+            })
+            .collect();
 
         ctx.add_typed_action_view(|ctx| {
             let mut dropdown = Dropdown::new(ctx);
@@ -7515,25 +7506,25 @@ impl SettingsWidget for OtherAIWidget {
 
         column.add_child(render_dropdown_item(
             appearance,
-            "Unavailable orchestration model",
+            "Unavailable cloud model",
             Some(
                 "What happens when an agent's model isn't available for the run target: block the run or use a fallback model.",
             ),
             None,
             LocalOnlyIconState::for_setting(
-                OrchestrationInvalidModelBehavior::storage_key(),
-                OrchestrationInvalidModelBehavior::sync_to_cloud(),
+                CloudAgentInvalidModelBehavior::storage_key(),
+                CloudAgentInvalidModelBehavior::sync_to_cloud(),
                 &mut view.local_only_icon_tooltip_states.borrow_mut(),
                 app,
             ),
             (!is_any_ai_enabled).then(|| appearance.theme().disabled_ui_text_color()),
-            &view.orchestration_invalid_model_behavior_dropdown,
+            &view.cloud_agent_invalid_model_behavior_dropdown,
         ));
 
         // Only show the fallback-model picker when the behavior is to use a
         // fallback model (not when blocking).
-        if ai_settings.orchestration_invalid_model_behavior
-            == OrchestrationInvalidModelBehavior::AutoSelect
+        if ai_settings.cloud_agent_invalid_model_behavior
+            == CloudAgentInvalidModelBehavior::AutoSelect
         {
             column.add_child(render_dropdown_item(
                 appearance,
@@ -7543,13 +7534,13 @@ impl SettingsWidget for OtherAIWidget {
                 ),
                 None,
                 LocalOnlyIconState::for_setting(
-                    OrchestrationFallbackModelId::storage_key(),
-                    OrchestrationFallbackModelId::sync_to_cloud(),
+                    CloudAgentFallbackModelId::storage_key(),
+                    CloudAgentFallbackModelId::sync_to_cloud(),
                     &mut view.local_only_icon_tooltip_states.borrow_mut(),
                     app,
                 ),
                 (!is_any_ai_enabled).then(|| appearance.theme().disabled_ui_text_color()),
-                &view.orchestration_fallback_model_dropdown,
+                &view.cloud_agent_fallback_model_dropdown,
             ));
         }
 
