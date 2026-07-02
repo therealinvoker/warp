@@ -41,7 +41,7 @@ use warpui::platform::{Cursor, OperatingSystem};
 use warpui::ui_components::components::{Coords, UiComponent, UiComponentStyles};
 use warpui::{
     AppContext, Element, Entity, FocusContext, ModelHandle, SingletonEntity, TypedActionView, View,
-    ViewContext, ViewHandle,
+    ViewContext, ViewHandle, WeakViewHandle,
 };
 
 use super::malformed_line_heuristics::has_malformed_terminal_correction_signal;
@@ -53,9 +53,12 @@ use crate::ai::agent::{
 use crate::ai::blocklist::action_model::{
     AIActionStatus, BlocklistAIActionEvent, BlocklistAIActionModel,
     EditAcceptAndContinueClickedEvent, EditAcceptClickedEvent, EditResolvedEvent, EditStats,
-    MalformedFinalLineProxyEvent, RequestFileEditsFormatKind, RequestFileEditsTelemetryEvent,
+    MalformedFinalLineProxyEvent, PendingEditsSource, RequestFileEditsFormatKind,
+    RequestFileEditsTelemetryEvent,
 };
-use crate::ai::blocklist::diff_types::{changed_lines_from_op, DiffSessionType, FileDiff};
+use crate::ai::blocklist::diff_types::{
+    changed_lines_from_op, ClaimedEdit, ClaimedEdits, DiffSessionType, FileDiff,
+};
 use crate::ai::blocklist::history_model::BlocklistAIHistoryModel;
 use crate::ai::blocklist::inline_action::inline_action_header::INLINE_ACTION_HORIZONTAL_PADDING;
 use crate::ai::blocklist::inline_action::inline_action_icons::{
@@ -329,6 +332,21 @@ enum AcceptSelection {
 struct PendingDiff {
     diff_view: ViewHandle<InlineDiffView>,
     tab_handle: MouseStateHandle,
+}
+
+/// Executor-held [`PendingEditsSource`] over a [`CodeDiffView`]'s claimed edits.
+///
+/// Holds a weak handle so the executor never keeps a dead review view alive;
+/// if the view is gone at execute time, [`PendingEditsSource::take_edits`]
+/// returns `None`.
+pub struct CodeDiffViewEditsSource(pub WeakViewHandle<CodeDiffView>);
+
+impl PendingEditsSource for CodeDiffViewEditsSource {
+    fn take_edits(&self, app: &AppContext) -> Option<ClaimedEdits> {
+        let view = self.0.upgrade(app)?;
+        let edits = view.as_ref(app).claimed_edits(app);
+        Some(edits)
+    }
 }
 
 #[derive(Clone)]
@@ -2162,29 +2180,36 @@ impl CodeDiffView {
         );
     }
 
-    /// Extracts the final editor-buffer content per file path so a review surface
-    /// can hand it to the executor. Deleted files are skipped (no meaningful content).
-    pub fn reviewed_file_contents(&self, app: &AppContext) -> HashMap<String, String> {
-        self.pending_diffs
+    /// Snapshot of this view's claimed edits: each file's diff (path, base
+    /// content, op) paired with the editor buffer's final content (which the
+    /// user may have edited during review). Consumed by the executor at
+    /// execute time via [`CodeDiffViewEditsSource`].
+    pub fn claimed_edits(&self, app: &AppContext) -> ClaimedEdits {
+        let edits = self
+            .pending_diffs
             .iter()
             .filter_map(|diff| {
-                let path = diff.diff_view.as_ref(app).file_path()?.to_string();
-                if matches!(
-                    diff.diff_view.as_ref(app).diff(),
-                    Some(DiffType::Delete { .. })
-                ) {
-                    return None;
-                }
-                let content = diff
-                    .diff_view
-                    .as_ref(app)
-                    .editor()
-                    .as_ref(app)
-                    .text(app)
-                    .into_string();
-                Some((path, content))
+                let diff_view = diff.diff_view.as_ref(app);
+                let path = diff_view.file_path()?.to_string();
+                let op = diff_view.diff()?.clone();
+                let base_content = diff_view.diff_base_content(app)?;
+                // Deletes have no meaningful buffer content; persistence
+                // derives the deletion from the op itself.
+                let final_content = if matches!(op, DiffType::Delete { .. }) {
+                    None
+                } else {
+                    Some(diff_view.editor().as_ref(app).text(app).into_string())
+                };
+                Some(ClaimedEdit {
+                    diff: FileDiff::new(base_content, path, op),
+                    final_content,
+                })
             })
-            .collect()
+            .collect();
+        ClaimedEdits {
+            edits,
+            session_type: self.diff_session_type.clone(),
+        }
     }
 
     /// Emits the malformed-final-line proxy telemetry, computed from editor state

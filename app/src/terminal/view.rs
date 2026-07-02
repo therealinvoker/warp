@@ -15348,7 +15348,6 @@ impl TerminalView {
     ) {
         let action_id = AIAgentActionId::from(uuid::Uuid::new_v4().to_string());
         use crate::ai::agent::{AIIdentifiers, RequestFileEditsResult};
-        use crate::ai::blocklist::diff_types::DiffSessionType;
         use crate::ai::blocklist::inline_action::code_diff_view::CodeDiffViewEvent;
         use crate::ai::blocklist::persist_diff_model::PersistDiffModel;
 
@@ -15373,8 +15372,6 @@ impl TerminalView {
             )
         });
 
-        // Keep a copy of the resolved diffs so the passive accept flow can persist them.
-        let persist_source_diffs = diffs.clone();
         diff_view.update(ctx, |view, ctx| {
             view.set_candidate_diffs(diffs, ctx);
         });
@@ -15403,18 +15400,12 @@ impl TerminalView {
                     // Persist the accepted (possibly edited) passive suggestion via the shared
                     // PersistDiffModel. The result isn't surfaced to the LLM on this path, but
                     // a failed write still surfaces a toast to the user.
-                    let reviewed = view.as_ref(ctx).reviewed_file_contents(ctx);
+                    let claimed = view.as_ref(ctx).claimed_edits(ctx);
                     view.update(ctx, |diff_view, ctx| {
                         diff_view.send_malformed_line_telemetry(ctx);
                     });
-                    let persist_future = PersistDiffModel::handle(ctx).update(ctx, |model, ctx| {
-                        model.resolve_and_persist(
-                            persist_source_diffs.clone(),
-                            reviewed,
-                            DiffSessionType::Local,
-                            ctx,
-                        )
-                    });
+                    let persist_future = PersistDiffModel::handle(ctx)
+                        .update(ctx, |model, ctx| model.resolve_and_persist(claimed, ctx));
                     ctx.spawn(persist_future, |_me, result, ctx| {
                         if let RequestFileEditsResult::DiffApplicationFailed { error } = &result {
                             crate::safe_error!(

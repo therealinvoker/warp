@@ -219,6 +219,19 @@ impl InlineDiffView {
         self.file_path()
             .map(|p| p.file_name().unwrap_or_default().to_owned())
     }
+
+    /// Returns the base content the active diff was computed against (the
+    /// original file content this view was fed).
+    pub fn diff_base_content(&self, app: &AppContext) -> Option<String> {
+        self.editor
+            .as_ref(app)
+            .model
+            .as_ref(app)
+            .diff()
+            .as_ref(app)
+            .base()
+            .map(|base| base.to_string())
+    }
 }
 
 impl DiffViewer for InlineDiffView {

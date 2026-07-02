@@ -8,25 +8,31 @@ use warp::tui_export::{
 };
 use warp_core::ui::color::blend::Blend;
 use warp_core::ui::theme::Fill as ThemeFill;
-use warpui::SingletonEntity;
+use warpui::platform::WindowStyle;
+use warpui::{AddWindowOptions, SingletonEntity};
 use warpui_core::elements::tui::{Color, Modifier, TuiBufferExt, TuiRect};
 use warpui_core::elements::Fill as CoreFill;
 use warpui_core::presenter::tui::TuiPresenter;
-use warpui_core::{App, AppContext, ViewContext};
+use warpui_core::{App, AppContext, ViewContext, ViewHandle};
 
 use super::{TuiAIBlock, TuiAIBlockSection};
+use crate::test_fixtures::add_test_action_model;
 
 #[test]
 fn simple_agent_block_reports_full_height_and_renders_content() {
-    App::test((), |app| async move {
+    App::test((), |mut app| async move {
         app.add_singleton_model(|_| Appearance::mock());
-        app.read(|app_ctx| {
-            let block = test_agent_block(FakeAgentBlockModel {
+        let block = test_agent_block(
+            &mut app,
+            FakeAgentBlockModel {
                 inputs: vec![query_input("hello")],
                 status: complete_output(vec![AIAgentTextSection::PlainText {
                     text: "one\ntwo\nthree".to_owned().into(),
                 }]),
-            });
+            },
+        );
+        app.read(|app_ctx| {
+            let block = block.as_ref(app_ctx);
             assert_eq!(block.desired_height(20, app_ctx), 6);
 
             let mut presenter = TuiPresenter::new();
@@ -60,16 +66,19 @@ fn simple_agent_block_reports_full_height_and_renders_content() {
 
 #[test]
 fn simple_agent_block_reflows_height_at_narrow_width() {
-    App::test((), |app| async move {
+    App::test((), |mut app| async move {
         app.add_singleton_model(|_| Appearance::mock());
-        app.read(|app_ctx| {
-            let block = test_agent_block(FakeAgentBlockModel {
+        let block = test_agent_block(
+            &mut app,
+            FakeAgentBlockModel {
                 inputs: vec![query_input("hello world")],
                 status: complete_output(vec![AIAgentTextSection::PlainText {
                     text: "streamed output".to_owned().into(),
                 }]),
-            });
-
+            },
+        );
+        app.read(|app_ctx| {
+            let block = block.as_ref(app_ctx);
             let wide = block.desired_height(40, app_ctx);
             let narrow = block.desired_height(6, app_ctx);
             assert!(narrow > wide, "narrow text should occupy more logical rows");
@@ -106,9 +115,10 @@ fn expected_tool_call_text_color(app: &AppContext) -> Color {
 
 #[test]
 fn agent_block_extracts_input_and_plain_text_from_model() {
-    App::test((), |app| async move {
-        app.read(|app_ctx| {
-            let block = test_agent_block(FakeAgentBlockModel {
+    App::test((), |mut app| async move {
+        let block = test_agent_block(
+            &mut app,
+            FakeAgentBlockModel {
                 inputs: vec![query_input("hello")],
                 status: complete_output(vec![
                     AIAgentTextSection::PlainText {
@@ -118,7 +128,10 @@ fn agent_block_extracts_input_and_plain_text_from_model() {
                         text: "two".to_owned().into(),
                     },
                 ]),
-            });
+            },
+        );
+        app.read(|app_ctx| {
+            let block = block.as_ref(app_ctx);
             assert_eq!(
                 block.sections(app_ctx),
                 vec![
@@ -133,11 +146,12 @@ fn agent_block_extracts_input_and_plain_text_from_model() {
 
 #[test]
 fn agent_block_renders_tool_calls_in_message_order() {
-    App::test((), |app| async move {
+    App::test((), |mut app| async move {
         app.add_singleton_model(|_| Appearance::mock());
-        app.read(|app_ctx| {
-            let action = test_action("action-1");
-            let block = test_agent_block(FakeAgentBlockModel {
+        let action = test_action("action-1");
+        let block = test_agent_block(
+            &mut app,
+            FakeAgentBlockModel {
                 inputs: Vec::new(),
                 status: complete_output_messages(vec![
                     text_message(
@@ -154,8 +168,10 @@ fn agent_block_renders_tool_calls_in_message_order() {
                         }],
                     ),
                 ]),
-            });
-
+            },
+        );
+        app.read(|app_ctx| {
+            let block = block.as_ref(app_ctx);
             assert_eq!(
                 block.sections(app_ctx),
                 vec![
@@ -191,19 +207,22 @@ fn agent_block_renders_tool_calls_in_message_order() {
 
 #[test]
 fn agent_block_renders_multiple_tool_calls_in_order() {
-    App::test((), |app| async move {
+    App::test((), |mut app| async move {
         app.add_singleton_model(|_| Appearance::mock());
-        app.read(|app_ctx| {
-            let first = test_action("action-1");
-            let second = test_action("action-2");
-            let block = test_agent_block(FakeAgentBlockModel {
+        let first = test_action("action-1");
+        let second = test_action("action-2");
+        let block = test_agent_block(
+            &mut app,
+            FakeAgentBlockModel {
                 inputs: Vec::new(),
                 status: complete_output_messages(vec![
                     action_message("message-1", first.clone()),
                     action_message("message-2", second.clone()),
                 ]),
-            });
-
+            },
+        );
+        app.read(|app_ctx| {
+            let block = block.as_ref(app_ctx);
             assert_eq!(
                 block.sections(app_ctx),
                 vec![
@@ -233,16 +252,20 @@ fn agent_block_renders_multiple_tool_calls_in_order() {
 
 #[test]
 fn agent_block_desired_height_accounts_for_tool_call_stub() {
-    App::test((), |app| async move {
+    App::test((), |mut app| async move {
         app.add_singleton_model(|_| Appearance::mock());
-        app.read(|app_ctx| {
-            let block = test_agent_block(FakeAgentBlockModel {
+        let block = test_agent_block(
+            &mut app,
+            FakeAgentBlockModel {
                 inputs: Vec::new(),
                 status: complete_output_messages(vec![action_message(
                     "message-1",
                     test_action("action-1"),
                 )]),
-            });
+            },
+        );
+        app.read(|app_ctx| {
+            let block = block.as_ref(app_ctx);
             // One tool-call stub line plus the block's bottom padding row.
             assert_eq!(block.desired_height(40, app_ctx), 2);
         });
@@ -251,9 +274,10 @@ fn agent_block_desired_height_accounts_for_tool_call_stub() {
 
 #[test]
 fn agent_block_ignores_unsupported_message_variants() {
-    App::test((), |app| async move {
-        app.read(|app_ctx| {
-            let block = test_agent_block(FakeAgentBlockModel {
+    App::test((), |mut app| async move {
+        let block = test_agent_block(
+            &mut app,
+            FakeAgentBlockModel {
                 inputs: Vec::new(),
                 status: complete_output_messages(vec![
                     text_message(
@@ -270,8 +294,10 @@ fn agent_block_ignores_unsupported_message_variants() {
                         }],
                     ),
                 ]),
-            });
-
+            },
+        );
+        app.read(|app_ctx| {
+            let block = block.as_ref(app_ctx);
             assert_eq!(
                 block.sections(app_ctx),
                 vec![
@@ -285,9 +311,10 @@ fn agent_block_ignores_unsupported_message_variants() {
 
 #[test]
 fn agent_block_omits_unsupported_sections_until_the_tui_can_render_them() {
-    App::test((), |app| async move {
-        app.read(|app_ctx| {
-            let block = test_agent_block(FakeAgentBlockModel {
+    App::test((), |mut app| async move {
+        let block = test_agent_block(
+            &mut app,
+            FakeAgentBlockModel {
                 inputs: Vec::new(),
                 status: complete_output(vec![
                     AIAgentTextSection::Code {
@@ -299,8 +326,10 @@ fn agent_block_omits_unsupported_sections_until_the_tui_can_render_them() {
                         text: "visible".to_owned().into(),
                     },
                 ]),
-            });
-
+            },
+        );
+        app.read(|app_ctx| {
+            let block = block.as_ref(app_ctx);
             assert_eq!(
                 block.sections(app_ctx),
                 vec![TuiAIBlockSection::PlainText("visible".to_owned())]
@@ -314,13 +343,28 @@ struct FakeAgentBlockModel {
     status: AIBlockOutputStatus,
 }
 
-/// Builds an agent block with fresh test identity.
-fn test_agent_block(model: FakeAgentBlockModel) -> TuiAIBlock {
-    TuiAIBlock::new(
-        AIConversationId::new(),
-        AIAgentExchangeId::new(),
-        Rc::new(model),
-    )
+/// Builds an agent block with fresh test identity, registered as the root
+/// view of a fresh TUI window and backed by a real action model.
+fn test_agent_block(app: &mut App, model: FakeAgentBlockModel) -> ViewHandle<TuiAIBlock> {
+    let action_model = add_test_action_model(app);
+    app.update(|ctx| {
+        let (_, block) = ctx.add_tui_window(
+            AddWindowOptions {
+                window_style: WindowStyle::NotStealFocus,
+                ..Default::default()
+            },
+            move |ctx| {
+                TuiAIBlock::new(
+                    AIConversationId::new(),
+                    AIAgentExchangeId::new(),
+                    Rc::new(model),
+                    action_model,
+                    ctx,
+                )
+            },
+        );
+        block
+    })
 }
 
 impl AIBlockModel for FakeAgentBlockModel {

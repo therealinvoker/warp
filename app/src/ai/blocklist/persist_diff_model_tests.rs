@@ -13,19 +13,32 @@ use super::{
     PersistAction, PersistDiffModel,
 };
 use crate::ai::agent::RequestFileEditsResult;
-use crate::ai::blocklist::diff_types::{DiffSessionType, FileDiff};
+use crate::ai::blocklist::diff_types::{ClaimedEdit, ClaimedEdits, DiffSessionType, FileDiff};
 
-/// Runs `resolve_and_persist` for the given local diffs on a fresh app and awaits the result.
+/// Wraps a diff as a claimed edit with no surface-supplied final content.
+fn unreviewed(diff: FileDiff) -> ClaimedEdit {
+    ClaimedEdit {
+        diff,
+        final_content: None,
+    }
+}
+
+/// Runs `resolve_and_persist` for the given local edits on a fresh app and awaits the result.
 async fn resolve_and_persist_local(
     app: &mut App,
-    diffs: Vec<FileDiff>,
-    reviewed: HashMap<String, String>,
+    edits: Vec<ClaimedEdit>,
 ) -> RequestFileEditsResult {
     // FileModel must exist before PersistDiffModel subscribes to it in `new`.
     app.add_singleton_model(FileModel::new);
     app.add_singleton_model(PersistDiffModel::new);
     let future = PersistDiffModel::handle(app).update(app, |model, ctx| {
-        model.resolve_and_persist(diffs, reviewed, DiffSessionType::Local, ctx)
+        model.resolve_and_persist(
+            ClaimedEdits {
+                edits,
+                session_type: DiffSessionType::Local,
+            },
+            ctx,
+        )
     });
     future.await
 }
@@ -38,12 +51,11 @@ fn persist_creates_a_new_file() {
 
         let result = resolve_and_persist_local(
             &mut app,
-            vec![FileDiff::new(
+            vec![unreviewed(FileDiff::new(
                 String::new(),
                 path.clone(),
                 DiffType::creation("fn main() {}\n".to_owned()),
-            )],
-            HashMap::new(),
+            ))],
         )
         .await;
 
@@ -73,7 +85,7 @@ fn persist_updates_an_existing_file() {
 
         let result = resolve_and_persist_local(
             &mut app,
-            vec![FileDiff::new(
+            vec![unreviewed(FileDiff::new(
                 "one\ntwo\nthree\n".to_owned(),
                 path.clone(),
                 DiffType::update(
@@ -83,8 +95,7 @@ fn persist_updates_an_existing_file() {
                     }],
                     None,
                 ),
-            )],
-            HashMap::new(),
+            ))],
         )
         .await;
 
@@ -94,27 +105,28 @@ fn persist_updates_an_existing_file() {
 }
 
 #[test]
-fn persist_prefers_reviewed_content_over_deltas() {
+fn persist_prefers_final_content_over_deltas() {
     App::test((), |mut app| async move {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("main.rs").to_string_lossy().to_string();
         fs::write(&path, "one\ntwo\nthree\n").unwrap();
 
-        let reviewed = HashMap::from([(path.clone(), "user edited\n".to_owned())]);
         let result = resolve_and_persist_local(
             &mut app,
-            vec![FileDiff::new(
-                "one\ntwo\nthree\n".to_owned(),
-                path.clone(),
-                DiffType::update(
-                    vec![DiffDelta {
-                        replacement_line_range: 2..3,
-                        insertion: "TWO\n".to_owned(),
-                    }],
-                    None,
+            vec![ClaimedEdit {
+                diff: FileDiff::new(
+                    "one\ntwo\nthree\n".to_owned(),
+                    path.clone(),
+                    DiffType::update(
+                        vec![DiffDelta {
+                            replacement_line_range: 2..3,
+                            insertion: "TWO\n".to_owned(),
+                        }],
+                        None,
+                    ),
                 ),
-            )],
-            reviewed,
+                final_content: Some("user edited\n".to_owned()),
+            }],
         )
         .await;
 
@@ -133,12 +145,11 @@ fn persist_renames_and_reports_source_as_deleted() {
 
         let result = resolve_and_persist_local(
             &mut app,
-            vec![FileDiff::new(
+            vec![unreviewed(FileDiff::new(
                 "content\n".to_owned(),
                 old_path.clone(),
                 DiffType::update(Vec::new(), Some(new_path.clone())),
-            )],
-            HashMap::new(),
+            ))],
         )
         .await;
 
@@ -160,12 +171,11 @@ fn persist_deletes_a_file() {
 
         let result = resolve_and_persist_local(
             &mut app,
-            vec![FileDiff::new(
+            vec![unreviewed(FileDiff::new(
                 "delete me\n".to_owned(),
                 path.clone(),
                 DiffType::deletion(1),
-            )],
-            HashMap::new(),
+            ))],
         )
         .await;
 
@@ -189,12 +199,11 @@ fn persist_reports_save_failure() {
 
         let result = resolve_and_persist_local(
             &mut app,
-            vec![FileDiff::new(
+            vec![unreviewed(FileDiff::new(
                 String::new(),
                 path,
                 DiffType::creation("data\n".to_owned()),
-            )],
-            HashMap::new(),
+            ))],
         )
         .await;
 
@@ -248,8 +257,8 @@ fn remote_rename_outcome_reports_update_at_original_path() {
 }
 
 #[test]
-fn build_resolved_edits_applies_deltas_without_reviewed_content() {
-    // Headless/TUI path: no reviewed content, so final content is derived from deltas.
+fn build_resolved_edits_applies_deltas_without_final_content() {
+    // No surface-supplied content (e.g. TUI): final content is derived from deltas.
     let base = "one\ntwo\nthree\n";
     let diff = FileDiff::new(
         base.to_owned(),
@@ -263,7 +272,7 @@ fn build_resolved_edits_applies_deltas_without_reviewed_content() {
         ),
     );
 
-    let resolved = build_resolved_edits(vec![diff], &HashMap::new()).unwrap();
+    let resolved = build_resolved_edits(vec![unreviewed(diff)]).unwrap();
 
     assert_eq!(resolved.len(), 1);
     assert_eq!(resolved[0].path, "/tmp/main.rs");
@@ -271,8 +280,9 @@ fn build_resolved_edits_applies_deltas_without_reviewed_content() {
 }
 
 #[test]
-fn build_resolved_edits_prefers_reviewed_content() {
-    // Review-surface path: reviewed content for a path overrides the delta-applied content.
+fn build_resolved_edits_prefers_final_content() {
+    // Review-surface path: the edit's paired final content overrides the
+    // delta-applied content.
     let base = "one\ntwo\nthree\n";
     let diff = FileDiff::new(
         base.to_owned(),
@@ -285,9 +295,12 @@ fn build_resolved_edits_prefers_reviewed_content() {
             None,
         ),
     );
-    let reviewed = HashMap::from([("/tmp/main.rs".to_owned(), "user edited\n".to_owned())]);
 
-    let resolved = build_resolved_edits(vec![diff], &reviewed).unwrap();
+    let resolved = build_resolved_edits(vec![ClaimedEdit {
+        diff,
+        final_content: Some("user edited\n".to_owned()),
+    }])
+    .unwrap();
 
     assert_eq!(resolved.len(), 1);
     assert_eq!(resolved[0].final_content, "user edited\n");

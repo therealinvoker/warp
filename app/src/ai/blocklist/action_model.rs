@@ -27,10 +27,10 @@ pub(crate) use execute::{
 pub(crate) use execute::{compose_run_agents_child_prompt, run_agents_to_start_agent_mode};
 pub use execute::{
     read_local_file_context, EditAcceptAndContinueClickedEvent, EditAcceptClickedEvent,
-    EditResolvedEvent, EditStats, NewConversationDecision, PromptSuggestionExecutor,
-    ReadFileContextResult, RequestFileEditsExecutor, RequestFileEditsExecutorEvent,
-    RequestFileEditsFormatKind, RequestFileEditsTelemetryEvent, RunAgentsExecutor,
-    RunAgentsExecutorEvent, RunAgentsSpawningSnapshot, ShellCommandExecutor,
+    EditResolvedEvent, EditStats, NewConversationDecision, PendingEditsSource,
+    PromptSuggestionExecutor, ReadFileContextResult, RequestFileEditsExecutor,
+    RequestFileEditsExecutorEvent, RequestFileEditsFormatKind, RequestFileEditsTelemetryEvent,
+    RunAgentsExecutor, RunAgentsExecutorEvent, RunAgentsSpawningSnapshot, ShellCommandExecutor,
     ShellCommandExecutorEvent, StartAgentExecutor, StartAgentExecutorEvent, StartAgentRequest,
     StartAgentRequestId,
 };
@@ -1258,6 +1258,13 @@ impl BlocklistAIActionModel {
         }
 
         let action_id = action_result.id.clone();
+
+        // Every terminal outcome (success, failure, cancellation — from any
+        // path) funnels through here, so this is the one place executor-held
+        // per-action state is released.
+        self.executor.update(ctx, |executor, ctx| {
+            executor.discard_action_state(&action_id, ctx);
+        });
 
         // If a command action entered long-running mode (returned a snapshot), cancel all other
         // pending RequestCommandOutput actions. Only one command can be active at a time, and the

@@ -22,7 +22,7 @@ pub use telemetry::{
 };
 use vec1::{vec1, Vec1};
 use warp_core::send_telemetry_from_ctx;
-use warpui::{Entity, EntityId, ModelContext, ModelHandle, SingletonEntity as _};
+use warpui::{AppContext, Entity, EntityId, ModelContext, ModelHandle, SingletonEntity as _};
 
 use super::{ActionExecution, AnyActionExecution, ExecuteActionInput, PreprocessActionInput};
 use crate::ai::agent::conversation::AIConversationId;
@@ -30,7 +30,7 @@ use crate::ai::agent::{
     AIAgentAction, AIAgentActionId, AIAgentActionResultType, AIAgentActionType,
     AIAgentOutputMessage, AIAgentOutputMessageType, AIIdentifiers, RequestFileEditsResult,
 };
-use crate::ai::blocklist::diff_types::{DiffSessionType, FileDiff};
+use crate::ai::blocklist::diff_types::{ClaimedEdit, ClaimedEdits, DiffSessionType, FileDiff};
 use crate::ai::blocklist::persist_diff_model::PersistDiffModel;
 use crate::ai::blocklist::{BlocklistAIPermissions, RequestedEditResolution};
 use crate::ai::paths::host_native_absolute_path;
@@ -40,22 +40,35 @@ use crate::{safe_warn, BlocklistAIHistoryModel};
 
 /// Events emitted by the file-edits executor for review surfaces to observe.
 pub enum RequestFileEditsExecutorEvent {
-    /// A `RequestFileEdits` action's diffs have been resolved and are ready for a
-    /// review surface to display via [`RequestFileEditsExecutor::prepared_diffs`].
+    /// A `RequestFileEdits` action's diffs have been resolved and are ready for
+    /// a review surface to claim via
+    /// [`RequestFileEditsExecutor::claim_prepared_edits`].
     DiffsPrepared(AIAgentActionId),
 }
 
+/// A review surface's handle over pending edits it has claimed. The executor
+/// consults this exactly once, at execute time, to obtain the final state of
+/// the edits (including any user modifications made during review).
+pub trait PendingEditsSource {
+    /// Returns the current edits, or `None` if the backing surface is gone.
+    fn take_edits(&self, app: &AppContext) -> Option<ClaimedEdits>;
+}
+
 /// Per-action state carried from `preprocess_action` to `execute`.
+///
+/// Prepared edits have exactly one owner at any time: the executor while
+/// `Unclaimed`, then the claiming review surface (the executor keeps only the
+/// surface's [`PendingEditsSource`]). `execute` consumes the entry in either
+/// state.
 enum PendingFileEdits {
-    /// Diffs resolved and ready to persist. `reviewed` holds the final content
-    /// per file (keyed by path) when a review surface edited/accepted them;
-    /// `None` when no surface supplied content, in which case final content is
-    /// derived from the diff's deltas.
-    Prepared {
+    /// Diffs resolved; no review surface has claimed them yet.
+    Unclaimed {
         diffs: Vec<FileDiff>,
         session_type: DiffSessionType,
-        reviewed: Option<HashMap<String, String>>,
     },
+    /// A review surface owns the diffs; `execute` pulls the final state back
+    /// through the source.
+    Claimed(Box<dyn PendingEditsSource>),
     /// Diff application failed during preprocess; `execute` reports it to the LLM.
     Failed(Vec1<DiffApplicationError>),
 }
@@ -133,34 +146,35 @@ impl RequestFileEditsExecutor {
             .is_allowed()
     }
 
-    /// Records the reviewed final content for an action before it executes.
-    /// Keyed by file path; consumed by `execute`.
-    pub fn set_reviewed_content(
+    /// Transfers ownership of an action's prepared diffs to a review surface.
+    ///
+    /// Returns the diffs and session backend for the surface to display and
+    /// own; the executor keeps only `source`, which it consults at execute
+    /// time via [`PendingEditsSource::take_edits`]. Returns `None` if the
+    /// action is not prepared or was already claimed.
+    pub fn claim_prepared_edits(
         &mut self,
         action_id: &AIAgentActionId,
-        files: HashMap<String, String>,
-    ) {
-        if let Some(PendingFileEdits::Prepared { reviewed, .. }) =
-            self.pending_file_edits.get_mut(action_id)
-        {
-            *reviewed = Some(files);
+        source: Box<dyn PendingEditsSource>,
+    ) -> Option<(Vec<FileDiff>, DiffSessionType)> {
+        let entry = self.pending_file_edits.get_mut(action_id)?;
+        if !matches!(entry, PendingFileEdits::Unclaimed { .. }) {
+            return None;
         }
+        let PendingFileEdits::Unclaimed {
+            diffs,
+            session_type,
+        } = std::mem::replace(entry, PendingFileEdits::Claimed(source))
+        else {
+            unreachable!("checked Unclaimed above");
+        };
+        Some((diffs, session_type))
     }
 
-    /// Returns the prepared diffs and session backend for an action so a review
-    /// surface can display them. `None` if the action is not prepared.
-    pub fn prepared_diffs(
-        &self,
-        action_id: &AIAgentActionId,
-    ) -> Option<(Vec<FileDiff>, DiffSessionType)> {
-        match self.pending_file_edits.get(action_id) {
-            Some(PendingFileEdits::Prepared {
-                diffs,
-                session_type,
-                ..
-            }) => Some((diffs.clone(), session_type.clone())),
-            _ => None,
-        }
+    /// Drops any per-action state for a cancelled or rejected action so
+    /// prepared file contents don't outlive the action.
+    pub(super) fn discard_pending(&mut self, action_id: &AIAgentActionId) {
+        self.pending_file_edits.remove(action_id);
     }
 
     pub(super) fn execute(
@@ -181,12 +195,38 @@ impl RequestFileEditsExecutor {
             return ActionExecution::InvalidAction;
         };
 
-        let (diffs, session_type, reviewed) = match self.pending_file_edits.remove(id) {
-            Some(PendingFileEdits::Prepared {
+        let claimed = match self.pending_file_edits.remove(id) {
+            Some(PendingFileEdits::Claimed(source)) => match source.take_edits(ctx) {
+                Some(claimed) => claimed,
+                None => {
+                    log::warn!("RequestFileEdits source vanished before execute");
+                    return ActionExecution::Sync(AIAgentActionResultType::RequestFileEdits(
+                        RequestFileEditsResult::DiffApplicationFailed {
+                            error: "The review surface holding these edits no longer exists"
+                                .to_string(),
+                        },
+                    ));
+                }
+            },
+            // No surface claimed the edits: execution won the race against the
+            // `DiffsPrepared` subscriber (e.g. autoexecution). Persisting the
+            // unreviewed deltas is correct here — nobody was reviewing.
+            Some(PendingFileEdits::Unclaimed {
                 diffs,
                 session_type,
-                reviewed,
-            }) => (diffs, session_type, reviewed),
+            }) => {
+                log::info!("Executing RequestFileEdits with unclaimed diffs");
+                ClaimedEdits {
+                    edits: diffs
+                        .into_iter()
+                        .map(|diff| ClaimedEdit {
+                            diff,
+                            final_content: None,
+                        })
+                        .collect(),
+                    session_type,
+                }
+            }
             Some(PendingFileEdits::Failed(errors)) => {
                 return ActionExecution::Sync(AIAgentActionResultType::RequestFileEdits(
                     RequestFileEditsResult::DiffApplicationFailed {
@@ -209,12 +249,8 @@ impl RequestFileEditsExecutor {
         let passive_diff = BlocklistAIHistoryModel::as_ref(ctx)
             .is_entirely_passive_conversation(&input.conversation_id);
 
-        // A review surface may have supplied final content per path; for paths without
-        // reviewed content, persistence applies the diff deltas to the base content.
-        let reviewed = reviewed.unwrap_or_default();
-        let result_future = PersistDiffModel::handle(ctx).update(ctx, |model, ctx| {
-            model.resolve_and_persist(diffs, reviewed, session_type, ctx)
-        });
+        let result_future = PersistDiffModel::handle(ctx)
+            .update(ctx, |model, ctx| model.resolve_and_persist(claimed, ctx));
 
         ActionExecution::new_async(result_future, move |result, ctx| {
             if let RequestFileEditsResult::Success {
@@ -325,7 +361,8 @@ impl RequestFileEditsExecutor {
                     safe: ("Failed to generate diffs"),
                     full: ("Failed to generate diffs {err:?}")
                 );
-                self.pending_file_edits.insert(id, PendingFileEdits::Failed(err));
+                self.pending_file_edits
+                    .insert(id, PendingFileEdits::Failed(err));
                 return;
             }
         };
@@ -351,10 +388,9 @@ impl RequestFileEditsExecutor {
         let session_type = self.resolve_diff_session_type(ctx);
         self.pending_file_edits.insert(
             id.clone(),
-            PendingFileEdits::Prepared {
+            PendingFileEdits::Unclaimed {
                 diffs,
                 session_type,
-                reviewed: None,
             },
         );
         ctx.emit(RequestFileEditsExecutorEvent::DiffsPrepared(id));
@@ -407,3 +443,7 @@ impl RequestFileEditsExecutor {
 impl Entity for RequestFileEditsExecutor {
     type Event = RequestFileEditsExecutorEvent;
 }
+
+#[cfg(test)]
+#[path = "request_file_edits_tests.rs"]
+mod tests;

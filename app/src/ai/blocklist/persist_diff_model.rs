@@ -1,11 +1,12 @@
 //! GUI-less persistence for accepted file edits.
 //!
 //! [`PersistDiffModel`] is the app-wide singleton writer and result producer
-//! for `RequestFileEdits`, shared by every surface (GUI review, TUI/headless,
-//! and passive suggestions). Callers hand [`Self::resolve_and_persist`] the
-//! prepared [`FileDiff`]s plus any review-surface-supplied final content; it
-//! resolves each file's final content, writes it through [`FileModel`], and
-//! assembles a [`RequestFileEditsResult`].
+//! for `RequestFileEdits`. It exists because several unrelated callers must
+//! produce byte-identical writes and results: the shared executor (serving the
+//! GUI and TUI surfaces) and the passive-suggestion path. Callers hand
+//! [`Self::resolve_and_persist`] the [`ClaimedEdits`] snapshot; it resolves
+//! each file's final content, writes it through [`FileModel`], and assembles a
+//! [`RequestFileEditsResult`].
 use std::collections::HashMap;
 
 use ai::diff_validation::{DiffDelta, DiffType};
@@ -30,7 +31,9 @@ use {
 };
 
 use crate::ai::agent::RequestFileEditsResult;
-use crate::ai::blocklist::diff_types::{changed_lines_from_op, DiffSessionType, FileDiff};
+use crate::ai::blocklist::diff_types::{
+    changed_lines_from_op, ClaimedEdit, ClaimedEdits, DiffSessionType,
+};
 
 #[cfg(not(target_family = "wasm"))]
 const APPLY_DIFF_RESULT_CONTEXT_LINES: usize = 10;
@@ -69,18 +72,20 @@ impl PersistDiffModel {
         }
     }
 
-    /// Resolves each diff's final content — review-surface-supplied content per
-    /// path when present in `reviewed`, otherwise the diff's deltas applied to
+    /// Resolves each edit's final content — the surface-supplied
+    /// `final_content` when present, otherwise the diff's deltas applied to
     /// the base content — then persists everything via [`FileModel`], resolving
     /// with the assembled [`RequestFileEditsResult`].
     pub(crate) fn resolve_and_persist(
         &mut self,
-        diffs: Vec<FileDiff>,
-        reviewed: HashMap<String, String>,
-        session_type: DiffSessionType,
+        claimed: ClaimedEdits,
         ctx: &mut ModelContext<Self>,
     ) -> BoxFuture<'static, RequestFileEditsResult> {
-        match build_resolved_edits(diffs, &reviewed) {
+        let ClaimedEdits {
+            edits,
+            session_type,
+        } = claimed;
+        match build_resolved_edits(edits) {
             Ok(resolved) => self.persist(resolved, session_type, ctx),
             Err(error) => {
                 futures::future::ready(RequestFileEditsResult::DiffApplicationFailed { error })
@@ -422,19 +427,21 @@ fn diff_result(before: &str, after: &str, file_name: &str) -> DiffResult {
     }
 }
 
-/// Builds resolved file edits, using review-surface-supplied content per path
-/// when present and otherwise applying the diff's deltas to the base content.
-fn build_resolved_edits(
-    diffs: Vec<FileDiff>,
-    reviewed: &HashMap<String, String>,
-) -> Result<Vec<ResolvedFileEdit>, String> {
-    let mut resolved = Vec::with_capacity(diffs.len());
-    for diff in diffs {
+/// Builds resolved file edits, using each edit's surface-supplied final
+/// content when present and otherwise applying the diff's deltas to the base
+/// content.
+fn build_resolved_edits(edits: Vec<ClaimedEdit>) -> Result<Vec<ResolvedFileEdit>, String> {
+    let mut resolved = Vec::with_capacity(edits.len());
+    for ClaimedEdit {
+        diff,
+        final_content,
+    } in edits
+    {
         let path = diff.file_path();
         let base_content = diff.base.content;
         let op = diff.diff_type;
-        let final_content = match reviewed.get(&path) {
-            Some(content) => content.clone(),
+        let final_content = match final_content {
+            Some(content) => content,
             None => final_content_from_op(&base_content, &op)?,
         };
         resolved.push(ResolvedFileEdit {

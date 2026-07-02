@@ -75,7 +75,7 @@ use super::action_model::{
 use super::code_block::CodeSnippetButtonHandles;
 use super::controller::ClientIdentifiers;
 use super::inline_action::code_diff_view::{
-    CodeDiffState, CodeDiffView, CodeDiffViewAction, CodeDiffViewEvent,
+    CodeDiffState, CodeDiffView, CodeDiffViewAction, CodeDiffViewEditsSource, CodeDiffViewEvent,
 };
 use super::inline_action::requested_action::{CTRL_C_KEYSTROKE, ENTER_KEYSTROKE};
 use super::inline_action::requested_command_attribution::is_command_copied_from_document;
@@ -1230,7 +1230,7 @@ impl AIBlock {
 
         Self::register_action_model_subscription(&action_model, ctx);
 
-        // Feed prepared file-edit diffs to their review views as the executor
+        // Claim prepared file-edit diffs for their review views as the executor
         // resolves them. One block-level subscription serves every edit action;
         // views are looked up in `requested_edits` by the prepared action's ID.
         let file_edits_executor = action_model.as_ref(ctx).request_file_edits_executor(ctx);
@@ -1241,7 +1241,7 @@ impl AIBlock {
                 .get(action_id)
                 .map(|edit| edit.view.clone())
             {
-                Self::feed_prepared_diffs_to_view(&executor, action_id, &view, ctx);
+                Self::claim_edits_for_view(&executor, action_id, &view, ctx);
             }
         });
 
@@ -3118,9 +3118,11 @@ impl AIBlock {
         });
     }
 
-    /// Feeds the executor's prepared diffs into a review `CodeDiffView` once they
-    /// have been resolved. Safe to call repeatedly; only feeds once.
-    fn feed_prepared_diffs_to_view(
+    /// Claims the executor's prepared diffs for a review `CodeDiffView` once
+    /// they have been resolved. The claim transfers ownership of the diff data
+    /// into the view; the executor keeps only a [`CodeDiffViewEditsSource`] it
+    /// consults at execute time. Safe to call repeatedly; only claims once.
+    fn claim_edits_for_view(
         executor: &ModelHandle<RequestFileEditsExecutor>,
         action_id: &AIAgentActionId,
         view: &ViewHandle<CodeDiffView>,
@@ -3129,7 +3131,10 @@ impl AIBlock {
         if !view.as_ref(ctx).is_pending_diffs_empty() {
             return;
         }
-        let Some((diffs, session_type)) = executor.as_ref(ctx).prepared_diffs(action_id) else {
+        let source = Box::new(CodeDiffViewEditsSource(view.downgrade()));
+        let Some((diffs, session_type)) = executor.update(ctx, |executor, _| {
+            executor.claim_prepared_edits(action_id, source)
+        }) else {
             return;
         };
         view.update(ctx, |view, ctx| {
@@ -3218,25 +3223,20 @@ impl AIBlock {
                 diff_view.set_candidate_diffs(file_diffs, ctx);
             });
         } else {
-            // The executor resolves diffs asynchronously during preprocess. Feed them to the
-            // view now if already prepared; otherwise the block-level executor subscription
-            // (registered in `new`) feeds them once they are, via `requested_edits`.
-            Self::feed_prepared_diffs_to_view(&executor, action_id, &view, ctx);
+            // The executor resolves diffs asynchronously during preprocess. Claim them for
+            // the view now if already prepared; otherwise the block-level executor
+            // subscription (registered in `new`) claims them once they are, via
+            // `requested_edits`.
+            Self::claim_edits_for_view(&executor, action_id, &view, ctx);
         }
 
         let action_id_clone = action_id.clone();
         ctx.subscribe_to_view(&view, move |me, view, event, ctx| {
             match event {
                 CodeDiffViewEvent::TryAccept => {
-                    // Hand the (possibly edited) reviewed content to the executor before it
-                    // executes and persists the edits via `PersistDiffModel`.
-                    let reviewed = view.as_ref(ctx).reviewed_file_contents(ctx);
+                    // The executor pulls the (possibly edited) final content from the
+                    // view at execute time via the claimed `CodeDiffViewEditsSource`.
                     view.update(ctx, |view, ctx| view.send_malformed_line_telemetry(ctx));
-                    let executor = me.action_model.as_ref(ctx).request_file_edits_executor(ctx);
-                    executor.update(ctx, |executor, _| {
-                        executor.set_reviewed_content(&action_id_clone, reviewed);
-                    });
-
                     me.action_model.update(ctx, |action_model, ctx| {
                         action_model.execute_action(
                             &action_id_clone,

@@ -42,6 +42,32 @@ impl FileDiff {
     pub fn file_path(&self) -> String {
         self.base.file_path.clone()
     }
+
+    /// Returns `(lines_added, lines_removed)` described by this diff's op.
+    pub fn line_stats(&self) -> (usize, usize) {
+        match &self.diff_type {
+            DiffType::Create { delta } => (line_count(&delta.insertion), 0),
+            DiffType::Delete { delta } => (
+                0,
+                delta
+                    .replacement_line_range
+                    .end
+                    .saturating_sub(delta.replacement_line_range.start),
+            ),
+            DiffType::Update { deltas, .. } => deltas.iter().fold((0, 0), |(add, rem), delta| {
+                let removed = delta
+                    .replacement_line_range
+                    .end
+                    .saturating_sub(delta.replacement_line_range.start);
+                (add + line_count(&delta.insertion), rem + removed)
+            }),
+        }
+    }
+}
+
+/// Counts lines in `content`, treating non-empty trailing text as its own line.
+fn line_count(content: &str) -> usize {
+    content.lines().count()
 }
 
 /// Whether a code diff targets the local filesystem or a remote host.
@@ -49,6 +75,23 @@ impl FileDiff {
 pub enum DiffSessionType {
     Local,
     Remote(HostId),
+}
+
+/// One prepared file edit handed between the file-edits executor and a review surface.
+#[derive(Clone)]
+#[cfg_attr(debug_assertions, derive(Debug))]
+pub struct ClaimedEdit {
+    pub diff: FileDiff,
+    /// Final file content from the surface's buffer (the user may have edited
+    /// it). `None` when the surface doesn't materialize buffers; persistence
+    /// then applies `diff`'s deltas to the base content.
+    pub final_content: Option<String>,
+}
+
+/// The full set of edits for one `RequestFileEdits` action at execute time.
+pub struct ClaimedEdits {
+    pub edits: Vec<ClaimedEdit>,
+    pub session_type: DiffSessionType,
 }
 
 /// Derives the 1-indexed changed line ranges described by a diff's deltas.
