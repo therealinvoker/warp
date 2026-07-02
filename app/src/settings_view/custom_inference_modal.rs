@@ -640,13 +640,8 @@ impl CustomEndpointModal {
         let api_key = self.api_key_editor.as_ref(ctx).buffer_text(ctx);
 
         // Guard: only run when both fields are filled and the URL passes validation.
-        // Note: `validate_url` inspects the host at parse time and blocks known private/
-        // loopback addresses, but DNS resolution happens later inside `reqwest`. A public
-        // hostname that resolves to a private IP (DNS rebinding) is not blocked here.
-        // This is an accepted V0 trade-off; future hardening could pin-check the resolved
-        // address before sending the request.
         // Redirects are disabled on the client (see client builder below) so a public URL
-        // that 30x-redirects to a private address cannot bypass the host check.
+        // that 30x-redirects to a private address cannot pass the connection test.
         if url.trim().is_empty() || api_key.trim().is_empty() || validate_url(&url).is_err() {
             return;
         }
