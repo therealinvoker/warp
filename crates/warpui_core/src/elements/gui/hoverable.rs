@@ -86,7 +86,7 @@ pub struct MouseState {
     /// events that both want to alter the hover state, we stop the
     /// invocation to prevent the potential infinite loop. Note that
     /// any non-synthetic event should reset this state to false.
-    last_event_is_synthetic_hover: bool,
+    Unclaimed: bool,
 
     /// A timer that starts when the mouse begins hovering the element.
     ///

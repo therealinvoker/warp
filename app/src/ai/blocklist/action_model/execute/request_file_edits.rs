@@ -208,9 +208,10 @@ impl RequestFileEditsExecutor {
                     ));
                 }
             },
-            // No surface claimed the edits: execution won the race against the
-            // `DiffsPrepared` subscriber (e.g. autoexecution). Persisting the
-            // unreviewed deltas is correct here — nobody was reviewing.
+            // No surface claimed the edits: execution ran before any
+            // `DiffsPrepared` subscriber claimed them (e.g. autoexecution).
+            // Persisting the unreviewed deltas is correct here — nobody was
+            // reviewing.
             Some(PendingFileEdits::Unclaimed {
                 diffs,
                 session_type,

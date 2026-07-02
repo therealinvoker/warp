@@ -137,6 +137,17 @@ fn discard_pending_drops_state_in_any_state() {
             executor.discard_pending(&claimed_id);
             assert!(!executor.pending_file_edits.contains_key(&claimed_id));
         });
+
+        // Failed entry (diff application failed during preprocess).
+        let failed_id = AIAgentActionId::from("edit-failed".to_owned());
+        executor.update(&mut app, |executor, _| {
+            executor.pending_file_edits.insert(
+                failed_id.clone(),
+                PendingFileEdits::Failed(vec1![DiffApplicationError::EmptyDiff]),
+            );
+            executor.discard_pending(&failed_id);
+            assert!(!executor.pending_file_edits.contains_key(&failed_id));
+        });
     });
 }
 
@@ -246,8 +257,8 @@ fn execute_falls_back_to_unclaimed_deltas() {
                 .into()
         });
 
-        // Nobody claimed (e.g. autoexec beat the DiffsPrepared subscriber):
-        // persistence proceeds from the unreviewed deltas.
+        // Nobody claimed (e.g. autoexec ran before the DiffsPrepared
+        // subscriber): persistence proceeds from the unreviewed deltas.
         assert!(matches!(execution, AnyActionExecution::Async { .. }));
     });
 }
