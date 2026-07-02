@@ -2780,6 +2780,13 @@ impl EditorModel {
         self.buffer_and_display_map.ephemeral.is_some()
     }
 
+    /// Whether the editor is currently displaying an ephemeral loading overlay
+    /// (created by `set_buffer_text_ignoring_undo`, e.g. the frozen input loading
+    /// state) rather than the regular collaborative buffer.
+    pub fn is_in_ephemeral_loading_state(&self) -> bool {
+        self.is_ephemeral()
+    }
+
     fn collaborative_buffer(&self) -> &ModelHandle<Buffer> {
         &self.buffer_and_display_map.regular.0
     }
