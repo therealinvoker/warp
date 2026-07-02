@@ -4,7 +4,7 @@ use super::*;
 
 #[test]
 fn http_200_response_sets_confirmed_status() {
-    // When the probe receives a 2xx HTTP response (success = true) the status
+    // When the probe receives an HTTP 200 response (success = true) the status
     // should transition to Confirmed.
     assert_eq!(
         connection_status_from_result(true),
@@ -14,7 +14,7 @@ fn http_200_response_sets_confirmed_status() {
 
 #[test]
 fn http_error_or_non_200_sets_failed_status() {
-    // A non-2xx response or a network/transport error (success = false) should
+    // A non-200 response or a network/transport error (success = false) should
     // produce Failed, not Confirmed.
     assert_eq!(
         connection_status_from_result(false),
@@ -23,62 +23,61 @@ fn http_error_or_non_200_sets_failed_status() {
 }
 
 #[test]
-fn editing_url_or_api_key_resets_connection_status_to_idle() {
-    // `handle_endpoint_url_event` and `handle_api_key_event` both call
-    // `reset_connection_test_status()` on any `Edited` event, which sets
-    // `connection_test_status` to `Idle`.
-    //
-    // This test exercises the reset path through `apply_connection_result`: once
-    // the status is `Idle` (i.e. a reset has occurred), any in-flight result
-    // that arrives afterwards must be dropped — verifying both that the reset
-    // took effect and that the race guard preserves it.
-    for success in [true, false] {
-        assert_eq!(
-            apply_connection_result(ConnectionTestStatus::Idle, success),
-            ConnectionTestStatus::Idle,
-            "after URL/key edit resets status to Idle, a stale result (success={success}) must be dropped",
-        );
-    }
+fn probe_result_applied_when_generation_matches() {
+    // A probe whose captured generation still matches the modal's current
+    // generation is the most recent request, so its result is applied.
+    assert!(probe_result_is_current(3, 3));
 }
 
 #[test]
-fn stale_result_is_dropped_when_status_is_not_testing() {
-    // `SpawnedFutureHandle::abort()` cancels a future only on its next poll.
-    // A request that resolves just before a URL/API-key edit delivers its
-    // completion callback *after* `reset_connection_test_status` has set the
-    // status to `Idle`. `apply_connection_result` must not overwrite that reset.
-    //
-    // Covers all non-Testing statuses that could be present when a stale result
-    // arrives.
-    let non_testing_statuses = [
-        ConnectionTestStatus::Idle,
-        ConnectionTestStatus::Confirmed,
-        ConnectionTestStatus::Failed,
-    ];
-    for status in non_testing_statuses {
-        assert_eq!(
-            apply_connection_result(status.clone(), true),
-            status,
-            "stale Confirmed result must not overwrite status {status:?}",
-        );
-        assert_eq!(
-            apply_connection_result(status.clone(), false),
-            status,
-            "stale Failed result must not overwrite status {status:?}",
-        );
-    }
+fn stale_probe_result_ignored_when_generation_differs() {
+    // Editing the URL/API key or starting a new test bumps the generation, so a
+    // probe tagged with a mismatched generation is stale. This covers both the
+    // abort-after-poll race and the click -> edit -> click-again sequence where
+    // an older request resolves after a newer one has already started.
+    assert!(!probe_result_is_current(1, 2));
+    assert!(!probe_result_is_current(2, 1));
 }
 
+// --- base URL normalization tests ---
+
 #[test]
-fn redirect_response_treated_as_failed_status() {
-    // The reqwest client is built with `redirect::Policy::none()`, so a 30x
-    // response causes `send()` to return an `Err`, which maps to `success = false`
-    // and ultimately `ConnectionTestStatus::Failed`. This prevents a public URL
-    // that redirects to a private address from bypassing `validate_url`'s SSRF
-    // guard.
+fn normalize_base_url_strips_chat_completions_suffix() {
     assert_eq!(
-        connection_status_from_result(false),
-        ConnectionTestStatus::Failed,
+        normalize_chat_completions_base_url("https://api.example.com/v1/chat/completions"),
+        "https://api.example.com/v1",
+    );
+}
+
+#[test]
+fn normalize_base_url_strips_suffix_with_trailing_slash() {
+    assert_eq!(
+        normalize_chat_completions_base_url("https://api.example.com/v1/chat/completions/"),
+        "https://api.example.com/v1",
+    );
+}
+
+#[test]
+fn normalize_base_url_trims_whitespace_before_stripping() {
+    assert_eq!(
+        normalize_chat_completions_base_url("  https://api.example.com/v1/chat/completions  "),
+        "https://api.example.com/v1",
+    );
+}
+
+#[test]
+fn normalize_base_url_leaves_url_without_suffix_unchanged() {
+    assert_eq!(
+        normalize_chat_completions_base_url("https://api.example.com/v1"),
+        "https://api.example.com/v1",
+    );
+}
+
+#[test]
+fn normalize_base_url_returns_trimmed_input_on_parse_error() {
+    assert_eq!(
+        normalize_chat_completions_base_url("  not a url  "),
+        "not a url",
     );
 }
 

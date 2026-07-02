@@ -4,12 +4,12 @@ use std::time::Duration;
 use ::ai::api_keys::CustomEndpoint;
 use url::Url;
 use warp_editor::editor::NavigationKey;
-use warpui::r#async::SpawnedFutureHandle;
 use warpui::elements::{
     Border, ChildView, ConstrainedBox, Container, CornerRadius, CrossAxisAlignment, Empty,
     Expanded, Flex, MainAxisSize, MouseStateHandle, ParentElement, Radius, Text,
 };
 use warpui::fonts::FamilyId;
+use warpui::r#async::SpawnedFutureHandle;
 use warpui::ui_components::button::ButtonVariant;
 use warpui::ui_components::components::{Coords, UiComponent, UiComponentStyles};
 use warpui::{
@@ -101,6 +101,11 @@ pub struct CustomEndpointModal {
     /// Handle for the in-flight connection test request; used to abort stale
     /// requests when the URL or API key is edited mid-flight.
     connection_test_handle: Option<SpawnedFutureHandle>,
+    /// Monotonically increasing id for connection test requests. Each request
+    /// captures this value at spawn time; starting a new test or resetting the
+    /// status bumps it so a result delivered after an abort that had not yet
+    /// taken effect can be recognized as stale and ignored.
+    connection_test_generation: u64,
 }
 
 impl CustomEndpointModal {
@@ -248,6 +253,7 @@ impl CustomEndpointModal {
             url_has_error,
             connection_test_status: ConnectionTestStatus::Idle,
             connection_test_handle: None,
+            connection_test_generation: 0,
         }
     }
 
@@ -620,6 +626,10 @@ impl CustomEndpointModal {
         if let Some(handle) = self.connection_test_handle.take() {
             handle.abort();
         }
+        // Bump the generation so any request whose result is already on its way
+        // to the callback (abort only takes effect on the next poll) is treated
+        // as stale and dropped instead of overwriting this reset.
+        self.connection_test_generation = self.connection_test_generation.wrapping_add(1);
         self.connection_test_status = ConnectionTestStatus::Idle;
     }
 
@@ -646,10 +656,18 @@ impl CustomEndpointModal {
             prev.abort();
         }
 
+        // Bump the generation and capture it for this request. Starting a new
+        // test (or editing a field, via `reset_connection_test_status`) bumps
+        // the generation, so a previously spawned request whose result is
+        // already on its way to the callback is recognized as stale and dropped.
+        self.connection_test_generation = self.connection_test_generation.wrapping_add(1);
+        let generation = self.connection_test_generation;
+
         self.connection_test_status = ConnectionTestStatus::Testing;
         ctx.notify();
 
-        let models_url = format!("{}/models", url.trim_end_matches('/'));
+        let base_url = normalize_chat_completions_base_url(&url);
+        let models_url = format!("{}/models", base_url.trim_end_matches('/'));
 
         let handle = ctx.spawn(
             async move {
@@ -670,20 +688,23 @@ impl CustomEndpointModal {
                     .send()
                     .await
                 {
-                    Ok(response) => response.status().is_success(),
+                    Ok(response) => response.status() == reqwest::StatusCode::OK,
                     Err(_) => false,
                 }
             },
-            |me, confirmed, ctx| {
+            move |me, confirmed, ctx| {
+                // Ignore results from superseded or reset requests. `abort()`
+                // only cancels a future on its next poll, so a request that
+                // resolved just before it was aborted (e.g. the user edited a
+                // field and re-clicked Test) can still deliver its result here.
+                // Comparing the captured generation against the current one
+                // drops those stale results instead of showing a previous URL's
+                // outcome or clobbering the new request's handle.
+                if !probe_result_is_current(generation, me.connection_test_generation) {
+                    return;
+                }
                 me.connection_test_handle = None;
-                // Guard: only apply the result when still in Testing state.
-                // `SpawnedFutureHandle::abort()` cancels a future only on its
-                // next poll, so a request that resolves just before the user
-                // edits a field can still deliver its result here after
-                // `reset_connection_test_status` has already set status to Idle.
-                // Dropping the stale result preserves the Idle reset.
-                me.connection_test_status =
-                    apply_connection_result(me.connection_test_status.clone(), confirmed);
+                me.connection_test_status = connection_status_from_result(confirmed);
                 ctx.notify();
             },
         );
@@ -838,18 +859,26 @@ impl View for CustomEndpointModal {
                 !url.trim().is_empty() && !api_key.trim().is_empty() && validate_url(&url).is_ok();
 
             if can_test {
-                let is_testing = self.connection_test_status == ConnectionTestStatus::Testing;
+                let test_ongoing = self.connection_test_status == ConnectionTestStatus::Testing;
                 let mut test_btn = appearance
                     .ui_builder()
-                    .button(ButtonVariant::Link, self.test_connection_mouse_state.clone())
+                    .button(
+                        ButtonVariant::Link,
+                        self.test_connection_mouse_state.clone(),
+                    )
                     .with_text_label(
-                        if is_testing { "Testing\u{2026}" } else { "Test connection" }.to_string(),
+                        if test_ongoing {
+                            "Testing\u{2026}"
+                        } else {
+                            "Test connection"
+                        }
+                        .to_string(),
                     )
                     .with_style(UiComponentStyles {
                         font_size: Some(LABEL_FONT_SIZE),
                         ..Default::default()
                     });
-                if is_testing {
+                if test_ongoing {
                     test_btn = test_btn.disabled();
                 }
                 let test_btn = test_btn
@@ -863,19 +892,17 @@ impl View for CustomEndpointModal {
                     ConnectionTestStatus::Idle | ConnectionTestStatus::Testing => {
                         Empty::new().finish()
                     }
-                    ConnectionTestStatus::Confirmed => Text::new(
-                        "connection confirmed",
-                        label_font_family,
-                        LABEL_FONT_SIZE,
-                    )
-                    .with_color(theme.ui_green_color().into())
-                    .finish(),
+                    ConnectionTestStatus::Confirmed => {
+                        Text::new("connection confirmed", label_font_family, LABEL_FONT_SIZE)
+                            .with_color(theme.ui_green_color())
+                            .finish()
+                    }
                     ConnectionTestStatus::Failed => Text::new(
                         "could not confirm connection",
                         label_font_family,
                         LABEL_FONT_SIZE,
                     )
-                    .with_color(theme.ui_warning_color().into())
+                    .with_color(theme.ui_warning_color())
                     .finish(),
                 };
 
@@ -1085,6 +1112,33 @@ fn validate_url(url: &str) -> Result<(), &'static str> {
     Ok(())
 }
 
+/// Path suffix that OpenAI-compatible base URLs sometimes include and that must
+/// be stripped before appending our own path (e.g. `/models`).
+const CHAT_COMPLETIONS_PATH_SUFFIX: &str = "/chat/completions";
+
+/// Strips a trailing `/chat/completions` segment from a custom endpoint base URL
+/// when present, returning a base URL suitable for appending another path.
+///
+/// whitespace-trimmed, and on a parse failure or when the path does not end in
+/// `/chat/completions` the trimmed input is returned unchanged.
+fn normalize_chat_completions_base_url(base_url: &str) -> String {
+    let trimmed_base_url = base_url.trim();
+    let Ok(mut parsed) = Url::parse(trimmed_base_url) else {
+        return trimmed_base_url.to_string();
+    };
+
+    let trimmed_path = parsed.path().trim_end_matches('/');
+    let Some(stripped_path) = trimmed_path.strip_suffix(CHAT_COMPLETIONS_PATH_SUFFIX) else {
+        return trimmed_base_url.to_string();
+    };
+    // Own the stripped path so the immutable borrow of `parsed` ends before the
+    // mutable `set_path` call below.
+    let stripped_path = stripped_path.to_string();
+
+    parsed.set_path(&stripped_path);
+    parsed.to_string()
+}
+
 fn is_endpoint_form_valid(name: &str, url: &str, api_key: &str, has_models: bool) -> bool {
     !name.trim().is_empty()
         && !url.trim().is_empty()
@@ -1136,8 +1190,8 @@ fn is_ipv6_link_local(ip: Ipv6Addr) -> bool {
 
 /// Converts the raw HTTP probe result into a `ConnectionTestStatus`.
 ///
-/// `success` is `true` when the server responds with a 2xx status code, and
-/// `false` for any non-2xx response or a network/transport error. Extracted as
+/// `success` is `true` when the server responds with HTTP 200, and `false` for
+/// any non-200 response or a network/transport error. Extracted as
 /// a module-level helper so the status-determination logic can be tested
 /// independently of the `ViewContext` machinery.
 pub(crate) fn connection_status_from_result(success: bool) -> ConnectionTestStatus {
@@ -1148,27 +1202,19 @@ pub(crate) fn connection_status_from_result(success: bool) -> ConnectionTestStat
     }
 }
 
-/// Applies a completed connection-test result to the current status, returning
-/// the new status.
+/// Returns whether a connection-test probe result should be applied.
 ///
-/// The result is applied **only when** `current` is `Testing`. If the status
-/// has already been reset to `Idle` (e.g. by a URL / API-key edit while the
-/// request was in-flight), the stale `Confirmed` or `Failed` result is dropped
-/// and `current` is returned unchanged. This guards against the race where
-/// `SpawnedFutureHandle::abort()` cannot cancel a request that resolved just
-/// before the abort was delivered.
-///
-/// Extracted as a pure helper so the race-guard logic can be unit-tested
-/// without a live `ViewContext`.
-pub(crate) fn apply_connection_result(
-    current: ConnectionTestStatus,
-    success: bool,
-) -> ConnectionTestStatus {
-    if current == ConnectionTestStatus::Testing {
-        connection_status_from_result(success)
-    } else {
-        current
-    }
+/// Each test run captures the modal's `connection_test_generation` at spawn
+/// time. Starting a new test or editing the URL / API key bumps the generation,
+/// so a probe whose captured generation no longer matches the modal's current
+/// generation is stale (it was superseded or reset) and must be ignored. This
+/// closes the abort-after-poll race: `SpawnedFutureHandle::abort()` only takes
+/// effect on the next poll, so a request that resolves just before it is aborted
+/// still delivers its result to the callback, where the generation mismatch
+/// causes it to be dropped. Extracted as a pure helper so the guard can be
+/// unit-tested without a `ViewContext`.
+pub(crate) fn probe_result_is_current(probe_generation: u64, current_generation: u64) -> bool {
+    probe_generation == current_generation
 }
 
 impl TypedActionView for CustomEndpointModal {
