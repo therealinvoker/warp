@@ -3020,3 +3020,122 @@ fn bugbash_gitignore_edit_retags_file_tree() {
         });
     });
 }
+
+/// BUG BASH regression: moving a `.gitignore` OUT of a repository must reindex
+/// the source repo. Watcher moves were attributed only to the destination, so a
+/// move whose destination is outside every tracked repo produced no update for
+/// the source repo and its ignore rules stayed stale. `handle_watcher_event`
+/// now records the moved-from path as a removal in the source repo, so the
+/// ignore-rule detector fires and the tree is rebuilt (dropping the now-removed
+/// `.gitignore`), un-ignoring `data.tmp`.
+#[cfg(feature = "local_fs")]
+#[test]
+fn bugbash_gitignore_moved_out_of_repo_retags_source() {
+    VirtualFS::test("bugbash_gitignore_moved_out", |dirs, mut vfs| {
+        vfs.mkdir("repo").mkdir("outside").with_files(vec![
+            Stub::FileWithContent("repo/.gitignore", "*.tmp\n"),
+            Stub::FileWithContent("repo/data.tmp", "x"),
+        ]);
+
+        let repo_root = dirs.tests().join("repo");
+        let gitignore_path = repo_root.join(".gitignore");
+        let moved_to = dirs.tests().join("outside").join(".gitignore");
+        let data_tmp = repo_root.join("data.tmp");
+
+        App::test((), |mut app| async move {
+            app.add_singleton_model(DirectoryWatcher::new_for_testing);
+            let model_handle = app.add_model(|_| LocalRepoMetadataModel::new_for_test());
+
+            let repo_std = StandardizedPath::from_local_canonicalized(&repo_root).unwrap();
+            let data_tmp_std = StandardizedPath::try_from_local(&data_tmp).unwrap();
+
+            // Initial index: data.tmp is ignored by repo/.gitignore (*.tmp).
+            let (tx1, rx1) = oneshot::channel();
+            let repo_for_event = repo_std.clone();
+            let done1 = Rc::new(RefCell::new(Some(tx1)));
+            app.update(|ctx| {
+                ctx.subscribe_to_model(&model_handle, move |_, event, _ctx| {
+                    if matches!(
+                        event,
+                        RepositoryMetadataEvent::RepositoryUpdated { path }
+                            if path == &repo_for_event
+                    ) {
+                        if let Some(tx) = done1.borrow_mut().take() {
+                            let _ = tx.send(());
+                        }
+                    }
+                });
+            });
+            model_handle.update(&mut app, |model, ctx| {
+                model.index_directory_path(&repo_std, ctx).unwrap();
+            });
+            rx1.with_timeout(Duration::from_secs(5))
+                .await
+                .expect("timed out waiting for initial index")
+                .expect("initial index sender dropped");
+
+            model_handle.read(&app, |model, _ctx| {
+                let Some(IndexedRepoState::Indexed(state)) = model.repository_state(&repo_std)
+                else {
+                    panic!("expected indexed repo");
+                };
+                let entry = state
+                    .entry
+                    .get(&data_tmp_std)
+                    .expect("data.tmp should be indexed");
+                assert!(entry.ignored(), "data.tmp should start ignored");
+            });
+
+            // Move .gitignore out of the repo (destination is not tracked), then
+            // deliver the move event.
+            std::fs::rename(&gitignore_path, &moved_to).unwrap();
+
+            let (tx2, rx2) = oneshot::channel();
+            let repo_for_event2 = repo_std.clone();
+            let done2 = Rc::new(RefCell::new(Some(tx2)));
+            app.update(|ctx| {
+                ctx.subscribe_to_model(&model_handle, move |_, event, _ctx| {
+                    if matches!(
+                        event,
+                        RepositoryMetadataEvent::RepositoryUpdated { path }
+                            if path == &repo_for_event2
+                    ) {
+                        if let Some(tx) = done2.borrow_mut().take() {
+                            let _ = tx.send(());
+                        }
+                    }
+                });
+            });
+            model_handle.update(&mut app, |model, ctx| {
+                model.handle_watcher_event(
+                    &BulkFilesystemWatcherEvent {
+                        moved: HashMap::from([(moved_to.clone(), gitignore_path.clone())]),
+                        ..Default::default()
+                    },
+                    ctx,
+                );
+            });
+            rx2.with_timeout(Duration::from_secs(5))
+                .await
+                .expect("timed out waiting for re-index after .gitignore move-out")
+                .expect("re-index sender dropped");
+
+            // The source repo is rebuilt without the .gitignore, so data.tmp is
+            // no longer ignored.
+            model_handle.read(&app, |model, _ctx| {
+                let Some(IndexedRepoState::Indexed(state)) = model.repository_state(&repo_std)
+                else {
+                    panic!("expected re-indexed repo");
+                };
+                let entry = state
+                    .entry
+                    .get(&data_tmp_std)
+                    .expect("data.tmp should still be indexed after re-index");
+                assert!(
+                    !entry.ignored(),
+                    "moving .gitignore out of the repo should re-tag data.tmp as un-ignored"
+                );
+            });
+        });
+    });
+}

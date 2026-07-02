@@ -569,11 +569,31 @@ impl LocalRepoMetadataModel {
 
         // Process moved files
         for (to_path, from_path) in &event.moved {
-            if let Some(repo_path) = self.find_repository_for_watcher_entry_path(to_path) {
-                let repo_update = repo_updates.entry(repo_path).or_default();
+            let dest_repo = self.find_repository_for_watcher_entry_path(to_path);
+            let source_repo =
+                self.find_repository_for_path_string(from_path.to_string_lossy().as_ref());
+
+            // Destination repo: the file arrived here. A same-repo move records
+            // both sides (the `moved` entry drives an add of `to_path` and a
+            // removal of `from_path`).
+            if let Some(ref dest) = dest_repo {
+                let repo_update = repo_updates.entry(dest.clone()).or_default();
                 repo_update
                     .moved
                     .insert(to_path.to_path_buf(), from_path.to_path_buf());
+            }
+
+            // Source repo, when it differs from the destination (including a
+            // move *out* of every tracked repo): the file left this repo, so
+            // record it as a removal there. Without this, moving a file (e.g. a
+            // `.gitignore`) out of a repo would leave the source tree stale —
+            // and the ignore-rule detector, which inspects moved-from paths,
+            // would never run for the source repo.
+            if let Some(source) = source_repo {
+                if dest_repo.as_ref() != Some(&source) {
+                    let repo_update = repo_updates.entry(source).or_default();
+                    repo_update.deleted.push(from_path.to_path_buf());
+                }
             }
         }
 
