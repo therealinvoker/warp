@@ -3679,7 +3679,9 @@ impl EditorView {
     /// frozen "…◌" state created by freezing the input while a prompt is in flight), as
     /// opposed to a normal editable buffer holding user-typed content.
     pub fn is_in_ephemeral_loading_state<C: ModelAsRef>(&self, ctx: &C) -> bool {
-        self.editor_model.as_ref(ctx).is_in_ephemeral_loading_state()
+        self.editor_model
+            .as_ref(ctx)
+            .is_in_ephemeral_loading_state()
     }
 
     pub fn set_interaction_state(

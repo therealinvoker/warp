@@ -7429,30 +7429,34 @@ impl Input {
     /// once a followup has actually been submitted — see
     /// [`Self::reset_after_cloud_followup_submission`].
     pub fn enable_cloud_followup_input(&mut self, ctx: &mut ViewContext<Self>) {
-        let is_frozen_loading = self
-            .editor
-            .as_ref(ctx)
-            .is_in_ephemeral_loading_state(ctx);
+        let is_frozen_loading = self.editor.as_ref(ctx).is_in_ephemeral_loading_state(ctx);
         self.editor.update(ctx, |editor, ctx| {
+            // Re-enable edits BEFORE clearing: buffer edits are ignored while the editor is
+            // in the frozen loading state (Selectable), so the clear must run after this.
+            editor.set_interaction_state(InteractionState::Editable, ctx);
             if is_frozen_loading {
                 editor.clear_buffer_and_reset_undo_stack(ctx);
             }
-            editor.set_interaction_state(InteractionState::Editable, ctx);
 
             let appearance: &Appearance = Appearance::as_ref(ctx);
             editor.set_text_colors(TextColors::from_appearance(appearance), ctx);
         });
     }
 
-    /// Reset the input after a cloud followup has actually been submitted: clears the buffer
-    /// (and undo stack) and then re-enables the followup input. For the non-destructive enable
+    /// Reset the input after a cloud followup has actually been submitted: re-enables edits
+    /// and unconditionally clears the buffer (and undo stack). For the non-destructive enable
     /// transition that must preserve an un-submitted draft, use
     /// [`Self::enable_cloud_followup_input`] instead.
     pub fn reset_after_cloud_followup_submission(&mut self, ctx: &mut ViewContext<Self>) {
         self.editor.update(ctx, |editor, ctx| {
+            // Re-enable edits before clearing: buffer edits are ignored while the editor is
+            // Selectable (e.g. a frozen/loading state), so the clear must run after this.
+            editor.set_interaction_state(InteractionState::Editable, ctx);
             editor.clear_buffer_and_reset_undo_stack(ctx);
+
+            let appearance: &Appearance = Appearance::as_ref(ctx);
+            editor.set_text_colors(TextColors::from_appearance(appearance), ctx);
         });
-        self.enable_cloud_followup_input(ctx);
     }
 
     /// Cancel any active agent conversation in a shared session
