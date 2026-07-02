@@ -6,16 +6,15 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use cfg_if::cfg_if;
 use chrono::{DateTime, Utc};
 pub use cloud_object_models::{
     AgentModeCommandExecutionPredicate, DEFAULT_COMMAND_EXECUTION_ALLOWLIST,
     DEFAULT_COMMAND_EXECUTION_DENYLIST,
 };
 use indexmap::IndexMap;
-use lazy_static::lazy_static;
 use regex::Regex;
-use serde::{de, de::Deserializer, Deserialize, Serialize, Serializer};
+use serde::de::Deserializer;
+use serde::{Deserialize, Serialize, Serializer};
 use settings::{
     define_settings_group, RespectUserSyncSetting, Setting, SupportedPlatforms, SyncToCloud,
 };
@@ -23,17 +22,12 @@ use strum::IntoEnumIterator;
 use strum_macros::EnumIter;
 use warp_core::execution_mode::AppExecutionMode;
 use warp_core::features::FeatureFlag;
-use warpui::{
-    platform::{keyboard::KeyCode, OperatingSystem},
-    AppContext, Entity, EntityId, ModelContext, SingletonEntity, UpdateModel,
-};
+use warpui::platform::keyboard::KeyCode;
+use warpui::platform::OperatingSystem;
+use warpui::{AppContext, Entity, ModelContext, SingletonEntity, UpdateModel};
 
-use crate::ai::{
-    agent::conversation::AIConversation,
-    blocklist::BlocklistAIHistoryModel,
-    loading::{self, WarpingVerbPack},
-    request_usage_model::RequestLimitInfo,
-};
+use crate::ai::loading::{self, WarpingVerbPack};
+use crate::ai::request_usage_model::RequestLimitInfo;
 use crate::auth::AuthStateProvider;
 use crate::report_if_error;
 use crate::settings::PrivacySettings;
@@ -504,16 +498,6 @@ impl Serialize for NormalizedSpinnerVerb {
         S: Serializer,
     {
         serializer.serialize_str(self.as_str())
-    }
-}
-
-impl<'de> Deserialize<'de> for NormalizedSpinnerVerb {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let value = String::deserialize(deserializer)?;
-        Self::try_from(value).map_err(|_| de::Error::custom("invalid spinner verb"))
     }
 }
 
@@ -2488,6 +2472,17 @@ impl AISettings {
         report_if_error!(self
             .custom_spinner_verbs
             .set_value(SpinnerVerbList::from(verbs), ctx));
+        report_if_error!(self.spinner_verbs.set_value(SpinnerVerbsMode::Custom, ctx));
+    }
+
+    /// Replaces the custom spinner verbs list with an already-normalized list
+    /// and switches the mode to custom.
+    pub fn set_custom_spinner_verb_list(
+        &mut self,
+        verbs: SpinnerVerbList,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        report_if_error!(self.custom_spinner_verbs.set_value(verbs, ctx));
         report_if_error!(self.spinner_verbs.set_value(SpinnerVerbsMode::Custom, ctx));
     }
 

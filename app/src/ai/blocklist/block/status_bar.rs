@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
+
 use instant::Instant;
 use markdown_parser::FormattedTextFragment;
 use parking_lot::FairMutex;
@@ -25,7 +26,7 @@ use super::model::{AIBlockModel, AIBlockModelImpl, AIBlockOutputStatus};
 use super::view_impl::common::{
     render_switch_control_to_user_button, render_warping_indicator, render_warping_indicator_base,
     AutoExecuteButtonProps, ButtonProps, ForceRefreshButtonProps, MaybeShimmeringText,
-    WarpingIndicatorProps, WarpingProps, LOAD_OUTPUT_MESSAGE, WAITING_FOR_USER_INPUT_MESSAGE,
+    WarpingIndicatorProps, WarpingProps, WAITING_FOR_USER_INPUT_MESSAGE,
 };
 use crate::ai::agent::conversation::AIConversationId;
 use crate::ai::agent::{
@@ -33,7 +34,6 @@ use crate::ai::agent::{
     SummarizationType,
 };
 use crate::ai::agent_tips::AITipModel;
-use crate::ai::loading::WarpingVerbSelector;
 use crate::ai::blocklist::agent_view::shortcuts::AgentShortcutViewModel;
 use crate::ai::blocklist::agent_view::{
     agent_view_bg_fill, is_in_cloud_context, AgentMessageBar, AgentViewController,
@@ -49,6 +49,7 @@ use crate::ai::blocklist::{
     BlocklistAIInputModel, QueuedQueryEvent, QueuedQueryModel, ResponseStreamId,
 };
 use crate::ai::llms::LLMPreferences;
+use crate::ai::loading::WarpingVerbSelector;
 use crate::ai::AgentTip;
 use crate::server::telemetry::TelemetryEvent;
 use crate::settings::{InputModeSettings, InputSettings};

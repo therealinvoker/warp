@@ -10,8 +10,7 @@
 
 /// A preset pack of flavor verbs for the warping spinner.
 ///
-/// Referenced by the Settings UI, tests, and natural-language flows.
-#[allow(dead_code)]
+/// Referenced by the Settings UI and tests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum WarpingVerbPack {
     Medieval,
@@ -20,7 +19,6 @@ pub enum WarpingVerbPack {
     Warpy,
 }
 
-#[allow(dead_code)]
 impl WarpingVerbPack {
     /// Returns every built-in pack, in display order.
     pub const fn all() -> &'static [WarpingVerbPack] {
@@ -39,17 +37,6 @@ impl WarpingVerbPack {
             WarpingVerbPack::ConspiracyTheorist => "Conspiracy",
             WarpingVerbPack::Cooking => "Cooking",
             WarpingVerbPack::Warpy => "Warpy",
-        }
-    }
-
-    /// Machine-readable name used in setting descriptions and natural-language
-    /// agent prompts (e.g. "use the medieval pack").
-    pub const fn identifier(self) -> &'static str {
-        match self {
-            WarpingVerbPack::Medieval => "medieval",
-            WarpingVerbPack::ConspiracyTheorist => "conspiracy",
-            WarpingVerbPack::Cooking => "cooking",
-            WarpingVerbPack::Warpy => "warpy",
         }
     }
 
@@ -113,15 +100,6 @@ impl WarpingVerbPack {
     /// previews and tests.
     pub fn verbs_as_vec(self) -> Vec<String> {
         self.verbs().iter().map(|v| (*v).to_string()).collect()
-    }
-
-    /// Looks up a pack by its identifier (case-insensitive).
-    pub fn from_identifier(identifier: &str) -> Option<Self> {
-        let needle = identifier.trim().to_ascii_lowercase();
-        Self::all().iter().copied().find(|pack| {
-            pack.identifier() == needle
-                || matches!(*pack, WarpingVerbPack::ConspiracyTheorist) && needle == "conpsiracy"
-        })
     }
 }
 

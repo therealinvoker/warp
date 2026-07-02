@@ -17,16 +17,16 @@ use warp_core::ui::theme::color::internal_colors;
 use warp_core::ui::theme::Fill as ThemeFill;
 use warp_editor::editor::NavigationKey;
 use warpui::elements::{
-    Border, ChildAnchor, ChildView, ConstrainedBox, Container, CornerRadius, CrossAxisAlignment,
-    Dismiss, Empty, Expanded, Fill, Flex, FormattedTextElement, HighlightedHyperlink, Hoverable,
-    HyperlinkLens, HyperlinkUrl, MainAxisAlignment, MainAxisSize, MouseStateHandle,
-    OffsetPositioning, ParentAnchor, ParentElement, ParentOffsetBounds, Radius, Shrinkable, Stack,
-    Text,
+    Border, ChildAnchor, ChildView, Clipped, ConstrainedBox, Container, CornerRadius,
+    CrossAxisAlignment, Dismiss, Empty, Expanded, Fill, Flex, FormattedTextElement,
+    HighlightedHyperlink, Hoverable, HyperlinkLens, HyperlinkUrl, MainAxisAlignment, MainAxisSize,
+    MouseStateHandle, OffsetPositioning, ParentAnchor, ParentElement, ParentOffsetBounds, Radius,
+    Shrinkable, Stack, Text, Wrap,
 };
 use warpui::fonts::{Properties, Weight};
 use warpui::keymap::{ContextPredicate, Keystroke};
 use warpui::platform::Cursor;
-use warpui::ui_components::button::ButtonVariant;
+use warpui::ui_components::button::{ButtonVariant, TextAndIcon, TextAndIconAlignment};
 use warpui::ui_components::components::{Coords, UiComponent, UiComponentStyles};
 use warpui::ui_components::slider::SliderStateHandle;
 use warpui::ui_components::switch::{SwitchStateHandle, TooltipConfig};
@@ -98,8 +98,8 @@ use crate::settings::{
     NaturalLanguageAutosuggestionsEnabled, OrchestrationMessageDisplayMode, PromptSubmissionMode,
     RuleSuggestionsEnabled, SharedBlockTitleGenerationEnabled, ShouldRenderCLIAgentToolbar,
     ShouldRenderUseAgentToolbarForUserCommands, ShouldShowOzUpdatesInZeroState, ShowAgentTips,
-    ShowConversationHistory, ShowHintText, SpinnerVerbsMode, ThinkingDisplayMode, VoiceInputEnabled,
-    WarpDriveContextEnabled,
+    ShowConversationHistory, ShowHintText, SpinnerVerbList, SpinnerVerbsMode, ThinkingDisplayMode,
+    VoiceInputEnabled, WarpDriveContextEnabled,
 };
 use crate::terminal::session_settings::{SessionSettings, SessionSettingsChangedEvent};
 use crate::terminal::CLIAgent;
@@ -111,7 +111,6 @@ use crate::view_components::{
     WarningBoxConfig,
 };
 use crate::workspaces::user_workspaces::UserWorkspacesEvent;
-
 
 /// Identifies which subpage of the AI settings the user is viewing.
 /// When `None`, the page shows all widgets (legacy/full view).
@@ -159,6 +158,7 @@ impl SpinnerVerbMode {
         }
     }
 }
+
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -2094,9 +2094,16 @@ impl AISettingsPageView {
 
     fn save_custom_spinner_verbs_from_editor(&mut self, ctx: &mut ViewContext<Self>) {
         let verbs = self.custom_spinner_verb_editor.as_ref(ctx).buffer_text(ctx);
+        let normalized =
+            SpinnerVerbList::from(verbs.split(',').map(str::to_owned).collect::<Vec<_>>());
         self.custom_spinner_verb_editor_has_user_edits = false;
+        if normalized.is_empty() {
+            self.sync_spinner_verb_state_from_settings(ctx);
+            ctx.notify();
+            return;
+        }
         AISettings::handle(ctx).update(ctx, |settings, ctx| {
-            settings.set_custom_spinner_verbs(verbs.split(',').map(str::to_owned).collect(), ctx);
+            settings.set_custom_spinner_verb_list(normalized, ctx);
         });
         ctx.notify();
     }
@@ -8806,7 +8813,7 @@ impl ApiKeysWidget {
         let appearance = Appearance::as_ref(app);
         let text_fragments = vec![
             FormattedTextFragment::plain_text(
-                "Use your own API keys from model providers for Warp Agent. You can also add custom endpoints to use third-party models. Custom endpoints must support the OpenAI-compatible Chat Completions API. API keys are stored only on your device, never on Warp's servers. They're used to make requests to your chosen model provider. Using auto models or models from providers you have not provided API keys for will consume Warp credits. ",
+                "Use your own API keys from model providers for Warp Agent. You can also add custom endpoints to use third-party models. Custom endpoints must support the OpenAI-compatible Chat Completions API. API keys are stored locally and are never synced to the cloud. Using auto models or models from providers you have not provided API keys for will consume Warp credits. ",
             ),
             FormattedTextFragment::hyperlink("Learn more", CUSTOM_INFERENCE_LEARN_MORE_URL),
         ];

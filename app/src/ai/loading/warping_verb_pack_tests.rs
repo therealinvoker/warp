@@ -1,4 +1,4 @@
-use super::super::{warping_verb::normalize_warping_verbs, MAX_WARPING_VERB_CHARS};
+use super::super::warping_verb::{normalize_warping_verbs, MAX_WARPING_VERB_CHARS};
 use super::*;
 
 #[test]
@@ -36,58 +36,6 @@ fn pack_verbs_survive_normalization_unchanged() {
         assert_eq!(
             original, normalized,
             "pack {:?} verbs changed after normalization",
-            pack
-        );
-    }
-}
-
-#[test]
-fn from_identifier_round_trips() {
-    for pack in WarpingVerbPack::all() {
-        assert_eq!(
-            WarpingVerbPack::from_identifier(pack.identifier()),
-            Some(*pack)
-        );
-    }
-}
-
-#[test]
-fn from_identifier_is_case_insensitive_and_trims() {
-    assert_eq!(
-        WarpingVerbPack::from_identifier("MEDIEVAL"),
-        Some(WarpingVerbPack::Medieval)
-    );
-    assert_eq!(
-        WarpingVerbPack::from_identifier("  cooking  "),
-        Some(WarpingVerbPack::Cooking)
-    );
-    assert_eq!(
-        WarpingVerbPack::from_identifier("  CONSPIRACY  "),
-        Some(WarpingVerbPack::ConspiracyTheorist)
-    );
-    assert_eq!(
-        WarpingVerbPack::from_identifier("  CONPSIRACY  "),
-        Some(WarpingVerbPack::ConspiracyTheorist)
-    );
-    assert_eq!(
-        WarpingVerbPack::from_identifier("WaRpY"),
-        Some(WarpingVerbPack::Warpy)
-    );
-}
-
-#[test]
-fn from_identifier_returns_none_for_unknown() {
-    assert!(WarpingVerbPack::from_identifier("not-a-pack").is_none());
-    assert!(WarpingVerbPack::from_identifier("").is_none());
-}
-
-#[test]
-fn pack_identifiers_are_unique() {
-    let mut seen = std::collections::HashSet::new();
-    for pack in WarpingVerbPack::all() {
-        assert!(
-            seen.insert(pack.identifier()),
-            "duplicate identifier for {:?}",
             pack
         );
     }

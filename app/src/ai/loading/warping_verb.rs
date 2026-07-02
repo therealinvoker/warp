@@ -9,10 +9,12 @@
 use std::cell::RefCell;
 
 use rand::seq::SliceRandom;
+use settings::Setting;
+use unicode_segmentation::UnicodeSegmentation;
 use warp_core::features::FeatureFlag;
 use warpui::{AppContext, SingletonEntity};
 
-use crate::settings::ai::AISettings;
+use crate::settings::ai::{AISettings, SpinnerVerbsMode};
 
 /// Fallback display text shown when no custom verbs are configured.
 pub const DEFAULT_WARPING_VERB: &str = "Warping...";
@@ -59,17 +61,18 @@ pub fn normalize_warping_verb(verb: &str) -> Option<String> {
 }
 
 fn truncate_warping_verb(verb: &str) -> String {
-    // Truncate to MAX_WARPING_VERB_CHARS (chars, not bytes, to avoid splitting
-    // multi-byte codepoints).
-    if verb.chars().count() > MAX_WARPING_VERB_CHARS {
-        verb.chars()
-            .take(MAX_WARPING_VERB_CHARS)
-            .collect::<String>()
-            .trim_end()
-            .to_owned()
-    } else {
-        verb.to_owned()
+    // Truncate to MAX_WARPING_VERB_CHARS grapheme clusters, not bytes or scalar
+    // values, so emoji/ZWJ sequences and combining marks stay intact.
+    let mut graphemes = verb.graphemes(true);
+    let truncated = graphemes
+        .by_ref()
+        .take(MAX_WARPING_VERB_CHARS)
+        .collect::<String>();
+    if graphemes.next().is_none() {
+        return verb.to_owned();
     }
+
+    truncated.trim_end().to_owned()
 }
 
 /// Normalizes a list of verbs: trims, drops empties, truncates over-long
@@ -159,8 +162,47 @@ impl WarpingVerbSelector {
             return DEFAULT_WARPING_VERB.to_owned();
         }
 
-        let verbs = AISettings::as_ref(app).effective_custom_spinner_verbs();
-        self.resolve_from_verbs(session_key, &verbs)
+        let ai_settings = AISettings::as_ref(app);
+        match *ai_settings.spinner_verbs.value() {
+            SpinnerVerbsMode::Default => {
+                self.cached.replace(None);
+                self.normalized_cache.borrow_mut().clear();
+                DEFAULT_WARPING_VERB.to_owned()
+            }
+            SpinnerVerbsMode::Custom => {
+                let verbs = ai_settings.custom_spinner_verbs.value().as_strings();
+                self.resolve_from_verbs(session_key, &verbs)
+            }
+            mode => mode
+                .pack()
+                .map(|pack| self.resolve_from_static_verbs(session_key, pack.verbs()))
+                .unwrap_or_else(|| DEFAULT_WARPING_VERB.to_owned()),
+        }
+    }
+
+    fn resolve_from_static_verbs(&self, session_key: &str, verbs: &[&str]) -> String {
+        // Cache hit: same session. Settings changes take effect on the next
+        // session so one output keeps a single stable verb while it streams.
+        if let Some(cached) = self.cached.borrow().as_ref() {
+            if cached.session_key == session_key {
+                return cached.display.clone();
+            }
+        }
+
+        if verbs.is_empty() {
+            self.cached.replace(None);
+            return DEFAULT_WARPING_VERB.to_owned();
+        }
+
+        let previous_raw = self.cached.borrow().as_ref().map(|c| c.raw.clone());
+        let picked = pick_static_verb(verbs, previous_raw.as_deref());
+        let display = format_for_display(&picked);
+        self.cached.replace(Some(CachedVerb {
+            session_key: session_key.to_owned(),
+            raw: picked,
+            display: display.clone(),
+        }));
+        display
     }
 
     fn resolve_from_verbs(&self, session_key: &str, verbs: &[String]) -> String {
@@ -217,6 +259,29 @@ fn pick_verb(verbs: &[String], previous: Option<&str>) -> String {
         .choose(&mut rng)
         .cloned()
         .unwrap_or_else(|| verbs[0].clone())
+}
+
+/// Picks a verb from static preset pack `verbs` that ideally differs from
+/// `previous`. Assumes `verbs` is non-empty.
+fn pick_static_verb(verbs: &[&str], previous: Option<&str>) -> String {
+    debug_assert!(!verbs.is_empty());
+    let mut rng = rand::thread_rng();
+    if verbs.len() == 1 {
+        return verbs[0].to_owned();
+    }
+    if let Some(prev) = previous {
+        let candidates: Vec<&&str> = verbs.iter().filter(|v| **v != prev).collect();
+        if !candidates.is_empty() {
+            return candidates
+                .choose(&mut rng)
+                .map(|v| (**v).to_owned())
+                .unwrap_or_else(|| verbs[0].to_owned());
+        }
+    }
+    verbs
+        .choose(&mut rng)
+        .map(|v| (*v).to_owned())
+        .unwrap_or_else(|| verbs[0].to_owned())
 }
 
 #[cfg(test)]

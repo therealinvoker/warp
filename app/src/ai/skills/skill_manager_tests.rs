@@ -2,7 +2,10 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
 
-use ai::skills::{get_provider_for_path, ParsedSkill, SkillProvider, SkillReference, SkillScope};
+use ai::skills::{
+    get_provider_for_path, parse_bundled_skill, ParsedSkill, SkillProvider, SkillReference,
+    SkillScope,
+};
 use repo_metadata::repositories::DetectedRepositories;
 use repo_metadata::{DirectoryWatcher, RepoMetadataModel};
 use tempfile::TempDir;

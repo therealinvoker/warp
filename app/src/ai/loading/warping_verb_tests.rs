@@ -1,3 +1,5 @@
+use unicode_segmentation::UnicodeSegmentation;
+
 use super::*;
 
 #[test]
@@ -79,6 +81,17 @@ fn normalize_verb_respects_multibyte_chars() {
 }
 
 #[test]
+fn normalize_verb_truncates_on_grapheme_boundary() {
+    let emoji = "👩‍💻";
+    let verb = emoji.repeat(MAX_WARPING_VERB_CHARS + 5);
+
+    let result = normalize_warping_verb(&verb).unwrap();
+
+    assert_eq!(result.graphemes(true).count(), MAX_WARPING_VERB_CHARS);
+    assert_eq!(result, emoji.repeat(MAX_WARPING_VERB_CHARS));
+}
+
+#[test]
 fn normalize_verbs_caps_list_length_and_drops_empties() {
     let input: Vec<String> = (0..(MAX_CUSTOM_WARPING_VERBS + 10))
         .map(|i| format!("Verb {i}"))
@@ -141,6 +154,16 @@ fn pick_verb_returns_a_valid_entry_when_previous_absent() {
     for _ in 0..20 {
         let picked = pick_verb(&verbs, None);
         assert!(verbs.contains(&picked));
+    }
+}
+
+#[test]
+fn pick_static_verb_avoids_previous_when_alternatives_exist() {
+    let verbs = ["a", "b", "c"];
+    for _ in 0..100 {
+        let picked = pick_static_verb(&verbs, Some("a"));
+        assert_ne!(picked, "a");
+        assert!(verbs.contains(&picked.as_str()));
     }
 }
 
