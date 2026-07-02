@@ -3762,6 +3762,8 @@ impl TerminalView {
                 None, // current_repo_path - will be set when CWD is determined
                 model_events_handle.clone(),
                 agent_view_controller.clone(),
+                // Pass the model in so `Input::new` self-wires internally through
+                // `attach_ambient_agent_view_model` (the same setter the lazy viewer path uses).
                 ambient_agent_view_model.clone(),
                 active_session.clone(),
                 ephemeral_message_model.clone(),
@@ -3793,11 +3795,6 @@ impl TerminalView {
             }
             BlocklistAIStatusBarEvent::Stop => me.ctrl_c(ctx),
         });
-        if let Some(ambient_agent_view_model) = ambient_agent_view_model.as_ref() {
-            ctx.subscribe_to_model(ambient_agent_view_model, |me, _, event, ctx| {
-                me.handle_ambient_agent_event(event, ctx);
-            });
-        }
 
         let ai_render_context = Rc::new(RefCell::new(BlocklistAIRenderContext {
             block_ids: HashMap::from_iter([
@@ -4397,7 +4394,8 @@ impl TerminalView {
             orchestration_pill_bar,
             is_orchestration_split_off: false,
             is_using_conversation_for_pane_header_title: false,
-            ambient_agent_view_model,
+            // Wired after construction via `wire_ambient_agent_view_model`.
+            ambient_agent_view_model: None,
             conversation_details_panel,
             is_conversation_details_panel_open: false,
             has_auto_opened_conversation_details_panel: false,
@@ -4420,6 +4418,14 @@ impl TerminalView {
                 .add_model(|ctx| PtyRecorder::new(inactive_pty_reads_rx, window_id, ctx)),
             active_viewer_driven_size: None,
         };
+        // Wire the ambient view model through the same helper the lazy `SessionJoined` viewer
+        // path uses, so the field, event subscription, and input attach stay in one place and
+        // cannot drift. `Input::new` already self-wired its own subtree from the model passed
+        // above, so the `input.attach` reached here is an idempotent no-op on this path; it does
+        // the real work only on the lazy viewer path, where the input was built without a model.
+        if let Some(ambient_agent_view_model) = ambient_agent_view_model {
+            terminal_view.wire_ambient_agent_view_model(ambient_agent_view_model, ctx);
+        }
         terminal_view.register_subscriptions_for_use_agent_footer(ctx);
 
         // Forward RemoteServerManager setup events into the terminal event stream
@@ -7921,23 +7927,29 @@ impl TerminalView {
         );
         let model = ctx
             .add_model(|ctx| ambient_agent::AmbientAgentViewModel::new(terminal_view_id, ctx));
-        self.ambient_agent_view_model = Some(model.clone());
-        // Route this model's events (FollowupDispatched, SessionReady, DispatchedAgent, ...)
-        // through `handle_ambient_agent_event`, mirroring the upfront construction path
-        // (see the `ambient_agent_view_model` subscription in `TerminalView::new`). Without
-        // this, a lazily-created viewer model never drives the setup-command group reset or
-        // the queued follow-up prompt UI. The early return above guarantees this runs once.
-        ctx.subscribe_to_model(&model, |me, _, event, ctx| {
-            me.handle_ambient_agent_event(event, ctx);
-        });
-        let model_for_input = model.clone();
-        self.input.update(ctx, |input, ctx| {
-            input.attach_ambient_agent_view_model(model_for_input, ctx);
-        });
+        self.wire_ambient_agent_view_model(model.clone(), ctx);
         // Notify observers (e.g. `PaneGroup::create_shared_session_viewer`) that the model
         // now exists so they can wire the viewer `TerminalManager` to its session events.
         ctx.emit(Event::AmbientAgentViewModelCreated);
         model
+    }
+
+    /// Wires an ambient agent view model into this terminal view: stores it, routes its events to
+    /// [`Self::handle_ambient_agent_event`], and attaches it to the input. The single wiring point
+    /// shared by the upfront construction path (`TerminalView::new`) and the lazy `SessionJoined`
+    /// path (`ensure_ambient_agent_view_model`) so the two cannot drift.
+    fn wire_ambient_agent_view_model(
+        &mut self,
+        model: ModelHandle<ambient_agent::AmbientAgentViewModel>,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        self.ambient_agent_view_model = Some(model.clone());
+        ctx.subscribe_to_model(&model, |me, _, event, ctx| {
+            me.handle_ambient_agent_event(event, ctx);
+        });
+        self.input.update(ctx, |input, ctx| {
+            input.attach_ambient_agent_view_model(model.clone(), ctx);
+        });
     }
 
     /// Begins viewing an existing ambient (cloud) run in this shared-session viewer pane.

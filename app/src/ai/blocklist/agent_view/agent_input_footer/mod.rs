@@ -314,6 +314,16 @@ impl AgentInputFooter {
         });
         self.environment_selector = Some(environment_selector);
 
+        // Push the model into the V2 model selector chip, which was built with `None` at
+        // construction. Uses the `ModelSelector` setter so construction and lazy attach wire it
+        // identically.
+        if let Some(v2_model_selector) = self.v2_model_selector.clone() {
+            let v2_selector_model = ambient_agent_view_model.clone();
+            v2_model_selector.update(ctx, |selector, ctx| {
+                selector.set_ambient_agent_view_model(v2_selector_model, ctx);
+            });
+        }
+
         // Re-render on ambient model events (mirrors `new`).
         ctx.subscribe_to_model(&ambient_agent_view_model, |_, _, _, ctx| {
             ctx.notify();
@@ -696,11 +706,13 @@ impl AgentInputFooter {
         });
 
         let profile_model_selector_full = ctx.add_typed_action_view(|ctx| {
+            // Built without the ambient model; the footer's ambient setter attaches it (for both
+            // construction and the lazy viewer path) via `ProfileModelSelector::set_ambient_agent_view_model`.
             let mut selector = ProfileModelSelector::new(
                 menu_positioning_provider.clone(),
                 terminal_view_id,
                 ai_input_model,
-                ambient_agent_view_model.clone(),
+                None,
                 terminal_model.clone(),
                 None,
                 ctx,
@@ -713,18 +725,8 @@ impl AgentInputFooter {
             me.handle_profile_model_selector_event(event, ctx);
         });
 
-        let environment_selector =
-            ambient_agent_view_model
-                .as_ref()
-                .map(|ambient_agent_view_model| {
-                    ctx.add_typed_action_view(|ctx| {
-                        EnvironmentSelector::new(
-                            menu_positioning_provider.clone(),
-                            EnvironmentSelectorTarget::CloudPane(ambient_agent_view_model.clone()),
-                            ctx,
-                        )
-                    })
-                });
+        // Built by the ambient setter (construction + lazy viewer path share that single point).
+        let environment_selector: Option<ViewHandle<EnvironmentSelector>> = None;
 
         let handoff_environment_selector = ctx.add_typed_action_view(|ctx| {
             EnvironmentSelector::new(
@@ -733,20 +735,6 @@ impl AgentInputFooter {
                 ctx,
             )
         });
-
-        if let Some(environment_selector) = environment_selector.as_ref() {
-            ctx.subscribe_to_view(environment_selector, |_, _, event, ctx| match event {
-                EnvironmentSelectorEvent::MenuVisibilityChanged { open } => {
-                    ctx.emit(AgentInputFooterEvent::ToggledChipMenu { open: *open });
-                    if !*open {
-                        ctx.emit(AgentInputFooterEvent::EnvironmentSelectorClosed);
-                    }
-                }
-                EnvironmentSelectorEvent::OpenEnvironmentManagementPane => {
-                    ctx.emit(AgentInputFooterEvent::OpenEnvironmentManagementPane);
-                }
-            });
-        }
 
         ctx.subscribe_to_view(
             &handoff_environment_selector,
@@ -762,12 +750,6 @@ impl AgentInputFooter {
                 }
             },
         );
-
-        if let Some(ambient_agent_view_model) = ambient_agent_view_model.as_ref() {
-            ctx.subscribe_to_model(ambient_agent_view_model, |_, _, _, ctx| {
-                ctx.notify();
-            });
-        }
 
         ctx.subscribe_to_model(
             &handoff_compose_state,
@@ -888,14 +870,10 @@ impl AgentInputFooter {
         });
 
         let v2_model_selector = if FeatureFlag::CloudModeInputV2.is_enabled() {
-            let ambient_agent_view_model_for_selector = ambient_agent_view_model.clone();
             let view = ctx.add_typed_action_view(|ctx| {
-                ModelSelector::new(
-                    menu_positioning_provider.clone(),
-                    terminal_view_id,
-                    ambient_agent_view_model_for_selector,
-                    ctx,
-                )
+                // Built without the ambient model; the footer's ambient setter attaches it via the
+                // `ModelSelector` setter so construction and the lazy viewer path share one path.
+                ModelSelector::new(menu_positioning_provider.clone(), terminal_view_id, None, ctx)
             });
             ctx.subscribe_to_view(&view, |_, _, event, ctx| match event {
                 ModelSelectorEvent::MenuVisibilityChanged { open } => {
@@ -913,7 +891,7 @@ impl AgentInputFooter {
 
         let mut me = Self {
             terminal_view_id,
-            ambient_agent_view_model,
+            ambient_agent_view_model: None,
             nld_button,
             mic_button,
             file_button,
@@ -956,6 +934,11 @@ impl AgentInputFooter {
         me.sync_remote_control_button(ctx);
         me.update_context_window_button(ctx);
         me.update_display_chips(&prompt, ctx);
+        // Route ambient wiring through the setter so construction and the lazy shared-session
+        // viewer path share one implementation.
+        if let Some(ambient_agent_view_model) = ambient_agent_view_model {
+            me.set_ambient_agent_view_model(ambient_agent_view_model, menu_positioning_provider, ctx);
+        }
         me
     }
 

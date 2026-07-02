@@ -213,10 +213,16 @@ impl SlashCommandDataSource {
             terminal_view_id,
             active_commands_by_id: Default::default(),
             active_repo_root: None,
-            ambient_agent_view_model,
+            ambient_agent_view_model: None,
             is_cloud_mode_v2,
         };
-        me.recompute_active_commands(ctx);
+        // Route ambient wiring through the setter so construction and the lazy shared-session
+        // viewer path share one implementation.
+        if let Some(ambient_agent_view_model) = ambient_agent_view_model {
+            me.set_ambient_agent_view_model(ambient_agent_view_model, ctx);
+        } else {
+            me.recompute_active_commands(ctx);
+        }
         me
     }
 

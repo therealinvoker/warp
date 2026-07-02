@@ -515,22 +515,6 @@ impl ProfileModelSelector {
             },
         );
 
-        if let Some(ref ambient_model) = ambient_agent_view_model {
-            ctx.subscribe_to_model(ambient_model, |me, _, event, ctx| {
-                use crate::terminal::view::ambient_agent::AmbientAgentViewModelEvent;
-                if matches!(
-                    event,
-                    AmbientAgentViewModelEvent::HarnessSelected
-                        | AmbientAgentViewModelEvent::HarnessModelSelected
-                        | AmbientAgentViewModelEvent::RunLifecycleChanged
-                        | AmbientAgentViewModelEvent::SessionReady { .. }
-                        | AmbientAgentViewModelEvent::FollowupDispatched
-                ) {
-                    me.refresh_state(ctx);
-                }
-            });
-        }
-
         ctx.subscribe_to_model(
             &HarnessAvailabilityModel::handle(ctx),
             |me, _, event, ctx| {
@@ -573,14 +557,20 @@ impl ProfileModelSelector {
             is_blurred: false,
             new_model_popup,
             input_model,
-            ambient_agent_view_model,
+            ambient_agent_view_model: None,
             render_compact: false,
             hovered_llm_info: None,
             manage_api_key_button,
             terminal_model,
             all_model_choices: Vec::new(),
         };
-        me.refresh_state(ctx);
+        // Route ambient wiring through the setter so construction and the lazy shared-session
+        // viewer path share one implementation.
+        if let Some(ambient_agent_view_model) = ambient_agent_view_model {
+            me.set_ambient_agent_view_model(ambient_agent_view_model, ctx);
+        } else {
+            me.refresh_state(ctx);
+        }
         me
     }
 
