@@ -349,6 +349,22 @@ impl PendingEditsSource for CodeDiffViewEditsSource {
     }
 }
 
+/// Logs a failed save of accepted file edits and surfaces an error toast.
+fn show_save_failure_toast(error: &str, ctx: &mut ViewContext<CodeDiffView>) {
+    crate::safe_error!(
+        safe: ("Failed to save accepted AgentMode diffs"),
+        full: ("Failed to save accepted AgentMode diffs: {error}")
+    );
+    let window_id = ctx.window_id();
+    ToastStack::handle(ctx).update(ctx, |toast_stack, ctx| {
+        toast_stack.add_ephemeral_toast(
+            DismissibleToast::error("Failed to save file edits".to_string()),
+            window_id,
+            ctx,
+        );
+    });
+}
+
 #[derive(Clone)]
 pub struct CodeDiffView {
     action_id: AIAgentActionId,
@@ -604,20 +620,7 @@ impl CodeDiffView {
                             RequestFileEditsResult::DiffApplicationFailed { error },
                         ) = &result.result
                         {
-                            crate::safe_error!(
-                                safe: ("Failed to save accepted AgentMode diffs"),
-                                full: ("Failed to save accepted AgentMode diffs: {error}")
-                            );
-                            let window_id = ctx.window_id();
-                            ToastStack::handle(ctx).update(ctx, |toast_stack, ctx| {
-                                toast_stack.add_ephemeral_toast(
-                                    DismissibleToast::error(
-                                        "Failed to save file edits".to_string(),
-                                    ),
-                                    window_id,
-                                    ctx,
-                                );
-                            });
+                            show_save_failure_toast(error, ctx);
                         }
                     }
                 }
@@ -637,6 +640,25 @@ impl CodeDiffView {
                             } else if status.is_cancelled() {
                                 me.state = CodeDiffState::Rejected;
                                 me.should_expand_when_complete = false;
+                            } else if status.is_success()
+                                || (status.is_failed() && !me.pending_diffs.is_empty())
+                            {
+                                // Terminal result without a user accept click
+                                // (autoexecution): stop offering Accept for edits that
+                                // already executed. A failed persist of claimed diffs
+                                // also surfaces the save-failure toast; a failure with
+                                // no claimed diffs is a preprocess failure — nothing
+                                // executed, so the view stays as-is.
+                                if let AIActionStatus::Finished(result) = &status {
+                                    if let AIAgentActionResultType::RequestFileEdits(
+                                        RequestFileEditsResult::DiffApplicationFailed { error },
+                                    ) = &result.result
+                                    {
+                                        show_save_failure_toast(error, ctx);
+                                    }
+                                }
+                                me.state = CodeDiffState::Accepted;
+                                me.minimize(ctx);
                             }
                             ctx.notify();
                         }
@@ -2203,6 +2225,7 @@ impl CodeDiffView {
                 Some(ClaimedEdit {
                     diff: FileDiff::new(base_content, path, op),
                     final_content,
+                    was_edited: diff_view.was_edited(),
                 })
             })
             .collect();

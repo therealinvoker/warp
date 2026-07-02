@@ -44,6 +44,8 @@ struct ResolvedFileEdit {
     base_content: String,
     op: DiffType,
     final_content: String,
+    /// Whether the user hand-edited the content during review.
+    was_edited: bool,
 }
 
 pub(crate) struct PersistDiffModel {
@@ -207,8 +209,9 @@ struct PersistBatch {
 #[cfg(not(target_family = "wasm"))]
 struct PersistOutcome {
     diff: DiffResult,
-    /// `(file location, final content)` for created/updated files; `None` for deletes.
-    updated: Option<(FileLocations, String)>,
+    /// `(file location, final content, user-edited flag)` for created/updated
+    /// files; `None` for deletes.
+    updated: Option<(FileLocations, String, bool)>,
     /// Paths reported as deleted (the deleted file, or a rename's source path).
     deleted: Vec<String>,
 }
@@ -259,11 +262,19 @@ fn dispatch_file(
         base_content,
         op,
         final_content,
+        was_edited,
     } = file;
 
     let action = PersistAction::resolve(&op, session_type, &path);
     let changed_lines = changed_lines_from_op(&op);
-    let outcome = outcome_for_action(&action, &path, &base_content, &final_content, changed_lines);
+    let outcome = outcome_for_action(
+        &action,
+        &path,
+        &base_content,
+        &final_content,
+        changed_lines,
+        was_edited,
+    );
 
     let file_id = match register_file(file_model, session_type, &path, ctx) {
         Ok(file_id) => file_id,
@@ -295,6 +306,7 @@ fn outcome_for_action(
     base_content: &str,
     final_content: &str,
     changed_lines: Vec<Range<usize>>,
+    was_edited: bool,
 ) -> PersistOutcome {
     match action {
         PersistAction::Delete => PersistOutcome {
@@ -312,6 +324,7 @@ fn outcome_for_action(
                         lines: changed_lines,
                     },
                     final_content.to_owned(),
+                    was_edited,
                 )),
                 deleted: vec![path.to_owned()],
             }
@@ -324,6 +337,7 @@ fn outcome_for_action(
                     lines: changed_lines,
                 },
                 final_content.to_owned(),
+                was_edited,
             )),
             deleted: Vec::new(),
         },
@@ -375,9 +389,9 @@ fn assemble_result(
 
     for outcome in outcomes {
         combined += &outcome.diff;
-        if let Some((file_location, content)) = outcome.updated {
+        if let Some((file_location, content, was_edited)) = outcome.updated {
             content_map.insert(file_location.name.clone(), content);
-            updated_files.push((file_location, false));
+            updated_files.push((file_location, was_edited));
         }
         deleted_files.extend(outcome.deleted);
     }
@@ -435,6 +449,7 @@ fn build_resolved_edits(edits: Vec<ClaimedEdit>) -> Result<Vec<ResolvedFileEdit>
     for ClaimedEdit {
         diff,
         final_content,
+        was_edited,
     } in edits
     {
         let path = diff.file_path();
@@ -449,6 +464,7 @@ fn build_resolved_edits(edits: Vec<ClaimedEdit>) -> Result<Vec<ResolvedFileEdit>
             base_content,
             op,
             final_content,
+            was_edited,
         });
     }
     Ok(resolved)

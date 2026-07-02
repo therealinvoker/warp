@@ -20,6 +20,7 @@ fn unreviewed(diff: FileDiff) -> ClaimedEdit {
     ClaimedEdit {
         diff,
         final_content: None,
+        was_edited: false,
     }
 }
 
@@ -126,11 +127,16 @@ fn persist_prefers_final_content_over_deltas() {
                     ),
                 ),
                 final_content: Some("user edited\n".to_owned()),
+                was_edited: true,
             }],
         )
         .await;
 
-        assert!(matches!(result, RequestFileEditsResult::Success { .. }));
+        let RequestFileEditsResult::Success { updated_files, .. } = result else {
+            panic!("expected success");
+        };
+        assert!(!updated_files.is_empty());
+        assert!(updated_files.iter().all(|file| file.was_edited_by_user));
         assert_eq!(fs::read_to_string(&path).unwrap(), "user edited\n");
     });
 }
@@ -249,9 +255,16 @@ fn remote_rename_outcome_reports_update_at_original_path() {
         &DiffSessionType::Remote(HostId::new("host".to_owned())),
         "/tmp/old.rs",
     );
-    let outcome = outcome_for_action(&action, "/tmp/old.rs", "content\n", "content!\n", vec![]);
+    let outcome = outcome_for_action(
+        &action,
+        "/tmp/old.rs",
+        "content\n",
+        "content!\n",
+        vec![],
+        false,
+    );
 
-    let (file_location, _) = outcome.updated.expect("expected an updated file");
+    let (file_location, _, _) = outcome.updated.expect("expected an updated file");
     assert_eq!(file_location.name, "/tmp/old.rs");
     assert_eq!(outcome.deleted, Vec::<String>::new());
 }
@@ -299,11 +312,13 @@ fn build_resolved_edits_prefers_final_content() {
     let resolved = build_resolved_edits(vec![ClaimedEdit {
         diff,
         final_content: Some("user edited\n".to_owned()),
+        was_edited: true,
     }])
     .unwrap();
 
     assert_eq!(resolved.len(), 1);
     assert_eq!(resolved[0].final_content, "user edited\n");
+    assert!(resolved[0].was_edited);
 }
 
 #[test]

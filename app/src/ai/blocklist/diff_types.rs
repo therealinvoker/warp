@@ -86,6 +86,8 @@ pub struct ClaimedEdit {
     /// it). `None` when the surface doesn't materialize buffers; persistence
     /// then applies `diff`'s deltas to the base content.
     pub final_content: Option<String>,
+    /// Whether the user hand-edited this file's content during review.
+    pub was_edited: bool,
 }
 
 /// The full set of edits for one `RequestFileEdits` action at execute time.

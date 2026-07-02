@@ -189,6 +189,7 @@ fn execute_pulls_claimed_edits_from_the_source() {
                 edits: vec![ClaimedEdit {
                     diff: test_diff(),
                     final_content: Some("user edited\n".to_owned()),
+                    was_edited: true,
                 }],
                 session_type: DiffSessionType::Local,
             })),

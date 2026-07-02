@@ -222,6 +222,7 @@ impl RequestFileEditsExecutor {
                         .map(|diff| ClaimedEdit {
                             diff,
                             final_content: None,
+                            was_edited: false,
                         })
                         .collect(),
                     session_type,
