@@ -47,10 +47,10 @@ pub enum RequestFileEditsExecutorEvent {
 
 /// Per-action state carried from `preprocess_action` to `execute`.
 enum PendingFileEdits {
-    /// Diffs resolved and ready to persist. `reviewed` holds GUI-supplied final
-    /// content per file (keyed by path) when a review surface edited/accepted
-    /// them; `None` on headless surfaces, where final content is derived from
-    /// the diff's deltas.
+    /// Diffs resolved and ready to persist. `reviewed` holds the final content
+    /// per file (keyed by path) when a review surface edited/accepted them;
+    /// `None` when no surface supplied content, in which case final content is
+    /// derived from the diff's deltas.
     Prepared {
         diffs: Vec<FileDiff>,
         session_type: DiffSessionType,
@@ -64,7 +64,7 @@ pub struct RequestFileEditsExecutor {
     active_session: ModelHandle<ActiveSession>,
     apply_diff_model: ModelHandle<ApplyDiffModel>,
     /// Per-action state produced by preprocess and consumed by execute.
-    pending: HashMap<AIAgentActionId, PendingFileEdits>,
+    pending_file_edits: HashMap<AIAgentActionId, PendingFileEdits>,
     terminal_view_id: EntityId,
 }
 
@@ -78,7 +78,7 @@ impl RequestFileEditsExecutor {
         Self {
             active_session,
             apply_diff_model,
-            pending: HashMap::new(),
+            pending_file_edits: HashMap::new(),
             terminal_view_id,
         }
     }
@@ -122,7 +122,7 @@ impl RequestFileEditsExecutor {
         // If we don't do this, a failed diff application will block execution of the entire AI conversation
         // without any possibility of recovery.
         if matches!(
-            self.pending.get(&input.action.id),
+            self.pending_file_edits.get(&input.action.id),
             Some(PendingFileEdits::Failed(_))
         ) {
             return true;
@@ -133,14 +133,16 @@ impl RequestFileEditsExecutor {
             .is_allowed()
     }
 
-    /// Records the GUI-reviewed final content for an action before it executes.
-    /// Keyed by file path; consumed by `execute` on the review (GUI) path.
+    /// Records the reviewed final content for an action before it executes.
+    /// Keyed by file path; consumed by `execute`.
     pub fn set_reviewed_content(
         &mut self,
         action_id: &AIAgentActionId,
         files: HashMap<String, String>,
     ) {
-        if let Some(PendingFileEdits::Prepared { reviewed, .. }) = self.pending.get_mut(action_id) {
+        if let Some(PendingFileEdits::Prepared { reviewed, .. }) =
+            self.pending_file_edits.get_mut(action_id)
+        {
             *reviewed = Some(files);
         }
     }
@@ -151,7 +153,7 @@ impl RequestFileEditsExecutor {
         &self,
         action_id: &AIAgentActionId,
     ) -> Option<(Vec<FileDiff>, DiffSessionType)> {
-        match self.pending.get(action_id) {
+        match self.pending_file_edits.get(action_id) {
             Some(PendingFileEdits::Prepared {
                 diffs,
                 session_type,
@@ -179,7 +181,7 @@ impl RequestFileEditsExecutor {
             return ActionExecution::InvalidAction;
         };
 
-        let (diffs, session_type, reviewed) = match self.pending.remove(id) {
+        let (diffs, session_type, reviewed) = match self.pending_file_edits.remove(id) {
             Some(PendingFileEdits::Prepared {
                 diffs,
                 session_type,
@@ -207,7 +209,8 @@ impl RequestFileEditsExecutor {
         let passive_diff = BlocklistAIHistoryModel::as_ref(ctx)
             .is_entirely_passive_conversation(&input.conversation_id);
 
-        // GUI review supplies final content per path; headless applies the diff deltas.
+        // A review surface may have supplied final content per path; for paths without
+        // reviewed content, persistence applies the diff deltas to the base content.
         let reviewed = reviewed.unwrap_or_default();
         let result_future = PersistDiffModel::handle(ctx).update(ctx, |model, ctx| {
             model.resolve_and_persist(diffs, reviewed, session_type, ctx)
@@ -311,7 +314,7 @@ impl RequestFileEditsExecutor {
             Ok(_) => {
                 // We didn't generate any diffs--consider this a failure.
                 log::warn!("No diffs generated");
-                self.pending.insert(
+                self.pending_file_edits.insert(
                     id,
                     PendingFileEdits::Failed(vec1![DiffApplicationError::EmptyDiff]),
                 );
@@ -322,7 +325,7 @@ impl RequestFileEditsExecutor {
                     safe: ("Failed to generate diffs"),
                     full: ("Failed to generate diffs {err:?}")
                 );
-                self.pending.insert(id, PendingFileEdits::Failed(err));
+                self.pending_file_edits.insert(id, PendingFileEdits::Failed(err));
                 return;
             }
         };
@@ -346,7 +349,7 @@ impl RequestFileEditsExecutor {
         }
 
         let session_type = self.resolve_diff_session_type(ctx);
-        self.pending.insert(
+        self.pending_file_edits.insert(
             id.clone(),
             PendingFileEdits::Prepared {
                 diffs,

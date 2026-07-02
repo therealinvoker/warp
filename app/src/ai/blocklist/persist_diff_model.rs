@@ -62,6 +62,7 @@ impl PersistDiffModel {
         ctx.subscribe_to_model(&FileModel::handle(ctx), |me, _, event, ctx| {
             me.handle_file_model_event(event, ctx);
         });
+
         Self {
             #[cfg(not(target_family = "wasm"))]
             batches: Vec::new(),

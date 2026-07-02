@@ -3236,6 +3236,7 @@ impl AIBlock {
                     executor.update(ctx, |executor, _| {
                         executor.set_reviewed_content(&action_id_clone, reviewed);
                     });
+
                     me.action_model.update(ctx, |action_model, ctx| {
                         action_model.execute_action(
                             &action_id_clone,

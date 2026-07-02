@@ -586,10 +586,24 @@ impl CodeDiffView {
                             RequestFileEditsResult::DiffApplicationFailed { error },
                         ) = &result.result
                         {
-                            me.show_save_failure_toast(error, ctx);
+                            crate::safe_error!(
+                                safe: ("Failed to save accepted AgentMode diffs"),
+                                full: ("Failed to save accepted AgentMode diffs: {error}")
+                            );
+                            let window_id = ctx.window_id();
+                            ToastStack::handle(ctx).update(ctx, |toast_stack, ctx| {
+                                toast_stack.add_ephemeral_toast(
+                                    DismissibleToast::error(
+                                        "Failed to save file edits".to_string(),
+                                    ),
+                                    window_id,
+                                    ctx,
+                                );
+                            });
                         }
                     }
                 }
+
                 BlocklistAIActionEvent::FinishedAction { action_id, .. } if !me.is_complete() => {
                     match action_model.as_ref(ctx).get_action_status(&me.action_id) {
                         Some(AIActionStatus::Blocked) => {
@@ -2171,22 +2185,6 @@ impl CodeDiffView {
                 Some((path, content))
             })
             .collect()
-    }
-
-    /// Shows the save-failure toast for edits that failed to persist after accept.
-    fn show_save_failure_toast(&self, error: &str, ctx: &mut ViewContext<Self>) {
-        crate::safe_error!(
-            safe: ("Failed to save accepted AgentMode diffs"),
-            full: ("Failed to save accepted AgentMode diffs: {error}")
-        );
-        let window_id = ctx.window_id();
-        ToastStack::handle(ctx).update(ctx, |toast_stack, ctx| {
-            toast_stack.add_ephemeral_toast(
-                DismissibleToast::error("Failed to save file edits".to_string()),
-                window_id,
-                ctx,
-            );
-        });
     }
 
     /// Emits the malformed-final-line proxy telemetry, computed from editor state
