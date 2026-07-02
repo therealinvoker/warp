@@ -41,11 +41,6 @@ pub(crate) use action_model::{
     StartAgentRequest, StartAgentRequestId,
 };
 pub use action_model::{BlocklistAIActionModel, ShellCommandExecutor, ShellCommandExecutorEvent};
-// Consumed by `tui_export` for the `warp_tui` frontend.
-#[cfg(feature = "tui")]
-pub use action_model::{
-    PendingEditsSource, RequestFileEditsExecutor, RequestFileEditsExecutorEvent,
-};
 #[cfg(any(test, feature = "integration_tests"))]
 pub(crate) use block::model::testing::FakeAIBlockModel;
 pub(crate) use block::{init, model, AIBlock, AIBlockEvent, RequestedEditResolution};

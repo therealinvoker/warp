@@ -8,16 +8,15 @@ use std::sync::Arc;
 use parking_lot::FairMutex;
 use warp::tui_export::{
     should_show_task_in_blocklist, AIAgentExchangeId, AIBlockModelImpl, AIConversationId,
-    BlocklistAIActionModel, BlocklistAIHistoryEvent, BlocklistAIHistoryModel, RichContentItem,
-    RichContentType, TerminalModel,
+    BlocklistAIHistoryEvent, BlocklistAIHistoryModel, RichContentItem, RichContentType,
+    TerminalModel,
 };
 use warpui_core::elements::tui::{
     TuiElement, TuiScrollable, TuiViewportVerticalAlignment, TuiViewportedList,
     TuiViewportedListState,
 };
 use warpui_core::{
-    AppContext, Entity, EntityId, ModelHandle, SingletonEntity, TuiView, TypedActionView,
-    ViewContext,
+    AppContext, Entity, EntityId, SingletonEntity, TuiView, TypedActionView, ViewContext,
 };
 
 use super::agent_block::TuiAIBlock;
@@ -27,7 +26,6 @@ use super::tui_block_list_viewport_source::{AgentBlockRegistry, TuiBlockListView
 pub(super) struct TuiTranscriptView {
     terminal_surface_id: EntityId,
     model: Arc<FairMutex<TerminalModel>>,
-    action_model: ModelHandle<BlocklistAIActionModel>,
     agent_blocks: AgentBlockRegistry,
     viewport: TuiViewportedListState,
 }
@@ -37,7 +35,6 @@ impl TuiTranscriptView {
     pub(super) fn new(
         terminal_surface_id: EntityId,
         model: Arc<FairMutex<TerminalModel>>,
-        action_model: ModelHandle<BlocklistAIActionModel>,
         ctx: &mut ViewContext<Self>,
     ) -> Self {
         ctx.subscribe_to_model(
@@ -48,7 +45,6 @@ impl TuiTranscriptView {
         Self {
             terminal_surface_id,
             model,
-            action_model,
             agent_blocks: Rc::new(RefCell::new(HashMap::new())),
             viewport: TuiViewportedListState::new_at_end(),
         }
@@ -161,10 +157,7 @@ impl TuiTranscriptView {
         };
 
         let block_model = Rc::new(block_model);
-        let action_model = self.action_model.clone();
-        let view = ctx.add_tui_view(|ctx| {
-            TuiAIBlock::new(conversation_id, exchange_id, block_model, action_model, ctx)
-        });
+        let view = ctx.add_tui_view(|_| TuiAIBlock::new(conversation_id, exchange_id, block_model));
         let view_id = view.id();
         self.agent_blocks.borrow_mut().insert(view_id, view);
         self.model.lock().block_list_mut().append_rich_content(

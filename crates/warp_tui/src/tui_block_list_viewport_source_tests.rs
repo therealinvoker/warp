@@ -20,7 +20,6 @@ use warpui_core::{App, AppContext, Entity, TuiView, TypedActionView, ViewContext
 use super::{AgentBlockRegistry, TuiBlockListViewportItemId, TuiBlockListViewportSource};
 use crate::agent_block::TuiAIBlock;
 use crate::terminal_block::should_render_terminal_block;
-use crate::test_fixtures::add_test_action_model;
 
 #[test]
 fn tui_block_list_viewport_source_uses_canonical_block_list_order() {
@@ -228,7 +227,6 @@ fn request_top_window(
 /// window and returns its handle.
 fn add_agent_block(app: &mut App, query: &str) -> ViewHandle<TuiAIBlock> {
     let query = query.to_owned();
-    let action_model = add_test_action_model(app);
     app.update(|ctx| {
         let (window_id, _) = ctx.add_tui_window(
             AddWindowOptions {
@@ -237,15 +235,13 @@ fn add_agent_block(app: &mut App, query: &str) -> ViewHandle<TuiAIBlock> {
             },
             |_| TestHostView,
         );
-        ctx.add_tui_view(window_id, move |ctx| {
+        ctx.add_tui_view(window_id, move |_| {
             TuiAIBlock::new(
                 AIConversationId::new(),
                 AIAgentExchangeId::new(),
                 Rc::new(QueryAgentBlockModel {
                     inputs: vec![query_input(&query)],
                 }),
-                action_model,
-                ctx,
             )
         })
     })

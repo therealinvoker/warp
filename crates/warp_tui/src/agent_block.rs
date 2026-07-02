@@ -1,11 +1,10 @@
 //! An agent block in the TUI transcript: one exchange rendered as the user's
 //! submitted input followed by the agent's response.
-use std::collections::HashMap;
 use std::rc::Rc;
 
 use warp::tui_export::{
-    AIAgentAction, AIAgentActionId, AIAgentActionType, AIAgentExchangeId, AIAgentOutputMessageType,
-    AIAgentTextSection, AIBlockModel, AIConversationId, Appearance, BlocklistAIActionModel,
+    AIAgentAction, AIAgentExchangeId, AIAgentOutputMessageType, AIAgentTextSection, AIBlockModel,
+    AIConversationId, Appearance,
 };
 use warp_core::ui::color::blend::Blend;
 // `ThemeFill` is the theme-layer color (it supports blend/opacity); `Fill` below
@@ -13,15 +12,11 @@ use warp_core::ui::color::blend::Blend;
 use warp_core::ui::theme::Fill as ThemeFill;
 use warpui::SingletonEntity;
 use warpui_core::elements::tui::{
-    Modifier, TuiChildView, TuiConstraint, TuiContainer, TuiElement, TuiFlex, TuiLayoutContext,
+    Modifier, TuiConstraint, TuiContainer, TuiElement, TuiFlex, TuiLayoutContext,
     TuiParentElement, TuiSize, TuiStyle, TuiText,
 };
 use warpui_core::elements::Fill;
-use warpui_core::{
-    AppContext, Entity, EntityId, EntityIdMap, ModelHandle, TuiView, ViewContext, ViewHandle,
-};
-
-use super::tui_file_edits_view::TuiFileEditsView;
+use warpui_core::{AppContext, Entity, EntityIdMap, TuiView};
 
 const INPUT_PREFIX: &str = "≫ ";
 
@@ -34,31 +29,6 @@ enum TuiAIBlockSection {
     ToolCall(Box<AIAgentAction>),
 }
 
-/// A registered per-action child view for a stateful tool call.
-///
-/// Stateless tool calls render as pure elements in
-/// [`TuiAIBlockSection::render_element`]; a tool type gets a variant here only
-/// when it needs owned state or interactivity.
-enum TuiToolCallView {
-    FileEdits(ViewHandle<TuiFileEditsView>),
-}
-
-impl TuiToolCallView {
-    /// The registered view's entity id, for [`TuiView::child_view_ids`].
-    fn view_id(&self) -> EntityId {
-        match self {
-            Self::FileEdits(view) => view.id(),
-        }
-    }
-
-    /// Renders the registered child view into the block's element tree.
-    fn render_child(&self) -> TuiChildView {
-        match self {
-            Self::FileEdits(view) => TuiChildView::new(view),
-        }
-    }
-}
-
 /// A thin TUI rich-content view adapter backed by one agent exchange.
 ///
 /// The rendering logic is mostly section extraction, but the shared block list
@@ -67,76 +37,20 @@ pub(super) struct TuiAIBlock {
     conversation_id: AIConversationId,
     exchange_id: AIAgentExchangeId,
     model: Rc<dyn AIBlockModel<View = Self>>,
-    /// Stateful per-action child views, keyed by tool-call action id.
-    /// Populated by [`Self::sync_action_views`]; stateless tool calls never
-    /// get entries here.
-    action_views: HashMap<AIAgentActionId, TuiToolCallView>,
 }
 
 /// Extracts model state into renderable agent block sections.
 impl TuiAIBlock {
-    /// Creates an exchange-backed agent block. Like the GUI `AIBlock`, the
-    /// block wires itself to its model at construction: it syncs per-action
-    /// child views for tool calls already present, then re-syncs whenever the
-    /// exchange's output updates (via `on_updated_output`).
+    /// Creates a simple exchange-backed agent block.
     pub(super) fn new(
         conversation_id: AIConversationId,
         exchange_id: AIAgentExchangeId,
         model: Rc<dyn AIBlockModel<View = Self>>,
-        action_model: ModelHandle<BlocklistAIActionModel>,
-        ctx: &mut ViewContext<Self>,
     ) -> Self {
-        let mut block = Self {
+        Self {
             conversation_id,
             exchange_id,
             model,
-            action_views: HashMap::new(),
-        };
-        block.sync_action_views(&action_model, ctx);
-        block.model.on_updated_output(
-            Box::new(move |me, ctx| {
-                me.sync_action_views(&action_model, ctx);
-            }),
-            ctx,
-        );
-        block
-    }
-
-    /// Creates child views for stateful tool calls that don't have one yet.
-    /// Rendering can't create views since it only sees `&AppContext`.
-    fn sync_action_views(
-        &mut self,
-        action_model: &ModelHandle<BlocklistAIActionModel>,
-        ctx: &mut ViewContext<Self>,
-    ) {
-        let status = self.model.status(ctx);
-        let file_edit_action_ids: Vec<AIAgentActionId> = status
-            .output_to_render()
-            .map(|output| {
-                output
-                    .get()
-                    .messages
-                    .iter()
-                    .filter_map(|message| {
-                        let AIAgentOutputMessageType::Action(action) = &message.message else {
-                            return None;
-                        };
-                        matches!(action.action, AIAgentActionType::RequestFileEdits { .. })
-                            .then(|| action.id.clone())
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        for action_id in file_edit_action_ids {
-            if self.action_views.contains_key(&action_id) {
-                continue;
-            }
-            let view =
-                ctx.add_tui_view(|ctx| TuiFileEditsView::new(action_id.clone(), action_model, ctx));
-            self.action_views
-                .insert(action_id, TuiToolCallView::FileEdits(view));
-            ctx.notify();
         }
     }
 
@@ -244,21 +158,7 @@ impl TuiAIBlock {
             let follows_input = index
                 .checked_sub(1)
                 .is_some_and(|prev| matches!(sections[prev], TuiAIBlockSection::Input(_)));
-            let top_padding = u16::from(follows_input);
-            // Stateful tool calls render their registered child view; every
-            // other section stays a pure render fn.
-            let element = match section {
-                TuiAIBlockSection::ToolCall(action) => match self.action_views.get(&action.id) {
-                    Some(view) => TuiContainer::new(view.render_child())
-                        .with_padding_top(top_padding)
-                        .finish(),
-                    None => section.render_element(top_padding, app),
-                },
-                TuiAIBlockSection::Input(_) | TuiAIBlockSection::PlainText(_) => {
-                    section.render_element(top_padding, app)
-                }
-            };
-            column = column.with_child(element);
+            column = column.with_child(section.render_element(u16::from(follows_input), app));
         }
 
         // No background of its own: the block shows the terminal's background,
@@ -345,13 +245,6 @@ impl Entity for TuiAIBlock {
 impl TuiView for TuiAIBlock {
     fn ui_name() -> &'static str {
         "TuiAIBlock"
-    }
-
-    fn child_view_ids(&self, _app: &AppContext) -> Vec<EntityId> {
-        self.action_views
-            .values()
-            .map(|view| view.view_id())
-            .collect()
     }
 
     fn render(&self, app: &AppContext) -> Box<dyn TuiElement> {

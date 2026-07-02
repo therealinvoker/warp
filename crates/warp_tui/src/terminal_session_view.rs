@@ -128,12 +128,7 @@ impl TuiTerminalSessionView {
             )
         });
         let transcript = ctx.add_typed_action_tui_view(|ctx| {
-            TuiTranscriptView::new(
-                terminal_surface_id,
-                model.clone(),
-                action_model.clone(),
-                ctx,
-            )
+            TuiTranscriptView::new(terminal_surface_id, model.clone(), ctx)
         });
         let input_editor_model =
             ctx.add_model(|ctx| CodeEditorModel::new_tui(INITIAL_INPUT_WIDTH, ctx));
