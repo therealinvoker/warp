@@ -6,11 +6,9 @@ fn load_family(db: &mut FontDB, name: &str) -> FamilyId {
     db.insert_font_family(family).expect("family should insert")
 }
 
-// Regression test for #12923: within a single PostScript-name bucket, identity must be
-// resolved by CGFont equality, so two genuinely different fonts sharing a name (a
-// user/system-installed font vs. a bundled one) each resolve to their OWN font_id. Name-based
-// resolution conflated them and returned the wrong font's outlines, misrendering shaped glyphs
-// (e.g. `fi`->`ç`, `•`->`ǎ`).
+// Regression test for #12923: within a single PostScript-name bucket, identity is resolved by
+// CGFont equality, so two different fonts sharing a name (a user/system-installed font vs. a
+// bundled one) each resolve to their OWN font_id, which a name comparison cannot distinguish.
 #[test]
 fn font_id_by_identity_disambiguates_same_named_fonts() {
     let mut db = FontDB::new();

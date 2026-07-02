@@ -15938,6 +15938,7 @@ dependencies = [
  "font-kit",
  "fontconfig",
  "fontdb",
+ "foreign-types 0.5.0",
  "futures",
  "futures-lite 1.13.0",
  "futures-timer",

@@ -22,6 +22,7 @@ use dashmap::mapref::entry::Entry;
 use dashmap::DashMap;
 use font_kit::font::Font;
 use font_kit::loaders::core_text::NativeFont;
+use foreign_types::ForeignType;
 use futures::future::BoxFuture;
 use futures::FutureExt as _;
 use itertools::Itertools as _;
@@ -185,11 +186,10 @@ pub struct FontDB {
     rasterizer: Rasterizer,
     font_names: DashMap<FontId, Arc<String>>,
     native_fonts: DashMap<(FontId, OrderedFloat<f32>), NativeFont>,
-    // Maps a PostScript name to every font registered under it. PostScript names are NOT
-    // unique across bundled + user/system fonts (a user-installed "Roboto"/"Hack" can share
-    // a bundled font's name), so the name is only a cheap bucket: the actual identity of a
-    // font is resolved by CGFont equality within the bucket. Matching purely by name used to
-    // return the wrong font's outlines, misrendering shaped glyphs on macOS (see #12923).
+    // Maps a PostScript name to every font registered under it. PostScript names are not
+    // unique across bundled and user/system fonts (a user-installed "Roboto"/"Hack" can share
+    // a bundled font's name), so the name is only a bucket; a font's identity is resolved by
+    // CGFont equality within the bucket (#12923).
     fonts_by_name: DashMap<Arc<String>, Vec<(NativeFont, FontId)>>,
     fallback_fonts: DashMap<FontId, Arc<Vec<FontId>>>,
     metrics: DashMap<FontId, Metrics>,
@@ -238,14 +238,11 @@ fn space_advance_width(font: &CTFont) -> Option<f64> {
     (width.is_finite() && width > 0.0).then_some(width)
 }
 
-// Returns true if two native fonts refer to the same underlying font, compared by CGFont
-// identity rather than by (non-unique) PostScript name. Two different fonts that happen to
-// share a PostScript name — e.g. a user-installed and a bundled font — must not be treated
-// as equal, which is exactly what name-based comparison got wrong (#12923). CGFont is a CF
-// type, so we compare via CFEqual (`CFType`'s `PartialEq`) rather than a raw pointer, since
-// Core Text can hand back a distinct-but-equal CGFont object.
+// Two native fonts refer to the same underlying font when they resolve to the same CGFont.
+// This distinguishes fonts that merely share a PostScript name — e.g. a user-installed and a
+// bundled font — which a name comparison cannot (#12923).
 fn same_native_font(a: &NativeFont, b: &NativeFont) -> bool {
-    a.copy_to_CGFont().as_CFType() == b.copy_to_CGFont().as_CFType()
+    a.copy_to_CGFont().as_ptr() == b.copy_to_CGFont().as_ptr()
 }
 
 impl FontDB {
@@ -385,8 +382,7 @@ impl FontDB {
             }
         };
 
-        // Ensure the descriptor has a valid font name; skip it otherwise (matches prior
-        // behavior). The name itself is no longer used as the font's identity.
+        // Skip descriptors that don't have a valid font name.
         if unsafe { FontDB::get_font_name(&fontdesc) }.is_none() {
             log::warn!("Failed to load the font as it does not have a valid name.");
             return None;
@@ -395,9 +391,7 @@ impl FontDB {
         // We should not load fonts with name that starts with dot
         // https://developer.apple.com/videos/play/wwdc2019/227/?time=200
         (!name.starts_with('.')).then(|| {
-            // Reuse an existing font_id only when it's the *same* font by CGFont identity,
-            // not merely the same PostScript name (#12923). font_id_for_native_font performs
-            // exactly that identity lookup, registering the font if it's new.
+            // Resolve to an existing font by CGFont identity, registering it if it's new.
             self.font_id_for_native_font(font::new_from_descriptor(&fontdesc, DEFAULT_FONT_SIZE))
         })
     }
@@ -471,11 +465,11 @@ impl FontDB {
         stored.map(|a| a * size as f64 / DEFAULT_FONT_SIZE)
     }
 
-    // Resolves a native font to an already-registered font_id by CGFont identity. Buckets by
-    // PostScript name only as a cheap prefilter — the actual match is by CGFont equality, so a
-    // different font sharing a bundled font's name can't shadow it (#12923). Returns None when
-    // the font isn't one of ours (a genuine Core Text substitution/fallback). The read guard is
-    // dropped when this returns, so callers may register a new font without a re-entrant lock.
+    // Resolves a native font to an already-registered font_id by CGFont identity. The PostScript
+    // name is only a bucket prefilter; the match is confirmed by CGFont equality so a different
+    // font sharing a bundled font's name can't shadow it (#12923). Returns None for a font we
+    // haven't registered (e.g. a Core Text substitution/fallback). The read guard is released on
+    // return, so callers can register a new font without a re-entrant lock.
     fn font_id_by_identity(
         &self,
         postscript_name: &str,
@@ -508,9 +502,8 @@ impl FontDB {
 
         self.rasterizer.insert(font_id, Arc::new(font));
         self.font_names.insert(font_id, name.clone());
-        // Record the concrete font under its name so identity can be resolved by CGFont
-        // equality rather than by name alone (#12923). Same-named fonts coexist as separate
-        // entries instead of overwriting each other.
+        // Register the font under its name. Same-named fonts are kept as separate entries so
+        // they can be told apart by CGFont identity (#12923).
         self.fonts_by_name
             .entry(name)
             .or_default()
