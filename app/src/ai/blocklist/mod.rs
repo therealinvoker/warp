@@ -34,6 +34,9 @@ pub(crate) mod codebase_index_speedbump_banner;
 pub(crate) mod telemetry_banner;
 pub(super) mod view_util;
 
+// Consumed by `tui_export` for the `warp_tui` frontend.
+#[cfg(feature = "tui")]
+pub use action_model::RequestFileEditsExecutor;
 #[cfg_attr(target_family = "wasm", allow(unused_imports))]
 pub(crate) use action_model::{
     apply_edits, read_local_file_context, BlocklistAIActionEvent, FileReadResult,

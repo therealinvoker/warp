@@ -585,11 +585,11 @@ fn headless_file_outcome(
 /// GUI-less [`DiffStorageView`]: plain diff storage with no review UI.
 ///
 /// The executor creates one per action when diffs resolve with no registered
-/// surface (autoexecution racing view creation, or headless/TUI-driven
-/// conversations), so file edits stay executable everywhere. Final content is
-/// derived by applying each diff's deltas to its base. This is also the
-/// template the TUI's diff storage builds on.
-pub(crate) struct HeadlessDiffStorageModel {
+/// surface (autoexecution racing view creation, or headless conversations), so
+/// file edits stay executable everywhere. Final content is derived by applying
+/// each diff's deltas to its base. The TUI surface registers one of these as
+/// its own storage (via `tui_export`) and renders a summary over it.
+pub struct HeadlessDiffStorageModel {
     diffs: Vec<FileDiff>,
     session_type: DiffSessionType,
     saving_diffs: Option<SavingDiffs>,
@@ -604,7 +604,7 @@ pub(crate) struct HeadlessDiffStorageModel {
 impl HeadlessDiffStorageModel {
     /// Creates storage over resolved diffs and subscribes to [`FileModel`] save
     /// events for its own writes.
-    pub(crate) fn new(
+    pub fn new(
         diffs: Vec<FileDiff>,
         session_type: DiffSessionType,
         ctx: &mut ModelContext<Self>,
@@ -625,6 +625,11 @@ impl HeadlessDiffStorageModel {
             in_flight_file_ids: Vec::new(),
             resolved: Vec::new(),
         }
+    }
+
+    /// The stored diffs (for surfaces rendering a summary over this storage).
+    pub fn diffs(&self) -> &[FileDiff] {
+        &self.diffs
     }
 
     /// Replaces the stored diffs and session backend.
@@ -742,7 +747,7 @@ impl Entity for HeadlessDiffStorageModel {
 }
 
 /// [`RegisteredDiffStorage`] wrapper over a [`HeadlessDiffStorageModel`].
-pub(crate) struct HeadlessDiffStorage(pub(crate) ModelHandle<HeadlessDiffStorageModel>);
+pub struct HeadlessDiffStorage(pub ModelHandle<HeadlessDiffStorageModel>);
 
 impl RegisteredDiffStorage for HeadlessDiffStorage {
     fn set_candidate_diffs(
@@ -751,8 +756,10 @@ impl RegisteredDiffStorage for HeadlessDiffStorage {
         session_type: DiffSessionType,
         app: &mut AppContext,
     ) {
-        self.0.update(app, |model, _| {
-            model.set_candidate_diffs(diffs, session_type)
+        self.0.update(app, |model, ctx| {
+            model.set_candidate_diffs(diffs, session_type);
+            // Wake subscribers (e.g. a TUI summary view) now that diffs exist.
+            ctx.emit(());
         });
     }
 
