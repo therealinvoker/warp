@@ -6,57 +6,43 @@ use ai::agent::FileLocations;
 use ai::diff_validation::{DiffDelta, DiffType};
 use warp_core::HostId;
 use warp_files::FileModel;
-use warpui::{App, SingletonEntity as _};
+use warpui::{App, ModelHandle};
 
-use super::{
-    build_resolved_edits, outcome_for_action, updated_file_contexts_from_content_map,
-    PersistAction, PersistDiffModel,
-};
-use crate::ai::agent::RequestFileEditsResult;
-use crate::ai::blocklist::diff_types::{ClaimedEdit, ClaimedEdits, DiffSessionType, FileDiff};
+use super::*;
 
-/// Wraps a diff as a claimed edit with no surface-supplied final content.
-fn unreviewed(diff: FileDiff) -> ClaimedEdit {
-    ClaimedEdit {
-        diff,
-        final_content: None,
-        was_edited: false,
-    }
+/// Builds a headless storage over `diffs`, registering the `FileModel` its
+/// writes go through.
+fn add_headless(
+    app: &mut App,
+    diffs: Vec<FileDiff>,
+    session_type: DiffSessionType,
+) -> ModelHandle<HeadlessDiffStorageModel> {
+    app.add_singleton_model(FileModel::new);
+    app.add_model(|ctx| HeadlessDiffStorageModel::new(diffs, session_type, ctx))
 }
 
-/// Runs `resolve_and_persist` for the given local edits on a fresh app and awaits the result.
-async fn resolve_and_persist_local(
-    app: &mut App,
-    edits: Vec<ClaimedEdit>,
-) -> RequestFileEditsResult {
-    // FileModel must exist before PersistDiffModel subscribes to it in `new`.
-    app.add_singleton_model(FileModel::new);
-    app.add_singleton_model(PersistDiffModel::new);
-    let future = PersistDiffModel::handle(app).update(app, |model, ctx| {
-        model.resolve_and_persist(
-            ClaimedEdits {
-                edits,
-                session_type: DiffSessionType::Local,
-            },
-            ctx,
-        )
+/// Runs the shared accept flow for local diffs on a fresh app and awaits the result.
+async fn accept_local(app: &mut App, diffs: Vec<FileDiff>) -> RequestFileEditsResult {
+    let model = add_headless(app, diffs, DiffSessionType::Local);
+    let future = model.update(app, |model, ctx| {
+        DiffStorageView::accept_and_save(model, ctx)
     });
     future.await
 }
 
 #[test]
-fn persist_creates_a_new_file() {
+fn accept_creates_a_new_file() {
     App::test((), |mut app| async move {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("new.rs").to_string_lossy().to_string();
 
-        let result = resolve_and_persist_local(
+        let result = accept_local(
             &mut app,
-            vec![unreviewed(FileDiff::new(
+            vec![FileDiff::new(
                 String::new(),
                 path.clone(),
                 DiffType::creation("fn main() {}\n".to_owned()),
-            ))],
+            )],
         )
         .await;
 
@@ -78,15 +64,15 @@ fn persist_creates_a_new_file() {
 }
 
 #[test]
-fn persist_updates_an_existing_file() {
+fn accept_applies_deltas_to_update_a_file() {
     App::test((), |mut app| async move {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("main.rs").to_string_lossy().to_string();
         fs::write(&path, "one\ntwo\nthree\n").unwrap();
 
-        let result = resolve_and_persist_local(
+        let result = accept_local(
             &mut app,
-            vec![unreviewed(FileDiff::new(
+            vec![FileDiff::new(
                 "one\ntwo\nthree\n".to_owned(),
                 path.clone(),
                 DiffType::update(
@@ -96,7 +82,7 @@ fn persist_updates_an_existing_file() {
                     }],
                     None,
                 ),
-            ))],
+            )],
         )
         .await;
 
@@ -106,56 +92,20 @@ fn persist_updates_an_existing_file() {
 }
 
 #[test]
-fn persist_prefers_final_content_over_deltas() {
-    App::test((), |mut app| async move {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("main.rs").to_string_lossy().to_string();
-        fs::write(&path, "one\ntwo\nthree\n").unwrap();
-
-        let result = resolve_and_persist_local(
-            &mut app,
-            vec![ClaimedEdit {
-                diff: FileDiff::new(
-                    "one\ntwo\nthree\n".to_owned(),
-                    path.clone(),
-                    DiffType::update(
-                        vec![DiffDelta {
-                            replacement_line_range: 2..3,
-                            insertion: "TWO\n".to_owned(),
-                        }],
-                        None,
-                    ),
-                ),
-                final_content: Some("user edited\n".to_owned()),
-                was_edited: true,
-            }],
-        )
-        .await;
-
-        let RequestFileEditsResult::Success { updated_files, .. } = result else {
-            panic!("expected success");
-        };
-        assert!(!updated_files.is_empty());
-        assert!(updated_files.iter().all(|file| file.was_edited_by_user));
-        assert_eq!(fs::read_to_string(&path).unwrap(), "user edited\n");
-    });
-}
-
-#[test]
-fn persist_renames_and_reports_source_as_deleted() {
+fn accept_renames_and_reports_source_as_deleted() {
     App::test((), |mut app| async move {
         let dir = tempfile::tempdir().unwrap();
         let old_path = dir.path().join("old.rs").to_string_lossy().to_string();
         let new_path = dir.path().join("new.rs").to_string_lossy().to_string();
         fs::write(&old_path, "content\n").unwrap();
 
-        let result = resolve_and_persist_local(
+        let result = accept_local(
             &mut app,
-            vec![unreviewed(FileDiff::new(
+            vec![FileDiff::new(
                 "content\n".to_owned(),
                 old_path.clone(),
                 DiffType::update(Vec::new(), Some(new_path.clone())),
-            ))],
+            )],
         )
         .await;
 
@@ -169,19 +119,19 @@ fn persist_renames_and_reports_source_as_deleted() {
 }
 
 #[test]
-fn persist_deletes_a_file() {
+fn accept_deletes_a_file() {
     App::test((), |mut app| async move {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("gone.rs").to_string_lossy().to_string();
         fs::write(&path, "delete me\n").unwrap();
 
-        let result = resolve_and_persist_local(
+        let result = accept_local(
             &mut app,
-            vec![unreviewed(FileDiff::new(
+            vec![FileDiff::new(
                 "delete me\n".to_owned(),
                 path.clone(),
                 DiffType::deletion(1),
-            ))],
+            )],
         )
         .await;
 
@@ -194,7 +144,7 @@ fn persist_deletes_a_file() {
 }
 
 #[test]
-fn persist_reports_save_failure() {
+fn accept_reports_save_failure() {
     App::test((), |mut app| async move {
         let dir = tempfile::tempdir().unwrap();
         // Create a regular file, then target a path *under* it. Creating the parent
@@ -203,13 +153,13 @@ fn persist_reports_save_failure() {
         fs::write(&blocking_file, "x").unwrap();
         let path = blocking_file.join("child.rs").to_string_lossy().to_string();
 
-        let result = resolve_and_persist_local(
+        let result = accept_local(
             &mut app,
-            vec![unreviewed(FileDiff::new(
+            vec![FileDiff::new(
                 String::new(),
                 path,
                 DiffType::creation("data\n".to_owned()),
-            ))],
+            )],
         )
         .await;
 
@@ -217,6 +167,37 @@ fn persist_reports_save_failure() {
             result,
             RequestFileEditsResult::DiffApplicationFailed { .. }
         ));
+    });
+}
+
+#[test]
+fn take_candidate_diffs_relinquishes_only_before_saving() {
+    App::test((), |mut app| async move {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("x.rs").to_string_lossy().to_string();
+        let diff = FileDiff::new(
+            String::new(),
+            path,
+            DiffType::creation("fn main() {}\n".to_owned()),
+        );
+
+        // Before saving: the placeholder hands its diffs over exactly once.
+        let model = add_headless(&mut app, vec![diff.clone()], DiffSessionType::Local);
+        let taken = model.update(&mut app, |model, _| model.take_candidate_diffs());
+        assert!(taken.is_some());
+        let retaken = model.update(&mut app, |model, _| model.take_candidate_diffs());
+        assert!(retaken.is_none());
+
+        // Once saving has started, the diffs are no longer up for grabs.
+        let model = app.add_model(|ctx| {
+            HeadlessDiffStorageModel::new(vec![diff], DiffSessionType::Local, ctx)
+        });
+        let future = model.update(&mut app, |model, ctx| {
+            DiffStorageView::accept_and_save(model, ctx)
+        });
+        let taken = model.update(&mut app, |model, _| model.take_candidate_diffs());
+        assert!(taken.is_none());
+        future.await;
     });
 }
 
@@ -250,75 +231,35 @@ fn remote_rename_outcome_reports_update_at_original_path() {
     // back to writing the original path, so nothing is deleted and the update
     // is reported at the original path — not the rename target.
     let op = DiffType::update(Vec::new(), Some("/tmp/new.rs".to_owned()));
+    let diff = FileDiff::new("content\n".to_owned(), "/tmp/old.rs".to_owned(), op.clone());
     let action = PersistAction::resolve(
         &op,
         &DiffSessionType::Remote(HostId::new("host".to_owned())),
         "/tmp/old.rs",
     );
-    let outcome = outcome_for_action(
-        &action,
-        "/tmp/old.rs",
-        "content\n",
-        "content!\n",
-        vec![],
-        false,
-    );
 
-    let (file_location, _, _) = outcome.updated.expect("expected an updated file");
-    assert_eq!(file_location.name, "/tmp/old.rs");
-    assert_eq!(outcome.deleted, Vec::<String>::new());
+    let (state, _) = headless_file_outcome(&action, &diff, "/tmp/old.rs", "content!\n");
+
+    let updated = state.updated.expect("expected an updated file");
+    assert_eq!(updated.path, "/tmp/old.rs");
+    assert_eq!(state.deleted_paths, Vec::<String>::new());
 }
 
 #[test]
-fn build_resolved_edits_applies_deltas_without_final_content() {
-    // No surface-supplied content (e.g. TUI): final content is derived from deltas.
-    let base = "one\ntwo\nthree\n";
-    let diff = FileDiff::new(
-        base.to_owned(),
-        "/tmp/main.rs".to_owned(),
-        DiffType::update(
-            vec![DiffDelta {
-                replacement_line_range: 2..3,
-                insertion: "TWO\n".to_owned(),
-            }],
-            None,
-        ),
+fn final_content_from_op_applies_deltas() {
+    // No surface-supplied content (headless/TUI): final content is derived
+    // from the diff's deltas.
+    let op = DiffType::update(
+        vec![DiffDelta {
+            replacement_line_range: 2..3,
+            insertion: "TWO\n".to_owned(),
+        }],
+        None,
     );
 
-    let resolved = build_resolved_edits(vec![unreviewed(diff)]).unwrap();
+    let final_content = final_content_from_op("one\ntwo\nthree\n", &op).unwrap();
 
-    assert_eq!(resolved.len(), 1);
-    assert_eq!(resolved[0].path, "/tmp/main.rs");
-    assert_eq!(resolved[0].final_content, "one\nTWO\nthree\n");
-}
-
-#[test]
-fn build_resolved_edits_prefers_final_content() {
-    // Review-surface path: the edit's paired final content overrides the
-    // delta-applied content.
-    let base = "one\ntwo\nthree\n";
-    let diff = FileDiff::new(
-        base.to_owned(),
-        "/tmp/main.rs".to_owned(),
-        DiffType::update(
-            vec![DiffDelta {
-                replacement_line_range: 2..3,
-                insertion: "TWO\n".to_owned(),
-            }],
-            None,
-        ),
-    );
-
-    let resolved = build_resolved_edits(vec![ClaimedEdit {
-        diff,
-        final_content: Some("user edited\n".to_owned()),
-        was_edited: true,
-    }])
-    .unwrap();
-
-    assert_eq!(resolved.len(), 1);
-    assert_eq!(resolved[0].final_content, "user edited\n");
-    assert!(resolved[0].was_edited);
+    assert_eq!(final_content, "one\nTWO\nthree\n");
 }
 
 #[test]

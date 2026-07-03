@@ -12,8 +12,8 @@ use warp_core::ui::color::blend::Blend;
 use warp_core::ui::theme::Fill as ThemeFill;
 use warpui::SingletonEntity;
 use warpui_core::elements::tui::{
-    Modifier, TuiConstraint, TuiContainer, TuiElement, TuiFlex, TuiLayoutContext,
-    TuiParentElement, TuiSize, TuiStyle, TuiText,
+    Modifier, TuiConstraint, TuiContainer, TuiElement, TuiFlex, TuiLayoutContext, TuiParentElement,
+    TuiSize, TuiStyle, TuiText,
 };
 use warpui_core::elements::Fill;
 use warpui_core::{AppContext, Entity, EntityIdMap, TuiView};

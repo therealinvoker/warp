@@ -4,6 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
 use std::ops::Range;
 use std::path::Path;
+use std::rc::Rc;
 
 use ai::diff_validation::DiffDelta;
 use lazy_static::lazy_static;
@@ -70,8 +71,8 @@ use crate::code::editor::nav_bar::{NavBar, NavBarBehavior, NavBarEvent};
 use crate::code::editor::scroll::{ScrollPosition, ScrollTrigger, ScrollWheelBehavior};
 use crate::code::editor::EditorReviewComment;
 use crate::code::{
-    NoopCommentEditorProvider, NoopFindReferencesCardProvider, ShowCommentEditorProvider,
-    ShowFindReferencesCardProvider,
+    DiffResult, NoopCommentEditorProvider, NoopFindReferencesCardProvider,
+    ShowCommentEditorProvider, ShowFindReferencesCardProvider,
 };
 use crate::code_review::comments::{CommentId, CommentOrigin};
 use crate::editor::InteractionState;
@@ -100,10 +101,9 @@ pub enum CodeEditorEvent {
     ContentChanged {
         origin: EditOrigin,
     },
-    /// Emitted when a unified diff computation completes. Consumers use this as
-    /// a "diff computed" signal; the computed diff itself is only consumed at the
-    /// model level.
-    UnifiedDiffComputed,
+    /// Emitted when a unified diff computation completes, carrying the computed
+    /// result diff.
+    UnifiedDiffComputed(Rc<DiffResult>),
     SelectionChanged,
     SelectionStart,
     SelectionEnd,
@@ -1276,8 +1276,8 @@ impl CodeEditorView {
                 }
                 ctx.emit(CodeEditorEvent::ContentChanged { origin: *origin });
             }
-            CodeEditorModelEvent::UnifiedDiffComputed(_) => {
-                ctx.emit(CodeEditorEvent::UnifiedDiffComputed);
+            CodeEditorModelEvent::UnifiedDiffComputed(diff) => {
+                ctx.emit(CodeEditorEvent::UnifiedDiffComputed(diff.clone()));
             }
             CodeEditorModelEvent::ViewportUpdated(version) => {
                 if let Some(trigger) = self

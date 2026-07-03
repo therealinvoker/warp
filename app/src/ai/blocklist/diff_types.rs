@@ -77,25 +77,6 @@ pub enum DiffSessionType {
     Remote(HostId),
 }
 
-/// One prepared file edit handed between the file-edits executor and a review surface.
-#[derive(Clone)]
-#[cfg_attr(debug_assertions, derive(Debug))]
-pub struct ClaimedEdit {
-    pub diff: FileDiff,
-    /// Final file content from the surface's buffer (the user may have edited
-    /// it). `None` when the surface doesn't materialize buffers; persistence
-    /// then applies `diff`'s deltas to the base content.
-    pub final_content: Option<String>,
-    /// Whether the user hand-edited this file's content during review.
-    pub was_edited: bool,
-}
-
-/// The full set of edits for one `RequestFileEdits` action at execute time.
-pub struct ClaimedEdits {
-    pub edits: Vec<ClaimedEdit>,
-    pub session_type: DiffSessionType,
-}
-
 /// Derives the 1-indexed changed line ranges described by a diff's deltas.
 pub(crate) fn changed_lines_from_op(diff_type: &DiffType) -> Vec<Range<usize>> {
     match diff_type {

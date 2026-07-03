@@ -9,6 +9,9 @@ use ai::diff_validation::{
     SearchAndReplace, V4AHunk,
 };
 use anyhow::Result;
+use futures::channel::oneshot;
+use futures::future::BoxFuture;
+use futures::FutureExt;
 use lazy_static::lazy_static;
 use markdown_parser::{FormattedText, FormattedTextFragment, FormattedTextLine};
 use pathfinder_geometry::vector::vec2f;
@@ -47,18 +50,17 @@ use warpui::{
 use super::malformed_line_heuristics::has_malformed_terminal_correction_signal;
 use crate::ai::agent::icons::{self, yellow_stop_icon};
 use crate::ai::agent::{
-    AIAgentActionId, AIAgentActionResultType, AIIdentifiers, FileEdit, RequestFileEditsResult,
-    ServerOutputId,
+    AIAgentActionId, AIIdentifiers, FileEdit, RequestFileEditsResult, ServerOutputId,
 };
 use crate::ai::blocklist::action_model::{
     AIActionStatus, BlocklistAIActionEvent, BlocklistAIActionModel,
     EditAcceptAndContinueClickedEvent, EditAcceptClickedEvent, EditResolvedEvent, EditStats,
-    MalformedFinalLineProxyEvent, PendingEditsSource, RequestFileEditsFormatKind,
-    RequestFileEditsTelemetryEvent,
+    MalformedFinalLineProxyEvent, RequestFileEditsFormatKind, RequestFileEditsTelemetryEvent,
 };
-use crate::ai::blocklist::diff_types::{
-    changed_lines_from_op, ClaimedEdit, ClaimedEdits, DiffSessionType, FileDiff,
+use crate::ai::blocklist::diff_storage::{
+    DiffStorageView, PendingFileState, RegisteredDiffStorage, SavingDiffs, UpdatedFileState,
 };
+use crate::ai::blocklist::diff_types::{changed_lines_from_op, DiffSessionType, FileDiff};
 use crate::ai::blocklist::history_model::BlocklistAIHistoryModel;
 use crate::ai::blocklist::inline_action::inline_action_header::INLINE_ACTION_HORIZONTAL_PADDING;
 use crate::ai::blocklist::inline_action::inline_action_icons::{
@@ -334,38 +336,51 @@ struct PendingDiff {
     tab_handle: MouseStateHandle,
 }
 
-/// Executor-held [`PendingEditsSource`] over a [`CodeDiffView`]'s claimed edits.
+/// Executor-registered [`RegisteredDiffStorage`] over a GUI [`CodeDiffView`].
 ///
-/// Holds a weak handle so the executor never keeps a dead review view alive;
-/// if the view is gone at execute time, [`PendingEditsSource::take_edits`]
-/// returns `None`.
-pub struct CodeDiffViewEditsSource(pub WeakViewHandle<CodeDiffView>);
+/// Holds a weak handle so the executor never keeps a dead review view alive; a
+/// dead view at execute time fails recoverably.
+pub struct GuiDiffStorage(pub WeakViewHandle<CodeDiffView>);
 
-impl PendingEditsSource for CodeDiffViewEditsSource {
-    fn take_edits(&self, app: &AppContext) -> Option<ClaimedEdits> {
-        let view = self.0.upgrade(app)?;
-        let edits = view.as_ref(app).claimed_edits(app);
-        Some(edits)
+impl RegisteredDiffStorage for GuiDiffStorage {
+    fn set_candidate_diffs(
+        &self,
+        diffs: Vec<FileDiff>,
+        session_type: DiffSessionType,
+        app: &mut AppContext,
+    ) {
+        let Some(view) = self.0.upgrade(app) else {
+            return;
+        };
+        view.update(app, |view, ctx| {
+            view.set_diff_session_type(session_type);
+            view.set_candidate_diffs(diffs, ctx);
+        });
+    }
+
+    /// The GUI never relinquishes its diffs; they live in its editor buffers.
+    fn take_candidate_diffs(
+        &self,
+        _app: &mut AppContext,
+    ) -> Option<(Vec<FileDiff>, DiffSessionType)> {
+        None
+    }
+
+    fn accept_and_save(&self, app: &mut AppContext) -> BoxFuture<'static, RequestFileEditsResult> {
+        let Some(view) = self.0.upgrade(app) else {
+            log::warn!("RequestFileEdits review view vanished before execute");
+            return futures::future::ready(RequestFileEditsResult::DiffApplicationFailed {
+                error: "The review surface holding these edits no longer exists".to_string(),
+            })
+            .boxed();
+        };
+        view.update(app, |view, ctx| {
+            view.mark_accepted_for_save(ctx);
+            DiffStorageView::accept_and_save(view, ctx)
+        })
     }
 }
 
-/// Logs a failed save of accepted file edits and surfaces an error toast.
-fn show_save_failure_toast(error: &str, ctx: &mut ViewContext<CodeDiffView>) {
-    crate::safe_error!(
-        safe: ("Failed to save accepted AgentMode diffs"),
-        full: ("Failed to save accepted AgentMode diffs: {error}")
-    );
-    let window_id = ctx.window_id();
-    ToastStack::handle(ctx).update(ctx, |toast_stack, ctx| {
-        toast_stack.add_ephemeral_toast(
-            DismissibleToast::error("Failed to save file edits".to_string()),
-            window_id,
-            ctx,
-        );
-    });
-}
-
-#[derive(Clone)]
 pub struct CodeDiffView {
     action_id: AIAgentActionId,
 
@@ -405,6 +420,11 @@ pub struct CodeDiffView {
     session_platform: Option<SessionPlatform>,
     /// Whether diffs target local disk or a remote host.
     diff_session_type: DiffSessionType,
+    /// Per-file save/diff progress for an in-flight accept (shared
+    /// [`DiffStorageView`] flow).
+    saving_diffs: Option<SavingDiffs>,
+    /// Result delivery for an in-flight accept.
+    save_result_tx: Option<oneshot::Sender<RequestFileEditsResult>>,
 }
 
 impl CodeDiffView {
@@ -512,10 +532,11 @@ impl CodeDiffView {
         editor
     }
 
-    /// Sets up event subscriptions for an `InlineDiffView`.
+    /// Sets up event subscriptions for an `InlineDiffView` at the given index.
     fn setup_diff_view_subscriptions(
         &self,
         diff_view: &ViewHandle<InlineDiffView>,
+        idx: usize,
         file_path_for_error: String,
         ctx: &mut ViewContext<Self>,
     ) {
@@ -534,16 +555,15 @@ impl CodeDiffView {
             InlineDiffViewEvent::FileLoaded => {
                 ctx.notify();
             }
-            // Save + diff-computed events are no longer consumed here; persistence
-            // and result assembly happen off-view via `PersistDiffModel`. A failed
-            // save (e.g. from a post-accept revert) still surfaces a toast.
             #[cfg(not(target_family = "wasm"))]
-            InlineDiffViewEvent::FileSaved => {}
+            InlineDiffViewEvent::FileSaved => {
+                me.handle_file_saved(idx, None, ctx);
+            }
             #[cfg(not(target_family = "wasm"))]
             InlineDiffViewEvent::FailedToSave { error } => {
                 crate::safe_error!(
-                    safe: ("Failed to save file for AgentMode diffs"),
-                    full: ("Failed to save file for AgentMode diffs for {}: {}", file_path_clone, error)
+                    safe: ("Failed to save file for accepted AgentMode diffs"),
+                    full: ("Failed to save file for accepted AgentMode diffs for {}: {}", file_path_clone, error)
                 );
                 let toast = DismissibleToast::error(format!(
                     "Failed to save file {file_path_clone}"
@@ -551,6 +571,10 @@ impl CodeDiffView {
                 ToastStack::handle(ctx).update(ctx, |toast_stack, ctx| {
                     toast_stack.add_ephemeral_toast(toast, window_id, ctx);
                 });
+                me.handle_file_saved(idx, Some(error.clone()), ctx);
+            }
+            InlineDiffViewEvent::DiffAccepted { diff } => {
+                me.handle_diff_computed(idx, diff.clone(), ctx);
             }
             InlineDiffViewEvent::UserEdited => {
                 if me.user_edited_file_contents {
@@ -606,25 +630,6 @@ impl CodeDiffView {
         ctx.subscribe_to_model(
             &action_model,
             move |me, action_model, event, ctx| match event {
-                // The user accepted, but persistence failed after the fact. The LLM is
-                // informed via the action result; surface the save-failure toast the
-                // user would otherwise never see (the diff already shows as accepted).
-                BlocklistAIActionEvent::FinishedAction { action_id, .. }
-                    if *action_id == me.action_id
-                        && matches!(me.state, CodeDiffState::Accepted) =>
-                {
-                    if let Some(AIActionStatus::Finished(result)) =
-                        action_model.as_ref(ctx).get_action_status(&me.action_id)
-                    {
-                        if let AIAgentActionResultType::RequestFileEdits(
-                            RequestFileEditsResult::DiffApplicationFailed { error },
-                        ) = &result.result
-                        {
-                            show_save_failure_toast(error, ctx);
-                        }
-                    }
-                }
-
                 BlocklistAIActionEvent::FinishedAction { action_id, .. } if !me.is_complete() => {
                     match action_model.as_ref(ctx).get_action_status(&me.action_id) {
                         Some(AIActionStatus::Blocked) => {
@@ -640,23 +645,11 @@ impl CodeDiffView {
                             } else if status.is_cancelled() {
                                 me.state = CodeDiffState::Rejected;
                                 me.should_expand_when_complete = false;
-                            } else if status.is_success()
-                                || (status.is_failed() && !me.pending_diffs.is_empty())
-                            {
-                                // Terminal result without a user accept click
-                                // (autoexecution): stop offering Accept for edits that
-                                // already executed. A failed persist of claimed diffs
-                                // also surfaces the save-failure toast; a failure with
-                                // no claimed diffs is a preprocess failure — nothing
-                                // executed, so the view stays as-is.
-                                if let AIActionStatus::Finished(result) = &status {
-                                    if let AIAgentActionResultType::RequestFileEdits(
-                                        RequestFileEditsResult::DiffApplicationFailed { error },
-                                    ) = &result.result
-                                    {
-                                        show_save_failure_toast(error, ctx);
-                                    }
-                                }
+                            } else if status.is_success() {
+                                // Terminal success without this view having saved
+                                // (e.g. the headless fallback executed before this
+                                // view registered): stop offering Accept for edits
+                                // that already executed.
                                 me.state = CodeDiffState::Accepted;
                                 me.minimize(ctx);
                             }
@@ -875,6 +868,8 @@ impl CodeDiffView {
             should_show_speedbump,
             session_platform,
             diff_session_type: DiffSessionType::Local,
+            saving_diffs: None,
+            save_result_tx: None,
         }
     }
 
@@ -916,7 +911,8 @@ impl CodeDiffView {
         let display_mode = self.display_mode;
         let pending_diffs = diffs
             .into_iter()
-            .map(|diff| {
+            .enumerate()
+            .map(|(idx, diff)| {
                 #[cfg(debug_assertions)]
                 log::debug!("Create CodeEditorView with diff: {diff:#?}");
                 let editor = self.create_editor_with_subscriptions(ctx);
@@ -948,7 +944,7 @@ impl CodeDiffView {
                     diff_viewer.update(ctx, |view, ctx| view.register_file(session_type, ctx));
                 }
 
-                self.setup_diff_view_subscriptions(&diff_viewer, file_path, ctx);
+                self.setup_diff_view_subscriptions(&diff_viewer, idx, file_path, ctx);
 
                 PendingDiff {
                     diff_view: diff_viewer,
@@ -1009,13 +1005,26 @@ impl CodeDiffView {
 
         ctx.emit(CodeDiffViewEvent::TryAccept);
 
-        // Persistence and result assembly now happen off-view (the executor's
-        // `PersistDiffModel`, or the passive surface). Optimistically mark the
-        // diff accepted and minimize the review UI.
+        // Persistence and result assembly run through the shared
+        // [`DiffStorageView`] flow once the executor (or the passive handler)
+        // calls `accept_and_save`. Optimistically mark the diff accepted and
+        // minimize the review UI.
         self.state = CodeDiffState::Accepted;
         self.minimize(ctx);
         ctx.notify();
         Ok(())
+    }
+
+    /// Flips the view into the accepted state as persistence kicks off. No-op
+    /// once the diff reached a terminal state (user-initiated accepts already
+    /// flipped it in `try_accept_action_with_selection`).
+    pub fn mark_accepted_for_save(&mut self, ctx: &mut ViewContext<Self>) {
+        if self.state.is_complete() {
+            return;
+        }
+        self.state = CodeDiffState::Accepted;
+        self.minimize(ctx);
+        ctx.notify();
     }
 
     /// Mark the diff as rejected.
@@ -1049,9 +1058,9 @@ impl CodeDiffView {
     /// Revert all changes by replacing file contents with the base version.
     /// For newly created files, this deletes them instead.
     fn revert_changes(&mut self, ctx: &mut ViewContext<Self>) {
-        if !matches!(self.state, CodeDiffState::Accepted) {
+        if !matches!(self.state, CodeDiffState::Accepted) || self.saving_diffs.is_some() {
             log::warn!(
-                "Attempted to revert changes when not in Accepted state - actual state: {:?}",
+                "Attempted to revert changes when not in a settled Accepted state - actual state: {:?}",
                 self.state
             );
             return;
@@ -2202,39 +2211,6 @@ impl CodeDiffView {
         );
     }
 
-    /// Snapshot of this view's claimed edits: each file's diff (path, base
-    /// content, op) paired with the editor buffer's final content (which the
-    /// user may have edited during review). Consumed by the executor at
-    /// execute time via [`CodeDiffViewEditsSource`].
-    pub fn claimed_edits(&self, app: &AppContext) -> ClaimedEdits {
-        let edits = self
-            .pending_diffs
-            .iter()
-            .filter_map(|diff| {
-                let diff_view = diff.diff_view.as_ref(app);
-                let path = diff_view.file_path()?.to_string();
-                let op = diff_view.diff()?.clone();
-                let base_content = diff_view.diff_base_content(app)?;
-                // Deletes have no meaningful buffer content; persistence
-                // derives the deletion from the op itself.
-                let final_content = if matches!(op, DiffType::Delete { .. }) {
-                    None
-                } else {
-                    Some(diff_view.editor().as_ref(app).text(app).into_string())
-                };
-                Some(ClaimedEdit {
-                    diff: FileDiff::new(base_content, path, op),
-                    final_content,
-                    was_edited: diff_view.was_edited(),
-                })
-            })
-            .collect();
-        ClaimedEdits {
-            edits,
-            session_type: self.diff_session_type.clone(),
-        }
-    }
-
     /// Emits the malformed-final-line proxy telemetry, computed from editor state
     /// at accept time. Called by the review surface when the user accepts.
     pub fn send_malformed_line_telemetry(&self, ctx: &mut ViewContext<Self>) {
@@ -2972,6 +2948,74 @@ pub fn convert_file_edits_to_file_diffs(
             FileDiff::new(dummy_content, path, DiffType::update(applied_diffs, None))
         })
         .collect()
+}
+
+impl DiffStorageView for CodeDiffView {
+    fn saving_diffs_mut(&mut self) -> &mut Option<SavingDiffs> {
+        &mut self.saving_diffs
+    }
+
+    fn result_tx_mut(&mut self) -> &mut Option<oneshot::Sender<RequestFileEditsResult>> {
+        &mut self.save_result_tx
+    }
+
+    fn pending_diff_count(&self) -> usize {
+        self.pending_diffs.len()
+    }
+
+    /// Extracts each file's report state from the diff views and editor
+    /// buffers: final (possibly user-edited) content, changed lines, and
+    /// rename/delete bookkeeping.
+    fn pending_file_state(&self, app: &AppContext) -> Vec<PendingFileState> {
+        self.pending_diffs
+            .iter()
+            .filter_map(|diff| {
+                let diff_view = diff.diff_view.as_ref(app);
+                let path = diff_view.file_path()?.to_string();
+                if matches!(diff_view.diff(), Some(DiffType::Delete { .. })) {
+                    return Some(PendingFileState {
+                        updated: None,
+                        deleted_paths: vec![path],
+                    });
+                }
+
+                // A rename reports the source path as deleted and the update
+                // at the rename target.
+                let mut deleted_paths = Vec::new();
+                let mut report_path = path;
+                if let Some(DiffType::Update {
+                    rename: Some(rename),
+                    ..
+                }) = diff_view.diff()
+                {
+                    deleted_paths.push(report_path.clone());
+                    report_path = rename.to_string_lossy().to_string();
+                }
+
+                let changed_lines =
+                    changed_lines_for_result(diff_view.changed_lines(app), diff_view.diff());
+                let final_content = diff_view.editor().as_ref(app).text(app).into_string();
+                Some(PendingFileState {
+                    updated: Some(UpdatedFileState {
+                        path: report_path,
+                        changed_lines,
+                        final_content,
+                        was_edited: diff_view.was_edited(),
+                    }),
+                    deleted_paths,
+                })
+            })
+            .collect()
+    }
+
+    /// Saves every file through its editor buffer; completions arrive via the
+    /// per-file `InlineDiffView` subscriptions.
+    fn start_saving(&mut self, app: &mut AppContext) {
+        for diff in &self.pending_diffs {
+            diff.diff_view
+                .update(app, |view, ctx| view.accept_and_save_diff(ctx));
+        }
+    }
 }
 
 impl BackingView for CodeDiffView {

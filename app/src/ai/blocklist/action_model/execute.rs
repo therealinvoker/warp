@@ -51,8 +51,7 @@ use request_computer_use::RequestComputerUseExecutor;
 pub(crate) use request_file_edits::{apply_edits, FileReadResult, MalformedFinalLineProxyEvent};
 pub use request_file_edits::{
     EditAcceptAndContinueClickedEvent, EditAcceptClickedEvent, EditResolvedEvent, EditStats,
-    PendingEditsSource, RequestFileEditsExecutor, RequestFileEditsExecutorEvent,
-    RequestFileEditsFormatKind, RequestFileEditsTelemetryEvent,
+    RequestFileEditsExecutor, RequestFileEditsFormatKind, RequestFileEditsTelemetryEvent,
 };
 #[cfg(test)]
 pub use run_agents::{compose_run_agents_child_prompt, run_agents_to_start_agent_mode};
