@@ -29,10 +29,12 @@ use crate::ai::mcp::parsing::resolve_json;
 use crate::ai::mcp::templatable::{CloudTemplatableMCPServer, GalleryData};
 use crate::ai::mcp::templatable_installation::VariableValue;
 use crate::ai::mcp::templatable_manager::FigmaMcpStatus;
+use crate::ai::mcp::telemetry::McpGovernanceTelemetryEvent;
 use crate::ai::mcp::{
     logs, Author, CloudMCPServer, FileBasedMCPManager, JsonTemplate, MCPGalleryManager, MCPServer,
-    MCPServerExt, MCPServerUpdate, ParsedTemplatableMCPServerResult, StaticEnvVar,
-    TemplatableMCPServer, TemplatableMCPServerInstallation, TransportType,
+    MCPServerExt, MCPServerUpdate, McpGovernance, McpGovernanceEvent,
+    ParsedTemplatableMCPServerResult, ServerOrigin, StaticEnvVar, TemplatableMCPServer,
+    TemplatableMCPServerInstallation, TransportType,
 };
 use crate::auth::AuthStateProvider;
 use crate::cloud_object::model::persistence::{CloudModel, CloudModelEvent};
@@ -227,6 +229,16 @@ impl TemplatableMCPServerManager {
         running_legacy_server_uuids: &[Uuid],
         ctx: &mut ModelContext<Self>,
     ) -> Self {
+        // Shut down running servers that a governance policy tightening no
+        // longer allows. Loosening never auto-restarts servers.
+        if FeatureFlag::McpGovernance.is_enabled() {
+            ctx.subscribe_to_model(&McpGovernance::handle(ctx), |me, _, event, ctx| {
+                if matches!(event, McpGovernanceEvent::PolicyChanged) {
+                    me.handle_governance_policy_changed(ctx);
+                }
+            });
+        }
+
         // Subscribe to FileBasedMCPManager events.
         let file_based_mcp_manager = FileBasedMCPManager::handle(ctx);
         ctx.subscribe_to_model(&file_based_mcp_manager, |me, _, event, ctx| match event {
@@ -440,6 +452,27 @@ impl TemplatableMCPServerManager {
         new_state: MCPServerState,
         ctx: &mut ModelContext<Self>,
     ) {
+        // Defense in depth: never record a server as entering an active state
+        // when org governance policy forbids it. The spawn choke points are
+        // the primary gate; this catches transitions raced against a policy
+        // tightening.
+        if matches!(
+            new_state,
+            MCPServerState::Starting | MCPServerState::Authenticating | MCPServerState::Running
+        ) && self.governance_blocks_installation_uuid(installation_uuid, ctx)
+        {
+            log::info!(
+                "Refusing to transition MCP server {installation_uuid} to {new_state:?}: blocked by organization governance policy"
+            );
+            self.server_states
+                .insert(installation_uuid, MCPServerState::NotRunning);
+            ctx.emit(TemplatableMCPServerManagerEvent::StateChanged {
+                uuid: installation_uuid,
+                state: MCPServerState::NotRunning,
+            });
+            return;
+        }
+
         // If a server is rapidly stopped and started there is a race condition
         // Checking the server's actual status helps us avoid this
         if matches!(new_state, MCPServerState::NotRunning)
@@ -667,6 +700,49 @@ impl TemplatableMCPServerManager {
         }
     }
 
+    /// The provenance used for governance decisions about the given
+    /// installation UUID. Unknown UUIDs (e.g. ephemeral servers whose
+    /// installation isn't tracked here) are treated as `Manual`, which is
+    /// only blocked by the `Disable` kill switch.
+    fn governance_origin_for_uuid(&self, installation_uuid: Uuid) -> ServerOrigin {
+        self.locally_installed_servers
+            .get(&installation_uuid)
+            .map(|installation| installation.origin())
+            .unwrap_or(ServerOrigin::Manual)
+    }
+
+    /// Whether org governance policy forbids running the server with the
+    /// given installation UUID. Cheap and re-entrancy-safe: only consults
+    /// this manager's own state plus the resolved policy.
+    fn governance_blocks_installation_uuid(
+        &self,
+        installation_uuid: Uuid,
+        app: &AppContext,
+    ) -> bool {
+        !McpGovernance::current_policy(app)
+            .allows_spawn(self.governance_origin_for_uuid(installation_uuid))
+    }
+
+    /// Single spawn-time governance gate consulted by every spawn choke
+    /// point. Returns `true` (and records telemetry) when the spawn must be
+    /// blocked.
+    fn governance_blocks_spawn(
+        &mut self,
+        installation: &TemplatableMCPServerInstallation,
+        ctx: &mut ModelContext<Self>,
+    ) -> bool {
+        if McpGovernance::current_policy(ctx).allows_spawn(installation.origin()) {
+            return false;
+        }
+        log::info!(
+            "Blocked spawn of MCP server '{}' ({}): disabled by organization governance policy",
+            installation.templatable_mcp_server().name,
+            installation.uuid()
+        );
+        send_telemetry_from_ctx!(McpGovernanceTelemetryEvent::GovernanceBlockedSpawn, ctx);
+        true
+    }
+
     /// Spawns an ephemeral MCP server from a given [`TemplatableMCPServerInstallation`].
     ///
     /// Unlike `spawn_server`, this method takes the installation directly and does not
@@ -679,6 +755,10 @@ impl TemplatableMCPServerManager {
     ) {
         let installation_uuid = installation.uuid();
         log::debug!("Spawning ephemeral server with installation_uuid {installation_uuid}");
+
+        if self.governance_blocks_spawn(&installation, ctx) {
+            return;
+        }
 
         self.spawn_server_impl(
             installation,
@@ -695,6 +775,9 @@ impl TemplatableMCPServerManager {
         installation: TemplatableMCPServerInstallation,
         ctx: &mut ModelContext<Self>,
     ) {
+        if self.governance_blocks_spawn(&installation, ctx) {
+            return;
+        }
         self.cli_spawned_server_uuids.insert(installation.uuid());
         self.spawn_ephemeral_server(installation, ctx);
     }
@@ -725,6 +808,10 @@ impl TemplatableMCPServerManager {
             self.change_server_state(installation_uuid, MCPServerState::FailedToStart, ctx);
             return;
         };
+
+        if self.governance_blocks_spawn(&installation, ctx) {
+            return;
+        }
 
         self.spawn_server_impl(
             installation,
@@ -1107,6 +1194,29 @@ impl TemplatableMCPServerManager {
         start_automatically: bool,
         ctx: &mut ModelContext<Self>,
     ) -> Option<TemplatableMCPServerInstallation> {
+        // All install paths (gallery installs, Cursor import, manual adds)
+        // funnel through here, so this is the single install-time governance
+        // gate.
+        if !McpGovernance::current_policy(ctx).allows_new_installs() {
+            log::info!(
+                "Blocked install of MCP server '{}': disabled by organization governance policy",
+                templatable_mcp_server.name
+            );
+            send_telemetry_from_ctx!(McpGovernanceTelemetryEvent::GovernanceBlockedInstall, ctx);
+            if let Some(window_id) = WindowManager::as_ref(ctx).active_window() {
+                ToastStack::handle(ctx).update(ctx, |toast_stack, ctx| {
+                    toast_stack.add_ephemeral_toast(
+                        DismissibleToast::error(
+                            "MCP server installs are managed by your organization".to_string(),
+                        ),
+                        window_id,
+                        ctx,
+                    );
+                });
+            }
+            return None;
+        }
+
         let installation_uuid = Uuid::new_v4();
 
         // Idempotent safety checks
@@ -1717,7 +1827,76 @@ impl TemplatableMCPServerManager {
             return;
         };
 
+        if self.governance_blocks_spawn(&installation, ctx) {
+            self.notify_reconnect_waiters(
+                installation_uuid,
+                Err("MCP server is disabled by your organization's policy".to_string()),
+            );
+            return;
+        }
+
         self.spawn_server_impl(installation, SpawnMode::Reconnect, ctx);
+    }
+
+    /// Shuts down running servers that a changed governance policy no longer
+    /// allows (mirrors `handle_file_based_mcp_enabled_change`). Tightening
+    /// stops servers and shows a toast; loosening never auto-restarts
+    /// anything.
+    fn handle_governance_policy_changed(&mut self, ctx: &mut ModelContext<Self>) {
+        let policy = McpGovernance::current_policy(ctx);
+
+        // Running (or still-starting) servers, with the provenance used for
+        // governance decisions. File-based servers aren't tracked in
+        // `locally_installed_servers`, so consult the FileBasedMCPManager
+        // for those.
+        let running_uuids: HashSet<Uuid> = self
+            .active_servers
+            .keys()
+            .chain(self.spawned_servers.keys())
+            .copied()
+            .collect();
+        let file_based_manager = FileBasedMCPManager::as_ref(ctx);
+        let running_servers: Vec<(Uuid, ServerOrigin)> = running_uuids
+            .into_iter()
+            .map(|uuid| {
+                let origin = if file_based_manager.get_installation_by_uuid(uuid).is_some() {
+                    ServerOrigin::FileBased
+                } else {
+                    self.governance_origin_for_uuid(uuid)
+                };
+                (uuid, origin)
+            })
+            .collect();
+
+        let shutdown_set = policy.compute_shutdown_set(running_servers);
+        if shutdown_set.is_empty() {
+            return;
+        }
+
+        let server_count = shutdown_set.len();
+        log::info!(
+            "Organization governance policy tightened; shutting down {server_count} running MCP server(s)"
+        );
+        for installation_uuid in shutdown_set {
+            self.shutdown_server(installation_uuid, ctx);
+        }
+
+        send_telemetry_from_ctx!(
+            McpGovernanceTelemetryEvent::GovernancePolicyShutdown { server_count },
+            ctx
+        );
+
+        if let Some(window_id) = WindowManager::as_ref(ctx).active_window() {
+            ToastStack::handle(ctx).update(ctx, |toast_stack, ctx| {
+                toast_stack.add_ephemeral_toast(
+                    DismissibleToast::error(
+                        "MCP servers disabled by your organization".to_string(),
+                    ),
+                    window_id,
+                    ctx,
+                );
+            });
+        }
     }
 
     /// Notifies all pending reconnection waiters for the given installation UUID.

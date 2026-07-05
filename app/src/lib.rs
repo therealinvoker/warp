@@ -184,7 +184,7 @@ use crate::ai::active_agent_views_model::ActiveAgentViewsModel;
 use crate::ai::aws_credentials::AwsCredentialRefresher as _;
 #[cfg(not(target_family = "wasm"))]
 use crate::ai::geap_credentials::GeapCredentialRefresher as _;
-use crate::ai::mcp::{FileBasedMCPManager, FileMCPWatcher};
+use crate::ai::mcp::{FileBasedMCPManager, FileMCPWatcher, McpGovernance};
 use crate::uri::web_intent_parser::maybe_rewrite_web_url_to_intent;
 use crate::view_components::DismissibleToast;
 pub mod workflows;
@@ -1402,6 +1402,13 @@ pub(crate) fn initialize_app(
         })
     });
 
+    // The MCP governance policy snapshot must be available before the MCP
+    // managers are registered so a cached DISABLE is enforced before any
+    // server autostart.
+    let mut cached_mcp_governance_policy_json = sqlite_data
+        .as_ref()
+        .and_then(|sqlite_data| sqlite_data.mcp_governance_policy_json.clone());
+
     let (
         mut cloud_objects,
         mut cached_workspaces,
@@ -1489,6 +1496,7 @@ pub(crate) fn initialize_app(
         persisted_ignored_suggestions = Default::default();
         persisted_mcp_server_installations = Default::default();
         mcp_servers_to_restore = Default::default();
+        cached_mcp_governance_policy_json = None;
     }
 
     // Initialize a global model to track server-side experiment state.
@@ -2041,6 +2049,11 @@ pub(crate) fn initialize_app(
         .as_ref()
         .map(|app_state| app_state.running_mcp_servers.as_slice())
         .unwrap_or(&[]);
+
+    // McpGovernance must be registered before the MCP managers so its cached
+    // policy snapshot gates file-based auto-start and server restore. It
+    // subscribes to UserWorkspaces, which must already be registered.
+    ctx.add_singleton_model(|ctx| McpGovernance::new(cached_mcp_governance_policy_json, ctx));
 
     // FileMCPWatcher must be registered before FileBasedMCPManager, which subscribes to it.
     ctx.add_singleton_model(FileMCPWatcher::new);

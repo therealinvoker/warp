@@ -203,6 +203,9 @@ pub struct PersistedData {
     pub ignored_suggestions: Vec<(String, SuggestionType)>,
     pub mcp_server_installations: HashMap<Uuid, TemplatableMCPServerInstallation>,
     pub mcp_servers_to_restore: Vec<Uuid>,
+    /// JSON snapshot of the effective MCP governance policy, applied at
+    /// startup before any MCP autostart. `None` when no snapshot exists.
+    pub mcp_governance_policy_json: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -374,6 +377,10 @@ pub enum ModelEvent {
     UpdateMCPInstallationRunning {
         installation_uuid: Uuid,
         running: bool,
+    },
+    /// Persist the effective MCP governance policy snapshot (single row).
+    UpsertMcpGovernancePolicy {
+        policy_json: String,
     },
     UpsertWorkspaceLanguageServer {
         workspace_path: PathBuf,

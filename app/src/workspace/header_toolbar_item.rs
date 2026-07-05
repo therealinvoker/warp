@@ -73,7 +73,10 @@ impl HeaderToolbarItemKind {
                     && FeatureFlag::AgentManagementView.is_enabled()
                     && !is_web_anonymous_user
             }
-            Self::CodeReview => cfg!(feature = "local_fs"),
+            // Code review moved into the tools panel as a tab; it is no longer a
+            // configurable header toolbar item. The variant is retained only so
+            // previously-saved header configs referencing it still deserialize.
+            Self::CodeReview => false,
             Self::NotificationsMailbox => FeatureFlag::HOANotifications.is_enabled(),
         }
     }
@@ -98,20 +101,21 @@ impl HeaderToolbarItemKind {
     }
 
     pub fn default_left() -> Vec<Self> {
-        vec![Self::TabsPanel, Self::ToolsPanel, Self::AgentManagement]
+        vec![Self::TabsPanel, Self::AgentManagement]
     }
 
     pub fn default_right() -> Vec<Self> {
-        vec![Self::CodeReview, Self::NotificationsMailbox]
+        vec![Self::NotificationsMailbox, Self::ToolsPanel]
     }
 
-    /// All toolbar item variants (availability filtering is done at the call site).
+    /// All toolbar item variants offered by the configurator. Code review is
+    /// intentionally excluded — it now lives as a tab in the tools panel.
+    /// (availability filtering is done at the call site).
     pub fn all_items() -> Vec<Self> {
         vec![
             Self::TabsPanel,
             Self::ToolsPanel,
             Self::AgentManagement,
-            Self::CodeReview,
             Self::NotificationsMailbox,
         ]
     }

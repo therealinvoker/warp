@@ -2,6 +2,19 @@
 
 This file provides guidance when working with code in this repository.
 
+## Fork Notes — Personal Fork (Do Not Upstream)
+
+> **This checkout is a personal fork.** Work here targets the owner's own repository and a custom backend — it is **not** meant to be contributed back to `warpdotdev/warp`. Do **not** open pull requests, push branches, or file issues against the upstream Warp repo from this checkout.
+>
+> - **No upstream PRs.** The "Pull Request Workflow" section below is retained only as a reference for code hygiene (format/clippy) on the fork — it does not imply contributing upstream.
+> - **Custom backend.** This fork re-points the OSS client at a local identity + AI inference backend in `../harness-backend` (Node.js/Express/MongoDB) that stands in for Warp's servers (auth, GraphQL, AI multi-agent).
+> - **Local-only client changes** live in `crates/warp_core/src/channel/` (OSS honors server-URL overrides), `crates/warp_server_auth/` and `crates/warp_server_client/src/auth/` (plain `Bearer` JWT login, bypassing Firebase; persisted across restarts), and `app/src/auth/` (onboarding "Create account" CTA on the third-party skip screen).
+> - **Run against the harness:**
+>   ```bash
+>   WARP_SERVER_ROOT_URL=http://localhost:8088 ./script/run
+>   ```
+>   The OSS channel now honors `WARP_SERVER_ROOT_URL`, so the client talks to the local harness backend instead of Warp's servers.
+
 ## Development Commands
 
 ### Build and Run

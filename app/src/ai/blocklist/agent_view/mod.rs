@@ -27,13 +27,11 @@ use pathfinder_color::ColorU;
 use warp_core::ui::appearance::Appearance;
 use warp_core::ui::color::blend::Blend;
 use warp_core::ui::theme::Fill;
-use warpui::fonts::Properties;
 use warpui::keymap::Keystroke;
 use warpui::{AppContext, SingletonEntity};
 pub use zero_state_block::*;
 
 use crate::terminal::model::TerminalModel;
-use crate::view_components::action_button::ActionButtonTheme;
 
 pub static ENTER_AGENT_VIEW_NEW_CONVERSATION_KEYSTROKE: LazyLock<Keystroke> = LazyLock::new(|| {
     cfg_if::cfg_if! {
@@ -102,62 +100,4 @@ pub fn agent_view_bg_color(app: &AppContext) -> ColorU {
     agent_view_bg_fill(app)
         .blend(&Appearance::as_ref(app).theme().background())
         .into_solid()
-}
-
-pub struct AgentViewHeaderTheme;
-
-impl ActionButtonTheme for AgentViewHeaderTheme {
-    fn background(&self, _: bool, _: &Appearance) -> Option<Fill> {
-        None
-    }
-
-    fn text_color(
-        &self,
-        hovered: bool,
-        background: Option<Fill>,
-        appearance: &Appearance,
-    ) -> ColorU {
-        if hovered {
-            appearance
-                .theme()
-                .main_text_color(background.unwrap_or(appearance.theme().background()))
-                .into_solid()
-        } else {
-            appearance
-                .theme()
-                .sub_text_color(background.unwrap_or(appearance.theme().background()))
-                .into_solid()
-        }
-    }
-
-    fn font_properties(&self) -> Option<Properties> {
-        Some(Properties::default())
-    }
-
-    fn keyboard_shortcut_background(&self, appearance: &Appearance) -> Option<ColorU> {
-        Some(appearance.theme().surface_overlay_2().into_solid())
-    }
-}
-
-pub struct AgentViewHeaderDisabledTheme;
-
-impl ActionButtonTheme for AgentViewHeaderDisabledTheme {
-    fn background(&self, _: bool, _: &Appearance) -> Option<Fill> {
-        None
-    }
-
-    fn text_color(&self, _: bool, background: Option<Fill>, appearance: &Appearance) -> ColorU {
-        appearance
-            .theme()
-            .disabled_text_color(background.unwrap_or(appearance.theme().background()))
-            .into_solid()
-    }
-
-    fn keyboard_shortcut_background(&self, _: &Appearance) -> Option<ColorU> {
-        None
-    }
-
-    fn font_properties(&self) -> Option<Properties> {
-        Some(Properties::default())
-    }
 }

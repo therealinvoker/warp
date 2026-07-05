@@ -285,6 +285,10 @@ fn enabled_features() -> HashSet<FeatureFlag> {
         FeatureFlag::McpOauth,
         #[cfg(feature = "file_based_mcp")]
         FeatureFlag::FileBasedMcp,
+        #[cfg(feature = "cursor_mcp_import")]
+        FeatureFlag::CursorMcpImport,
+        #[cfg(feature = "mcp_governance")]
+        FeatureFlag::McpGovernance,
         #[cfg(feature = "diff_set_as_context")]
         FeatureFlag::DiffSetAsContext,
         #[cfg(feature = "discard_per_file_and_all_changes")]

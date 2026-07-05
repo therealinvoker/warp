@@ -18,7 +18,7 @@ use warpui::{Entity, ModelContext, SingletonEntity, UpdateModel};
 
 use super::auth_state::{AuthState, PersistAction};
 use super::auth_view_modal::{AuthRedirectPayload, AuthViewVariant};
-use super::credentials::{Credentials, FirebaseToken, LoginToken};
+use super::credentials::{Credentials, FirebaseToken, LoginToken, RefreshToken};
 use super::user::User;
 use super::user_properties::UserProperties;
 use super::{AuthStateProvider, UserUid};
@@ -189,17 +189,29 @@ impl AuthManager {
             send_telemetry_from_ctx!(TelemetryEvent::AnonymousUserLinkedFromBrowser, ctx);
         }
 
+        let login_token = Self::login_token_for_refresh(refresh_token);
+
         let _ = ctx.spawn(
             async move {
                 auth_client
-                    .fetch_user(
-                        LoginToken::Firebase(FirebaseToken::Refresh(refresh_token)),
-                        false, /* for_refresh */
-                    )
+                    .fetch_user(login_token, false /* for_refresh */)
                     .await
             },
             Self::on_user_fetched,
         );
+    }
+
+    /// Builds the [`LoginToken`] used to fetch the user from an auth redirect's refresh token.
+    ///
+    /// OSS bypass: when server URL overrides are allowed (our OSS dev build pointed at a
+    /// custom backend), treat the redirect's refresh token as a plain bearer JWT and skip
+    /// the Firebase token exchange entirely. Otherwise use the normal Firebase flow.
+    fn login_token_for_refresh(refresh_token: RefreshToken) -> LoginToken {
+        if ChannelState::channel().allows_server_url_overrides() {
+            LoginToken::Bearer(refresh_token.get().to_string())
+        } else {
+            LoginToken::Firebase(FirebaseToken::Refresh(refresh_token))
+        }
     }
 
     pub fn resume_interrupted_auth_payload(
@@ -216,13 +228,12 @@ impl AuthManager {
 
         let auth_client = self.auth_client.clone();
 
+        let login_token = Self::login_token_for_refresh(refresh_token);
+
         let _ = ctx.spawn(
             async move {
                 auth_client
-                    .fetch_user(
-                        LoginToken::Firebase(FirebaseToken::Refresh(refresh_token)),
-                        false, /* for_refresh */
-                    )
+                    .fetch_user(login_token, false /* for_refresh */)
                     .await
             },
             Self::on_user_fetched,

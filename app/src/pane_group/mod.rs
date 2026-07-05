@@ -929,8 +929,6 @@ pub struct PaneGroup {
     pub left_panel_open: bool,
     /// If the right panel is open for this pane group
     pub right_panel_open: bool,
-    /// If the right panel is maximized
-    pub is_right_panel_maximized: bool,
 
     /// Ambient agent panes whose task data was not yet cached at restoration time.
     /// Entries are removed as each task's data arrives and the pane is replaced.
@@ -3123,7 +3121,6 @@ impl PaneGroup {
             pane_with_open_agent_assisted_environment_modal: None,
             right_panel_open: false,
             left_panel_open: false,
-            is_right_panel_maximized: false,
             pending_ambient_agent_conversation_restorations: HashMap::new(),
             pending_remote_child_hydrations: HashMap::new(),
             pending_ambient_restoration_subscription_installed: false,
@@ -4866,15 +4863,6 @@ impl PaneGroup {
         if let Some(replacement_id) = self.panes.replacement_pane_for_original(pane_id) {
             self.revert_swap_clearing_split_off(replacement_id, ctx);
             self.handle_pane_count_change(ctx);
-            // The visible content of this slot changed; refresh agent-view
-            // back-button labels on both sides.
-            for refresh_pane_id in [pane_id, replacement_id] {
-                if let Some(terminal_view) = self.terminal_view_from_pane_id(refresh_pane_id, ctx) {
-                    terminal_view.update(ctx, |view, ctx| {
-                        view.update_agent_view_back_button_state(ctx);
-                    });
-                }
-            }
             ctx.emit(Event::TerminalViewStateChanged);
             ctx.emit(Event::AppStateChanged);
         } else if !self.panes.is_pane_in_tree(pane_id) {
@@ -6957,13 +6945,6 @@ impl PaneGroup {
             self.revert_swap_clearing_split_off(replacement_id, ctx);
             self.handle_pane_count_change(ctx);
             self.focus_pane_preserving_maximized_state(target_pane_id, true, ctx);
-            for pane_id in [replacement_id, target_pane_id] {
-                if let Some(terminal_view) = self.terminal_view_from_pane_id(pane_id, ctx) {
-                    terminal_view.update(ctx, |view, ctx| {
-                        view.update_agent_view_back_button_state(ctx);
-                    });
-                }
-            }
             ctx.emit(Event::TerminalViewStateChanged);
             ctx.emit(Event::AppStateChanged);
             return;
@@ -6983,11 +6964,6 @@ impl PaneGroup {
         if anchor == target_pane_id {
             self.handle_pane_count_change(ctx);
             self.focus_pane_preserving_maximized_state(anchor, true, ctx);
-            if let Some(terminal_view) = self.terminal_view_from_pane_id(anchor, ctx) {
-                terminal_view.update(ctx, |view, ctx| {
-                    view.update_agent_view_back_button_state(ctx);
-                });
-            }
             ctx.emit(Event::TerminalViewStateChanged);
             ctx.emit(Event::AppStateChanged);
             return;
@@ -6998,11 +6974,6 @@ impl PaneGroup {
         {
             self.handle_pane_count_change(ctx);
             self.focus_pane_preserving_maximized_state(target_pane_id, true, ctx);
-            if let Some(terminal_view) = self.terminal_view_from_pane_id(target_pane_id, ctx) {
-                terminal_view.update(ctx, |view, ctx| {
-                    view.update_agent_view_back_button_state(ctx);
-                });
-            }
             ctx.emit(Event::TerminalViewStateChanged);
             ctx.emit(Event::AppStateChanged);
             return;
@@ -7019,15 +6990,6 @@ impl PaneGroup {
         }
         self.handle_pane_count_change(ctx);
         self.focus_pane_preserving_maximized_state(target_pane_id, true, ctx);
-        // Refresh the back-button label on both swapped panes; otherwise
-        // a stale label would persist until the next agent-view entry.
-        for pane_id in [anchor, target_pane_id] {
-            if let Some(terminal_view) = self.terminal_view_from_pane_id(pane_id, ctx) {
-                terminal_view.update(ctx, |view, ctx| {
-                    view.update_agent_view_back_button_state(ctx);
-                });
-            }
-        }
 
         ctx.emit(Event::TerminalViewStateChanged);
         ctx.emit(Event::AppStateChanged);
@@ -7095,13 +7057,6 @@ impl PaneGroup {
         if let Some(child_terminal_view) = self.terminal_view_from_pane_id(child_pane_id, ctx) {
             child_terminal_view.update(ctx, |view, ctx| {
                 view.mark_as_orchestration_split_off(ctx);
-            });
-        }
-
-        // Refresh the back-button label on the orchestrator pane.
-        if let Some(terminal_view) = self.terminal_view_from_pane_id(split_base, ctx) {
-            terminal_view.update(ctx, |view, ctx| {
-                view.update_agent_view_back_button_state(ctx);
             });
         }
 

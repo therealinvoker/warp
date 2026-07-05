@@ -1,6 +1,9 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 
+use repo_metadata::repositories::DetectedRepositories;
 use uuid::Uuid;
+use warp_util::local_or_remote_path::LocalOrRemotePath;
 use warpui::elements::{ChildView, Container};
 use warpui::ui_components::components::{Coords, UiComponentStyles};
 use warpui::{
@@ -10,8 +13,8 @@ use warpui::{
 use crate::ai::mcp::gallery::MCPGalleryManager;
 use crate::ai::mcp::templatable_installation::VariableValue;
 use crate::ai::mcp::{
-    FileBasedMCPManager, TemplatableMCPServer, TemplatableMCPServerInstallation,
-    TemplatableMCPServerManager,
+    home_config_file_path, FileBasedMCPManager, MCPProvider, McpGovernance, TemplatableMCPServer,
+    TemplatableMCPServerInstallation, TemplatableMCPServerManager,
 };
 use crate::appearance::Appearance;
 use crate::cloud_object::Space;
@@ -19,6 +22,9 @@ use crate::modal::{Modal, ModalViewState};
 use crate::server::cloud_objects::update_manager::InitiatedBy;
 use crate::settings_view::mcp_servers::edit_page::{
     MCPServersEditPageView, MCPServersEditPageViewEvent,
+};
+use crate::settings_view::mcp_servers::import_from_cursor_modal::{
+    ImportFromCursorModalBody, ImportFromCursorModalBodyEvent,
 };
 use crate::settings_view::mcp_servers::installation_modal::{
     InstallationModalBody, InstallationModalBodyEvent,
@@ -30,7 +36,7 @@ use crate::settings_view::mcp_servers::{style, ServerCardItemId};
 use crate::settings_view::settings_page::{MatchData, PageType, SettingsPageMeta, SettingsWidget};
 use crate::settings_view::SettingsSection;
 use crate::view_components::DismissibleToast;
-use crate::workspace::ToastStack;
+use crate::workspace::{ToastStack, Workspace};
 
 /// Describes where an MCP install request originated.
 ///
@@ -72,6 +78,7 @@ pub struct MCPServersSettingsPageView {
     list_view: ViewHandle<MCPServersListPageView>,
     edit_view: ViewHandle<MCPServersEditPageView>,
     installation_modal_state: ModalViewState<Modal<InstallationModalBody>>,
+    import_from_cursor_modal_state: ModalViewState<Modal<ImportFromCursorModalBody>>,
 }
 
 impl MCPServersSettingsPageView {
@@ -99,6 +106,22 @@ impl MCPServersSettingsPageView {
         });
         let installation_modal_state = ModalViewState::new(installation_modal);
 
+        let import_from_cursor_modal_body =
+            ctx.add_typed_action_view(ImportFromCursorModalBody::new);
+        ctx.subscribe_to_view(&import_from_cursor_modal_body, |me, _, event, ctx| {
+            me.handle_import_from_cursor_modal_body_event(event, ctx);
+        });
+
+        let import_from_cursor_modal = ctx.add_typed_action_view(|ctx| {
+            Modal::new(None, import_from_cursor_modal_body, ctx).with_body_style(
+                UiComponentStyles {
+                    padding: Some(Coords::uniform(0.)),
+                    ..Default::default()
+                },
+            )
+        });
+        let import_from_cursor_modal_state = ModalViewState::new(import_from_cursor_modal);
+
         Self {
             page: PageType::new_monolith(
                 MCPServersSettingsWidget::default(),
@@ -109,6 +132,7 @@ impl MCPServersSettingsPageView {
             list_view,
             edit_view,
             installation_modal_state,
+            import_from_cursor_modal_state,
         }
     }
 
@@ -238,9 +262,14 @@ impl MCPServersSettingsPageView {
         ctx: &mut ViewContext<Self>,
     ) -> Option<TemplatableMCPServerInstallation> {
         TemplatableMCPServerManager::handle(ctx).update(ctx, |templatable_manager, ctx| {
-            if templatable_manager
-                .get_cloud_server(templatable_mcp_server.uuid, ctx)
-                .is_none()
+            // Don't create the cloud template when org governance will block
+            // the install anyway; `install_from_template` below surfaces the
+            // "managed by your organization" error and returns `None`.
+            let installs_allowed = McpGovernance::current_policy(ctx).allows_new_installs();
+            if installs_allowed
+                && templatable_manager
+                    .get_cloud_server(templatable_mcp_server.uuid, ctx)
+                    .is_none()
             {
                 templatable_manager.create_templatable_mcp_server(
                     templatable_mcp_server.clone(),
@@ -411,6 +440,103 @@ impl MCPServersSettingsPageView {
             MCPServersListPageViewEvent::HideModal => {
                 ctx.emit(MCPServersSettingsPageEvent::HideModal);
             }
+            MCPServersListPageViewEvent::ImportFromCursor => {
+                self.open_import_from_cursor_modal(ctx);
+            }
+        }
+    }
+
+    /// Returns the Cursor config files to scan for the import flow: the global
+    /// `~/.cursor/mcp.json` plus the current project's `.cursor/mcp.json`, when
+    /// the active session is inside a detected repository.
+    fn cursor_config_scan_paths(&self, ctx: &mut ViewContext<Self>) -> Vec<PathBuf> {
+        let mut paths = Vec::new();
+        if let Some(home_config) = home_config_file_path(MCPProvider::Cursor) {
+            paths.push(home_config);
+        }
+        if let Some(project_config) = self.current_project_cursor_config_path(ctx) {
+            if !paths.contains(&project_config) {
+                paths.push(project_config);
+            }
+        }
+        paths
+    }
+
+    /// Returns `<repo root>/.cursor/mcp.json` for the active session's working
+    /// directory, if the session is local and inside a detected repository.
+    fn current_project_cursor_config_path(&self, ctx: &mut ViewContext<Self>) -> Option<PathBuf> {
+        let window_id = ctx.window_id();
+        let workspace = ctx
+            .views_of_type::<Workspace>(window_id)
+            .and_then(|views| views.first().cloned())?;
+        let terminal = workspace.read(ctx, |workspace, ctx| {
+            workspace
+                .active_tab_pane_group()
+                .as_ref(ctx)
+                .active_session_view(ctx)
+        })?;
+        let cwd = terminal.as_ref(ctx).active_session_path_if_local(ctx)?;
+        let repo_root = DetectedRepositories::as_ref(ctx)
+            .get_root_for_path(&LocalOrRemotePath::Local(cwd))
+            .and_then(|root| PathBuf::try_from(root).ok())?;
+        Some(repo_root.join(MCPProvider::Cursor.project_config_path()))
+    }
+
+    fn open_import_from_cursor_modal(&mut self, ctx: &mut ViewContext<Self>) {
+        let scan_paths = self.cursor_config_scan_paths(ctx);
+        self.import_from_cursor_modal_state
+            .view
+            .update(ctx, |modal, ctx| {
+                modal.body().update(ctx, |body, ctx| {
+                    body.begin_scan(scan_paths, ctx);
+                });
+            });
+        self.import_from_cursor_modal_state.open();
+        ctx.focus(&self.import_from_cursor_modal_state.view);
+        ctx.emit(MCPServersSettingsPageEvent::ShowModal);
+        ctx.notify();
+    }
+
+    fn handle_import_from_cursor_modal_body_event(
+        &mut self,
+        event: &ImportFromCursorModalBodyEvent,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        match event {
+            ImportFromCursorModalBodyEvent::Import(servers) => {
+                let mut imported_count = 0;
+                for (templatable_mcp_server, variable_values) in servers {
+                    // Installs blocked by org governance return `None` (the
+                    // manager surfaces a "managed by your organization"
+                    // error toast); don't count them as imported.
+                    if self
+                        .process_server_installation(
+                            templatable_mcp_server,
+                            variable_values.clone(),
+                            ctx,
+                        )
+                        .is_some()
+                    {
+                        imported_count += 1;
+                    }
+                }
+                self.import_from_cursor_modal_state.close();
+                ctx.emit(MCPServersSettingsPageEvent::HideModal);
+                if imported_count > 0 {
+                    let message = if imported_count == 1 {
+                        "Imported 1 MCP server from Cursor".to_string()
+                    } else {
+                        format!("Imported {imported_count} MCP servers from Cursor")
+                    };
+                    self.add_toast(&message, ctx);
+                }
+                ctx.notify();
+            }
+            ImportFromCursorModalBodyEvent::Cancel => {
+                self.import_from_cursor_modal_state.close();
+                ctx.emit(MCPServersSettingsPageEvent::HideModal);
+                ctx.notify();
+            }
         }
     }
 
@@ -441,6 +567,8 @@ impl MCPServersSettingsPageView {
     pub fn get_modal_content(&self, app: &AppContext) -> Option<Box<dyn Element>> {
         if self.installation_modal_state.is_open() {
             Some(self.installation_modal_state.render())
+        } else if self.import_from_cursor_modal_state.is_open() {
+            Some(self.import_from_cursor_modal_state.render())
         } else {
             match self.current_page {
                 MCPServersSettingsPage::List => self

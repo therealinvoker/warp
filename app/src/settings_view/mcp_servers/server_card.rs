@@ -83,6 +83,7 @@ pub struct ServerCardMouseHandles {
     share_icon_button: MouseStateHandle,
     edit_icon_button: MouseStateHandle,
     update_icon_button: MouseStateHandle,
+    lock_icon_button: MouseStateHandle,
 
     view_logs_button: MouseStateHandle,
     edit_config_button: MouseStateHandle,
@@ -141,6 +142,10 @@ pub struct ServerCardOptions {
     pub status_indicator: Option<StatusElement>,
     pub status_line: Option<String>,
     pub background: Background,
+    /// Whether the server is locked by the organization's MCP governance
+    /// policy: renders a lock icon with an explanatory tooltip and no
+    /// start/stop affordances.
+    pub locked: bool,
 }
 
 #[derive(PartialEq, Clone, Copy)]
@@ -153,6 +158,9 @@ pub enum ServerCardStatus {
     Running,
     ShuttingDown,
     Error,
+    /// Disabled by the organization's MCP governance policy: visible for
+    /// transparency, but cannot be started or installed.
+    Locked,
 }
 
 // TODO(aeybel): We'll want to get rid of this `from` function and the ServerCardStatus enum
@@ -188,6 +196,7 @@ impl From<ServerCardStatus> for ServerCardOptions {
                 status_line: None,
                 background: Background::Transparent,
                 full_card_clickable: true,
+                locked: false,
             },
             ServerCardStatus::SavedToDrive => ServerCardOptions {
                 show_view_logs_icon_button: false,
@@ -205,6 +214,7 @@ impl From<ServerCardStatus> for ServerCardOptions {
                 status_line: None,
                 background: Background::Filled,
                 full_card_clickable: false,
+                locked: false,
             },
             ServerCardStatus::Installed => ServerCardOptions {
                 show_view_logs_icon_button: true,
@@ -225,6 +235,7 @@ impl From<ServerCardStatus> for ServerCardOptions {
                 status_line: Some("Offline".to_string()),
                 background: Background::Filled,
                 full_card_clickable: false,
+                locked: false,
             },
             ServerCardStatus::StartingServer => ServerCardOptions {
                 show_view_logs_icon_button: true,
@@ -245,6 +256,7 @@ impl From<ServerCardStatus> for ServerCardOptions {
                 status_line: Some("Starting server...".to_string()),
                 background: Background::Filled,
                 full_card_clickable: false,
+                locked: false,
             },
             ServerCardStatus::Authenticating => ServerCardOptions {
                 show_view_logs_icon_button: true,
@@ -265,6 +277,7 @@ impl From<ServerCardStatus> for ServerCardOptions {
                 status_line: Some("Authenticating...".to_string()),
                 background: Background::Filled,
                 full_card_clickable: false,
+                locked: false,
             },
             ServerCardStatus::Running => ServerCardOptions {
                 show_view_logs_icon_button: true,
@@ -285,6 +298,7 @@ impl From<ServerCardStatus> for ServerCardOptions {
                 status_line: None,
                 background: Background::Filled,
                 full_card_clickable: false,
+                locked: false,
             },
             ServerCardStatus::ShuttingDown => ServerCardOptions {
                 show_view_logs_icon_button: true,
@@ -305,6 +319,28 @@ impl From<ServerCardStatus> for ServerCardOptions {
                 status_line: Some("Shutting down...".to_string()),
                 background: Background::Filled,
                 full_card_clickable: false,
+                locked: false,
+            },
+            ServerCardStatus::Locked => ServerCardOptions {
+                show_view_logs_icon_button: false,
+                show_log_out_icon_button: false,
+                show_share_icon_button: false,
+                show_edit_config_icon_button: false,
+                show_update_available_icon_button: false,
+                show_view_logs_text_button: false,
+                show_edit_config_text_button: false,
+                show_setup_text_button: false,
+                show_add_icon: false,
+
+                server_running_switch_state: None,
+                status_indicator: Some(StatusElement {
+                    indicator_type: StatusElementTypes::Icon(Icon::Lock),
+                    color: StatusColor::Neutral,
+                }),
+                status_line: Some("Disabled by your organization".to_string()),
+                background: Background::Filled,
+                full_card_clickable: false,
+                locked: true,
             },
             ServerCardStatus::Error => ServerCardOptions {
                 show_view_logs_icon_button: false,
@@ -325,6 +361,7 @@ impl From<ServerCardStatus> for ServerCardOptions {
                 status_line: None,
                 background: Background::Filled,
                 full_card_clickable: false,
+                locked: false,
             },
         }
     }
@@ -808,6 +845,20 @@ impl ServerCardView {
 
         if self.render_options.show_update_available_icon_button {
             actions_row = actions_row.with_child(self.render_update_available_icon(appearance));
+        }
+
+        if self.render_options.locked {
+            // Non-interactive lock icon explaining why the server can't be
+            // started or installed.
+            actions_row = actions_row.with_child(
+                self.build_icon_button(
+                    appearance,
+                    Icon::Lock,
+                    "Disabled by your organization's policy".to_string(),
+                    self.mouse_handles.lock_icon_button.clone(),
+                )
+                .finish(),
+            );
         }
 
         if self.render_options.show_view_logs_text_button {

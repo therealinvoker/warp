@@ -112,6 +112,16 @@ pub struct Tier {
     pub multi_admin_policy: Option<MultiAdminPolicy>,
     pub ambient_agents_policy: Option<AmbientAgentsPolicy>,
     pub usage_visibility_policy: Option<UsageVisibilityPolicy>,
+    pub marketplace_policy: Option<MarketplacePolicy>,
+}
+
+/// Tier entitlement for the MCP marketplace/import feature set.
+#[derive(cynic::QueryFragment, Debug, Clone)]
+pub struct MarketplacePolicy {
+    pub enabled: bool,
+    pub governance_controls_enabled: bool,
+    pub org_sources_enabled: bool,
+    pub max_org_sources: i32,
 }
 
 #[derive(cynic::QueryFragment, Debug, Clone)]

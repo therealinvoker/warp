@@ -155,6 +155,9 @@ impl AuthSession {
                 key,
                 owner_type: None,
             }),
+            // OSS bypass: the bearer JWT from our custom backend is used directly,
+            // with no Firebase token exchange.
+            LoginToken::Bearer(token) => Ok(Credentials::Bearer(token)),
             LoginToken::SessionCookie => Ok(Credentials::SessionCookie),
         }
     }

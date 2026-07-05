@@ -60,6 +60,9 @@ pub struct WindowSnapshot {
     /// Tab groups defined in this window. Group order is implicit from
     /// member tabs' positions, so no explicit ordering is persisted.
     pub tab_groups: Vec<TabGroupSnapshot>,
+    /// Folder keys whose Workspace-view section is collapsed. Only collapsed
+    /// keys are stored; anything absent is treated as expanded on restore.
+    pub workspace_folder_collapse: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -313,6 +316,7 @@ pub enum LeftPanelDisplayedTab {
     GlobalSearch,
     WarpDrive,
     ConversationListView,
+    CodeReview,
 }
 
 impl From<ToolPanelView> for LeftPanelDisplayedTab {
@@ -322,6 +326,7 @@ impl From<ToolPanelView> for LeftPanelDisplayedTab {
             ToolPanelView::GlobalSearch { .. } => LeftPanelDisplayedTab::GlobalSearch,
             ToolPanelView::WarpDrive => LeftPanelDisplayedTab::WarpDrive,
             ToolPanelView::ConversationListView => LeftPanelDisplayedTab::ConversationListView,
+            ToolPanelView::CodeReview => LeftPanelDisplayedTab::CodeReview,
         }
     }
 }

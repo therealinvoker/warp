@@ -89,8 +89,8 @@ pub enum CodeReviewPaneEntrypoint {
     CodeDiffHeader,
     // Opened via the pane header
     PaneHeader,
-    // Opened via the code mode v2 right panel button
-    RightPanel,
+    // Opened via the code review tab in the tools panel
+    ToolsPanel,
     /// Opened via the CLI agent view footer (e.g., Claude Code).
     CLIAgentView,
     /// Opened via other means (unknown entry point).
@@ -109,7 +109,7 @@ impl Display for CodeReviewPaneEntrypoint {
             Self::ForceOpened => write!(f, "force_opened"),
             Self::CodeDiffHeader => write!(f, "agent_mode_diff_header"),
             Self::PaneHeader => write!(f, "pane_header"),
-            Self::RightPanel => write!(f, "right_panel"),
+            Self::ToolsPanel => write!(f, "tools_panel"),
             Self::CLIAgentView => write!(f, "cli_agent_view"),
             Self::Other => write!(f, "other"),
         }

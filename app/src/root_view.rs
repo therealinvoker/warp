@@ -619,7 +619,6 @@ pub fn create_transferred_window(
                     left_panel_open: transferred_tab.left_panel_open,
                     vertical_tabs_panel_open: transferred_tab.vertical_tabs_panel_open,
                     right_panel_open: transferred_tab.right_panel_open,
-                    is_right_panel_maximized: transferred_tab.is_right_panel_maximized,
                     is_tab_drag_preview,
                 },
                 ctx,
@@ -1511,8 +1510,6 @@ pub enum NewWorkspaceSource {
         vertical_tabs_panel_open: bool,
         /// Whether the right panel was open in the source tab
         right_panel_open: bool,
-        /// Whether the right panel was maximized in the source tab
-        is_right_panel_maximized: bool,
         /// Whether this transferred tab window is currently being used as a drag preview.
         is_tab_drag_preview: bool,
     },

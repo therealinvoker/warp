@@ -36,8 +36,8 @@ use crate::ai::mcp::{
     FileMCPWatcherEvent,
 };
 use crate::ai::mcp::{
-    logs, FileBasedMCPManager, MCPGalleryManager, MCPProvider, MCPServerUpdate,
-    TemplatableMCPServerInstallation,
+    logs, FileBasedMCPManager, MCPGalleryManager, MCPProvider, MCPServerUpdate, McpGovernance,
+    McpGovernanceEvent, ServerOrigin, TemplatableMCPServerInstallation,
 };
 use crate::appearance::Appearance;
 use crate::cloud_object::model::persistence::{CloudModel, CloudModelEvent};
@@ -58,7 +58,8 @@ use crate::settings_view::mcp_servers::update_modal::{UpdateModalBody, UpdateMod
 use crate::settings_view::mcp_servers::{style, ServerCardItemId};
 use crate::settings_view::mcp_servers_page::InstallOrigin;
 use crate::settings_view::settings_page::{
-    build_toggle_element, render_body_item_label, LocalOnlyIconState, ToggleState,
+    build_toggle_element, render_body_item_label, render_settings_info_banner, LocalOnlyIconState,
+    ToggleState,
 };
 use crate::ui_components::blended_colors;
 use crate::util::truncation::truncate_from_end;
@@ -87,11 +88,14 @@ pub enum MCPServersListPageViewEvent {
     },
     ShowModal,
     HideModal,
+    /// Open the "Import from Cursor" modal (gated on `CursorMcpImport`).
+    ImportFromCursor,
 }
 
 #[derive(Debug, Clone)]
 pub enum MCPServersListPageViewAction {
     Add,
+    ImportFromCursor,
     ToggleFileBasedMcp,
 }
 
@@ -107,6 +111,7 @@ pub struct MCPServersListPageView {
     search_editor: ViewHandle<EditorView>,
     search_bar: ViewHandle<SearchBar>,
     add_button: ViewHandle<ActionButton>,
+    import_from_cursor_button: ViewHandle<ActionButton>,
     file_based_mcp_toggle: SwitchStateHandle,
 }
 
@@ -158,6 +163,20 @@ impl MCPServersListPageView {
                 me.refresh_file_based_server_cards(ctx);
             }
         });
+
+        // Refresh cards and install/import affordances when the org's MCP
+        // governance policy changes.
+        if FeatureFlag::McpGovernance.is_enabled() {
+            ctx.subscribe_to_model(&McpGovernance::handle(ctx), |me, _, event, ctx| {
+                if matches!(event, McpGovernanceEvent::PolicyChanged) {
+                    me.refresh_server_cards(ctx);
+                    me.refresh_gallery_cards(ctx);
+                    me.refresh_file_based_server_cards(ctx);
+                    me.update_governance_button_states(ctx);
+                    ctx.notify();
+                }
+            });
+        }
 
         let appearance = Appearance::handle(ctx);
         ctx.subscribe_to_model(&appearance, move |me, _, event, ctx| {
@@ -231,6 +250,14 @@ impl MCPServersListPageView {
                 .on_click(|ctx| ctx.dispatch_typed_action(MCPServersListPageViewAction::Add))
         });
 
+        let import_from_cursor_button = ctx.add_typed_action_view(|_| {
+            ActionButton::new("Import from Cursor…", NakedTheme)
+                .with_icon(Icon::CursorLogo)
+                .on_click(|ctx| {
+                    ctx.dispatch_typed_action(MCPServersListPageViewAction::ImportFromCursor)
+                })
+        });
+
         let mut me = Self {
             server_cards: Default::default(),
             gallery_server_cards,
@@ -239,12 +266,24 @@ impl MCPServersListPageView {
             search_editor,
             search_bar,
             add_button,
+            import_from_cursor_button,
             file_based_mcp_toggle: Default::default(),
         };
 
         me.create_server_cards(ctx);
         me.create_file_based_server_cards(ctx);
+        me.update_governance_button_states(ctx);
         me
+    }
+
+    /// Disables the install/import affordances while the org's MCP
+    /// governance policy is set to DISABLE.
+    fn update_governance_button_states(&mut self, ctx: &mut ViewContext<Self>) {
+        let disabled = McpGovernance::is_disabled_by_org(ctx);
+        self.add_button
+            .update(ctx, |button, ctx| button.set_disabled(disabled, ctx));
+        self.import_from_cursor_button
+            .update(ctx, |button, ctx| button.set_disabled(disabled, ctx));
     }
 
     fn listen_to_cloud_model_events(ctx: &mut ViewContext<Self>) {
@@ -358,7 +397,13 @@ impl MCPServersListPageView {
         let template_uuid = template.uuid;
         let item_id = ServerCardItemId::TemplatableMCP(template_uuid);
         let title_chip_text = Self::get_title_chip_text(item_id, template_uuid, ctx);
-        let server_card_status = ServerCardStatus::AvailableToSave;
+        // Uninstalled templates are install affordances, so lock them when
+        // org governance forbids new installs.
+        let server_card_status = if McpGovernance::current_policy(ctx).allows_new_installs() {
+            ServerCardStatus::AvailableToSave
+        } else {
+            ServerCardStatus::Locked
+        };
         let is_shareable = Self::is_shareable(item_id, server_card_status, ctx);
 
         let server_card = ServerCardView::new(
@@ -387,11 +432,15 @@ impl MCPServersListPageView {
         let installation_uuid = installation.uuid();
         let item_id = ServerCardItemId::TemplatableMCPInstallation(installation_uuid);
         let uses_oauth = Self::should_show_oauth_components(item_id, ctx);
-        let server_card_status =
+        let locked = !McpGovernance::current_policy(ctx).allows_spawn(installation.origin());
+        let server_card_status = if locked {
+            ServerCardStatus::Locked
+        } else {
             match TemplatableMCPServerManager::as_ref(ctx).get_server_state(installation_uuid) {
                 Some(state) => state.into(),
                 None => ServerCardStatus::Installed,
-            };
+            }
+        };
         let is_shareable = Self::is_shareable(item_id, server_card_status, ctx);
         let is_update_available = TemplatableMCPServerManager::as_ref(ctx)
             .is_update_available_for_installation(installation_uuid, ctx);
@@ -427,9 +476,9 @@ impl MCPServersListPageView {
             error_text,
             title_chip_text.into_iter().collect(),
             ServerCardOptions {
-                show_log_out_icon_button: uses_oauth,
-                show_share_icon_button: is_shareable,
-                show_update_available_icon_button: should_show_update_symbol,
+                show_log_out_icon_button: uses_oauth && !locked,
+                show_share_icon_button: is_shareable && !locked,
+                show_update_available_icon_button: should_show_update_symbol && !locked,
                 ..server_card_status.into()
             },
         );
@@ -473,6 +522,14 @@ impl MCPServersListPageView {
         let gallery_manager = MCPGalleryManager::handle(ctx);
         let gallery_items = gallery_manager.as_ref(ctx).get_gallery();
 
+        // Gallery cards are install affordances, so lock them when org
+        // governance forbids new installs.
+        let gallery_card_status = if McpGovernance::current_policy(ctx).allows_new_installs() {
+            ServerCardStatus::AvailableToSave
+        } else {
+            ServerCardStatus::Locked
+        };
+
         gallery_items
             .into_iter()
             .map(|gallery_item| {
@@ -487,7 +544,7 @@ impl MCPServersListPageView {
                             None,
                             None,
                             vec![],
-                            ServerCardStatus::AvailableToSave.into(),
+                            gallery_card_status.into(),
                         )
                     }),
                 )
@@ -1241,6 +1298,14 @@ impl MCPServersListPageView {
             || !filtered_gallery_cards.is_empty()
             || !filtered_file_based_cards.is_empty();
 
+        if McpGovernance::is_disabled_by_org(app) {
+            page.add_child(render_settings_info_banner(
+                "MCP servers are disabled by your organization",
+                Some("Contact your workspace admin to enable MCP servers."),
+                appearance,
+            ));
+        }
+
         if !has_any_content {
             let empty_state = self.render_empty_state(appearance, app);
             page.add_child(empty_state);
@@ -1310,11 +1375,18 @@ impl MCPServersListPageView {
     }
 
     fn render_controls(&self) -> Box<dyn Element> {
-        Flex::row()
+        let mut controls = Flex::row()
             .with_cross_axis_alignment(CrossAxisAlignment::Center)
-            .with_child(Expanded::new(1., ChildView::new(&self.search_bar).finish()).finish())
-            .with_child(self.render_add_button())
-            .finish()
+            .with_child(Expanded::new(1., ChildView::new(&self.search_bar).finish()).finish());
+        if FeatureFlag::CursorMcpImport.is_enabled() {
+            controls.add_child(
+                Container::new(ChildView::new(&self.import_from_cursor_button).finish())
+                    .with_margin_left(style::SECTION_MARGIN)
+                    .finish(),
+            );
+        }
+        controls.add_child(self.render_add_button());
+        controls.finish()
     }
 
     fn render_add_button(&self) -> Box<dyn Element> {
@@ -1618,6 +1690,16 @@ impl MCPServersListPageView {
     ) {
         let uuid = installation.uuid();
 
+        // File-based servers stay listed for visibility but are locked (no
+        // start affordance) when org governance disallows them.
+        let file_based_card_status = if McpGovernance::current_policy(ctx)
+            .allows_spawn(ServerOrigin::FileBased)
+        {
+            ServerCardStatus::AvailableToSave
+        } else {
+            ServerCardStatus::Locked
+        };
+
         // Creates a template card for each (provider, uninstalled server) pair.
         for provider in MCPProvider::iter() {
             let title_chips = Self::get_file_based_title_chips(uuid, Some(provider), ctx);
@@ -1638,7 +1720,7 @@ impl MCPServersListPageView {
                 title_chips,
                 ServerCardOptions {
                     show_share_icon_button: false,
-                    ..ServerCardStatus::AvailableToSave.into()
+                    ..file_based_card_status.into()
                 },
             );
             self.register_file_based_template_card(provider, server_card, ctx);
@@ -1655,11 +1737,15 @@ impl MCPServersListPageView {
         let uuid = installation.uuid();
         let item_id = ServerCardItemId::FileBasedMCP(uuid);
         let uses_oauth = Self::should_show_oauth_components(item_id, ctx);
-        let server_card_status =
+        let locked = !McpGovernance::current_policy(ctx).allows_spawn(ServerOrigin::FileBased);
+        let server_card_status = if locked {
+            ServerCardStatus::Locked
+        } else {
             match TemplatableMCPServerManager::as_ref(ctx).get_server_state(uuid) {
                 Some(state) => state.into(),
                 None => ServerCardStatus::Installed,
-            };
+            }
+        };
         let title_chips = Self::get_file_based_title_chips(uuid, None, ctx);
         let tools = (server_card_status == ServerCardStatus::Running).then_some(
             TemplatableMCPServerManager::as_ref(ctx)
@@ -1685,7 +1771,7 @@ impl MCPServersListPageView {
             title_chips,
             ServerCardOptions {
                 // File-based servers cannot be edited or shared from settings.
-                show_log_out_icon_button: uses_oauth,
+                show_log_out_icon_button: uses_oauth && !locked,
                 show_edit_config_icon_button: false,
                 show_share_icon_button: false,
                 ..server_card_status.into()
@@ -1806,6 +1892,9 @@ impl TypedActionView for MCPServersListPageView {
         match action {
             MCPServersListPageViewAction::Add => {
                 ctx.emit(MCPServersListPageViewEvent::Add);
+            }
+            MCPServersListPageViewAction::ImportFromCursor => {
+                ctx.emit(MCPServersListPageViewEvent::ImportFromCursor);
             }
             MCPServersListPageViewAction::ToggleFileBasedMcp => {
                 AISettings::handle(ctx).update(ctx, |settings, ctx| {

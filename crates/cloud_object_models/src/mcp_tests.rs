@@ -1,4 +1,7 @@
-use super::{CLIServer, MCPServer, ServerSentEvents, StaticEnvVar, TransportType};
+use super::{
+    CLIServer, MCPServer, ServerOrigin, ServerSentEvents, StaticEnvVar, TemplatableMCPServer,
+    TransportType,
+};
 
 #[test]
 fn test_mcp_server_config_serialization_excludes_secret_env_values() {
@@ -115,4 +118,64 @@ fn test_sse_server_serialization() {
         serialized.contains("sse-server"),
         "Serialized SSE server should contain name: {serialized}",
     );
+}
+
+// ── ServerOrigin provenance ────────────────────────────────────────────
+
+/// Templates serialized before `origin` existed must deserialize with the
+/// `Manual` default. This is what lets provenance ride the existing
+/// installation/model JSON blobs without a schema migration.
+#[test]
+fn test_templatable_mcp_server_origin_defaults_to_manual_when_absent() {
+    let json = r#"{
+        "uuid": "6e5cbe0e-8c3c-4b0d-a26d-0f6a5c2a2c1e",
+        "name": "legacy-server",
+        "description": null,
+        "template": { "json": "{}", "variables": [] },
+        "version": 1,
+        "gallery_data": null
+    }"#;
+
+    let server: TemplatableMCPServer =
+        serde_json::from_str(json).expect("legacy JSON without origin should deserialize");
+    assert_eq!(server.origin, ServerOrigin::Manual);
+}
+
+/// `origin` round-trips through serde for every variant.
+#[test]
+fn test_templatable_mcp_server_origin_round_trips() {
+    for origin in [
+        ServerOrigin::Manual,
+        ServerOrigin::Gallery,
+        ServerOrigin::CursorImport,
+        ServerOrigin::Registry,
+        ServerOrigin::OrgMarketplace,
+        ServerOrigin::FileBased,
+    ] {
+        let server = TemplatableMCPServer {
+            origin,
+            ..Default::default()
+        };
+        let serialized = serde_json::to_string(&server).expect("serialization should succeed");
+        let deserialized: TemplatableMCPServer =
+            serde_json::from_str(&serialized).expect("deserialization should succeed");
+        assert_eq!(deserialized.origin, origin, "origin should round-trip");
+    }
+}
+
+/// The `Default` impl (used for structs constructed without an explicit
+/// origin) is `Manual`.
+#[test]
+fn test_server_origin_default_is_manual() {
+    assert_eq!(ServerOrigin::default(), ServerOrigin::Manual);
+    assert_eq!(TemplatableMCPServer::default().origin, ServerOrigin::Manual);
+}
+
+/// `from_user_json` (paste/import parse path in the shared model crate)
+/// produces Manual-origin templates.
+#[test]
+fn test_from_user_json_defaults_origin_to_manual() {
+    let json = r#"{ "s": { "command": "npx" } }"#;
+    let servers = TemplatableMCPServer::from_user_json(json).expect("should parse");
+    assert_eq!(servers[0].origin, ServerOrigin::Manual);
 }

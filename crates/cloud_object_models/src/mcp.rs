@@ -128,6 +128,30 @@ pub struct GalleryData {
     pub version: i32,
 }
 
+/// Provenance of an MCP server template/installation: how it entered Warp.
+///
+/// Persisted as part of the serialized [`TemplatableMCPServer`] model (which
+/// installations embed), so it rides the existing JSON blob in local
+/// persistence and cloud objects with no schema change. Objects written
+/// before this field existed deserialize as [`ServerOrigin::Manual`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum ServerOrigin {
+    /// Manually added by the user (pasted JSON, edit page, etc.).
+    #[default]
+    Manual,
+    /// Installed from the Warp MCP gallery.
+    Gallery,
+    /// Imported from a Cursor `mcp.json` config via the import flow.
+    CursorImport,
+    /// Installed from the public MCP registry.
+    Registry,
+    /// Installed from an org/private marketplace source.
+    OrgMarketplace,
+    /// Detected from a file-based provider config (e.g. `.mcp.json`,
+    /// `~/.codex/config.toml`, `~/.cursor/mcp.json`).
+    FileBased,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct TemplatableMCPServer {
     pub uuid: uuid::Uuid,
@@ -137,6 +161,10 @@ pub struct TemplatableMCPServer {
     #[serde(default)]
     pub version: i64, // This will default to 0 if stored objects have no version
     pub gallery_data: Option<GalleryData>,
+    /// How this server was created/imported. Defaults to [`ServerOrigin::Manual`]
+    /// for objects serialized before this field existed.
+    #[serde(default)]
+    pub origin: ServerOrigin,
 }
 
 #[derive(Debug)]
@@ -275,6 +303,7 @@ impl TemplatableMCPServer {
                     },
                     version: Utc::now().timestamp(),
                     gallery_data: None,
+                    origin: ServerOrigin::default(),
                 }
             })
             .collect())

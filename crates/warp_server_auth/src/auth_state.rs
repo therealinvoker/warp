@@ -188,36 +188,60 @@ impl AuthState {
 
         match (user, credentials) {
             (Some(user), Some(Credentials::Firebase(firebase_tokens))) => {
-                let anonymous_user_type = user.anonymous_user_type();
-                let linked_at = user.linked_at();
-                let personal_object_limits = user.personal_object_limits();
-
-                #[allow(deprecated)]
-                let persisted = PersistedUser {
-                    auth_tokens: firebase_tokens,
-                    refresh_token: String::new(),
-                    local_id: user.local_id,
-                    metadata: user.metadata,
-                    is_onboarded: user.is_onboarded,
-                    needs_sso_link: user.needs_sso_link,
-                    anonymous_user_type,
-                    linked_at,
-                    personal_object_limits,
-                    is_on_work_domain: user.is_on_work_domain,
+                let persisted = Self::build_persisted_user(user, firebase_tokens, false);
+                PersistAction::Persist(Box::new(persisted))
+            }
+            // OSS fork: persist plain Bearer credentials so the login survives a
+            // restart. The JWT is stored in both `id_token` and `refresh_token`
+            // so the non-empty refresh-token guards (in the load path and in
+            // `auth_manager::persist`) pass; `is_bearer_credential` marks it for
+            // restoration as `Credentials::Bearer` on next launch.
+            (Some(user), Some(Credentials::Bearer(token))) => {
+                let auth_tokens = FirebaseAuthTokens {
+                    id_token: token.clone(),
+                    refresh_token: token.clone(),
+                    expiration_time: Utc::now().fixed_offset() + Duration::days(3650),
                 };
+                let persisted = Self::build_persisted_user(user, auth_tokens, true);
                 PersistAction::Persist(Box::new(persisted))
             }
             // Remove persisted auth state if it is unset in-memory.
             (None, None) => PersistAction::Remove,
             // Do not persist if using API keys, session cookies, or test credentials.
             (Some(_), Some(Credentials::ApiKey { .. })) => PersistAction::DoNothing,
-            (Some(_), Some(Credentials::Bearer(_))) => PersistAction::DoNothing,
             (Some(_), Some(Credentials::SessionCookie)) => PersistAction::DoNothing,
             #[cfg(any(test, feature = "integration_tests", feature = "skip_login"))]
             (Some(_), Some(Credentials::Test)) => PersistAction::DoNothing,
             // Credentials without a user, or user without credentials - transient states
             // during initialization or refresh; no persistence action needed.
             (None, Some(_)) | (Some(_), None) => PersistAction::DoNothing,
+        }
+    }
+
+    /// Builds a [`PersistedUser`] from an in-memory [`User`] and the auth tokens to
+    /// persist alongside it.
+    fn build_persisted_user(
+        user: User,
+        auth_tokens: FirebaseAuthTokens,
+        is_bearer_credential: bool,
+    ) -> PersistedUser {
+        let anonymous_user_type = user.anonymous_user_type();
+        let linked_at = user.linked_at();
+        let personal_object_limits = user.personal_object_limits();
+
+        #[allow(deprecated)]
+        PersistedUser {
+            auth_tokens,
+            refresh_token: String::new(),
+            local_id: user.local_id,
+            metadata: user.metadata,
+            is_onboarded: user.is_onboarded,
+            needs_sso_link: user.needs_sso_link,
+            anonymous_user_type,
+            linked_at,
+            personal_object_limits,
+            is_on_work_domain: user.is_on_work_domain,
+            is_bearer_credential,
         }
     }
 
@@ -241,7 +265,14 @@ impl AuthState {
             log::warn!("Skipping credentials update due to empty refresh token");
             return;
         }
-        *self.credentials.write() = Some(Credentials::Firebase(persisted.auth_tokens));
+        // OSS fork: restore a plain Bearer token directly rather than rebuilding
+        // Firebase credentials.
+        if persisted.is_bearer_credential {
+            *self.credentials.write() =
+                Some(Credentials::Bearer(persisted.auth_tokens.id_token.clone()));
+        } else {
+            *self.credentials.write() = Some(Credentials::Firebase(persisted.auth_tokens));
+        }
     }
 
     /// Sets the user. This should only be called by the AuthManager, to ensure

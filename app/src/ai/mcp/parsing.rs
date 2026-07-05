@@ -4,7 +4,9 @@ use handlebars::{get_arguments, render_template};
 #[cfg(feature = "local_fs")]
 use serde::Deserialize;
 
-use crate::ai::mcp::templatable::{JsonTemplate, TemplatableMCPServer, TemplateVariable};
+use crate::ai::mcp::templatable::{
+    JsonTemplate, ServerOrigin, TemplatableMCPServer, TemplateVariable,
+};
 use crate::ai::mcp::templatable_installation::{
     TemplatableMCPServerInstallation, VariableType, VariableValue,
 };
@@ -186,6 +188,129 @@ pub(crate) fn normalize_codex_toml_to_json(file_contents: &str) -> Result<String
         .map_err(|e| anyhow::anyhow!("Failed to serialize normalized Codex TOML as JSON: {e}"))
 }
 
+/// Matches Cursor's `${env:VAR_NAME}` interpolation syntax, capturing the
+/// variable name.
+#[cfg(feature = "local_fs")]
+static CURSOR_ENV_INTERPOLATION_REGEX: std::sync::LazyLock<regex::Regex> =
+    std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"\$\{env:([A-Za-z_][A-Za-z0-9_]*)\}").expect("Regex is valid")
+    });
+
+/// Cursor's placeholder for the root of the currently-open workspace.
+#[cfg(feature = "local_fs")]
+const CURSOR_WORKSPACE_FOLDER_PLACEHOLDER: &str = "${workspaceFolder}";
+
+/// Normalizes the contents of a Cursor `mcp.json` (`~/.cursor/mcp.json` or a
+/// project-level `.cursor/mcp.json`) into a JSON string compatible with
+/// `ParsedTemplatableMCPServerResult::from_config_file_json`.
+///
+/// Cursor-specific handling (see https://cursor.com/docs/context/mcp):
+/// - Servers are read from the `mcpServers` wrapper only; unknown top-level
+///   keys (e.g. `__playbook_managed`) are ignored.
+/// - The per-server `type` tag (`stdio` / `sse` / `http` / `streamable-http`)
+///   is stripped: Warp discriminates transports structurally (`command` for
+///   stdio, `url` for remote servers), and url-typed servers map onto Warp's
+///   url-based config unchanged.
+/// - `${env:VAR}` interpolations are rewritten to `${VAR}` placeholders, the
+///   same form Codex `env_vars` are lowered to. The file-based parse pipeline
+///   resolves those from the environment and then templatizes env/header
+///   values into `TemplateVariable`s.
+/// - `${workspaceFolder}` is replaced with `workspace_root` (the directory
+///   containing `.cursor/`), matching the discovery-root spawn convention for
+///   file-based servers. When the root is unknown, the placeholder is left
+///   untouched.
+/// - Cursor's `cwd` is mapped to Warp's `working_directory`.
+/// - `envFile` is dropped without reading the file: its variables are not
+///   cheaply knowable without reading the (potentially secret-bearing) file.
+/// - The `auth` block is dropped: Warp's own MCP OAuth support
+///   (`crates/mcp/src/oauth.rs`) negotiates authorization at connect time.
+///
+/// Per-entry failures (non-object entries) are skipped rather than failing the
+/// whole file, mirroring the Codex normalizer's permissiveness.
+#[cfg(feature = "local_fs")]
+pub(crate) fn normalize_cursor_json(
+    file_contents: &str,
+    workspace_root: Option<&std::path::Path>,
+) -> Result<String, anyhow::Error> {
+    let raw: serde_json::Value = serde_json::from_str(file_contents)
+        .map_err(|e| anyhow::anyhow!("Failed to parse Cursor mcp.json: {e}"))?;
+
+    let mut out_servers = serde_json::Map::new();
+    if let Some(servers) = raw.get("mcpServers").and_then(|v| v.as_object()) {
+        for (name, entry) in servers {
+            let Some(entry_obj) = entry.as_object() else {
+                log::warn!("Skipping malformed Cursor MCP server entry '{name}': not an object");
+                continue;
+            };
+            let mut obj = entry_obj.clone();
+
+            // Warp discriminates transports structurally; drop Cursor's explicit tag.
+            obj.remove("type");
+
+            // Warp's MCP OAuth handles authorization when connecting; Cursor's
+            // pre-provisioned auth block is intentionally not imported.
+            if obj.remove("auth").is_some() {
+                log::info!(
+                    "Dropping 'auth' block from Cursor MCP server '{name}': Warp negotiates MCP OAuth at connect time"
+                );
+            }
+
+            // Never read the referenced env file; its variables are not knowable
+            // without reading it, so the key is dropped entirely.
+            if obj.remove("envFile").is_some() {
+                log::info!(
+                    "Ignoring 'envFile' for Cursor MCP server '{name}': env files are not read during import"
+                );
+            }
+
+            // Cursor `cwd` → Warp `working_directory` (explicit Warp key wins).
+            if let Some(cwd) = obj.remove("cwd") {
+                obj.entry("working_directory".to_owned()).or_insert(cwd);
+            }
+
+            let mut value = serde_json::Value::Object(obj);
+            rewrite_cursor_placeholders(&mut value, workspace_root);
+            out_servers.insert(name.clone(), value);
+        }
+    }
+
+    let wrapped = serde_json::json!({ "mcpServers": out_servers });
+    serde_json::to_string(&wrapped)
+        .map_err(|e| anyhow::anyhow!("Failed to serialize normalized Cursor JSON: {e}"))
+}
+
+/// Recursively rewrites Cursor interpolation placeholders in all string values:
+/// `${env:VAR}` → `${VAR}`, and `${workspaceFolder}` → `workspace_root` (when known).
+#[cfg(feature = "local_fs")]
+fn rewrite_cursor_placeholders(
+    value: &mut serde_json::Value,
+    workspace_root: Option<&std::path::Path>,
+) {
+    match value {
+        serde_json::Value::String(s) => {
+            let mut updated = CURSOR_ENV_INTERPOLATION_REGEX
+                .replace_all(s, |caps: &regex::Captures| format!("${{{}}}", &caps[1]))
+                .into_owned();
+            if let Some(root) = workspace_root {
+                updated =
+                    updated.replace(CURSOR_WORKSPACE_FOLDER_PLACEHOLDER, &root.to_string_lossy());
+            }
+            *s = updated;
+        }
+        serde_json::Value::Array(values) => {
+            for v in values {
+                rewrite_cursor_placeholders(v, workspace_root);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for v in map.values_mut() {
+                rewrite_cursor_placeholders(v, workspace_root);
+            }
+        }
+        _ => {}
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ParsedTemplatableMCPServerResult {
     pub templatable_mcp_server: TemplatableMCPServer,
@@ -251,8 +376,19 @@ impl ParsedTemplatableMCPServerResult {
 
         Ok(template_jsons
             .iter()
-            .map(|(name, json)| Self::parse_result(name, json))
+            .map(|(name, json)| Self::parse_result(name, json).with_origin(ServerOrigin::FileBased))
             .collect())
+    }
+
+    /// Sets the [`ServerOrigin`] provenance on the parsed template (and its
+    /// installation, if present), returning the updated result.
+    #[cfg_attr(target_family = "wasm", expect(dead_code))]
+    pub fn with_origin(mut self, origin: ServerOrigin) -> Self {
+        self.templatable_mcp_server.origin = origin;
+        if let Some(installation) = &mut self.templatable_mcp_server_installation {
+            installation.set_origin(origin);
+        }
+        self
     }
 
     /// Parses the user json and returns a vector of ParsedTemplatableMCPServerResult
@@ -328,6 +464,7 @@ impl ParsedTemplatableMCPServerResult {
             },
             version: chrono::Local::now().timestamp(),
             gallery_data: None,
+            origin: ServerOrigin::default(),
         };
 
         // Combine env and headers into a single map for variable lookup

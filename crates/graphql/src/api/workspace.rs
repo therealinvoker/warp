@@ -152,6 +152,47 @@ pub struct WorkspaceSettings {
     pub codebase_context_settings: CodebaseContextSettings,
     pub sandboxed_agent_settings: Option<SandboxedAgentSettings>,
     pub ambient_agent_settings: Option<AmbientAgentSettings>,
+    pub mcp_governance_settings: Option<McpGovernanceSettings>,
+}
+
+/// Admin-configured MCP governance for a workspace. `None` on the parent
+/// [`WorkspaceSettings`] means the workspace is self-managed.
+#[derive(cynic::QueryFragment, Debug, Clone)]
+pub struct McpGovernanceSettings {
+    pub mode: McpGovernanceMode,
+    pub allowlist: Vec<McpAllowlistEntry>,
+    pub allow_file_based_servers: bool,
+    pub allow_plugin_import: bool,
+}
+
+#[derive(cynic::QueryFragment, Debug, Clone)]
+pub struct McpAllowlistEntry {
+    pub id: cynic::Id,
+    pub kind: McpAllowlistEntryKind,
+    pub value: String,
+    pub pinned_version: Option<String>,
+    pub display_name: Option<String>,
+}
+
+#[derive(cynic::Enum, Clone, Debug, PartialEq, Eq)]
+pub enum McpGovernanceMode {
+    Disable,
+    EnableAll,
+    Allowlist,
+    #[cynic(fallback)]
+    Other(String),
+}
+
+#[derive(cynic::Enum, Clone, Debug, PartialEq, Eq)]
+pub enum McpAllowlistEntryKind {
+    RegistryName,
+    GalleryTemplate,
+    OrgMarketplaceEntry,
+    UrlPattern,
+    CommandPattern,
+    CanonicalHash,
+    #[cynic(fallback)]
+    Other(String),
 }
 
 #[derive(cynic::QueryFragment, Debug, Clone)]

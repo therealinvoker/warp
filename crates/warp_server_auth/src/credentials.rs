@@ -172,6 +172,9 @@ pub enum LoginToken {
     Firebase(FirebaseToken),
     /// An API key for direct server authentication.
     ApiKey(String),
+    /// A plain bearer JWT used directly as the auth token, with no exchange step.
+    /// Used by the OSS dev build pointed at a custom backend that issues its own JWTs.
+    Bearer(String),
     /// Authentication derived from an ambient browser session cookie.
     SessionCookie,
 }

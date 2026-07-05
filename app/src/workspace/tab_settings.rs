@@ -336,9 +336,10 @@ settings::macros::implement_setting_for_enum!(
     rename_all = "snake_case"
 )]
 pub enum VerticalTabsDisplayGranularity {
-    #[default]
     Panes,
     Tabs,
+    #[default]
+    Workspace,
 }
 
 settings::macros::implement_setting_for_enum!(

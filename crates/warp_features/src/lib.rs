@@ -896,6 +896,17 @@ pub enum FeatureFlag {
     /// Enables the `--runner` flag on `run-cloud`, which overrides an agent's
     /// compute (docker image, instance shape, setup commands) by runner ID.
     CloudRunners,
+
+    /// Enables importing MCP servers from Cursor (`~/.cursor/mcp.json` and
+    /// project-level `.cursor/mcp.json`): file-based detection via the Cursor
+    /// provider and the "Import from Cursor" flow in MCP settings.
+    CursorMcpImport,
+
+    /// Enables org-level MCP governance: workspace admins can disable or
+    /// restrict MCP server installs/spawns via `mcpGovernanceSettings`
+    /// (kill switch + allowlist), enforced client-side at install- and
+    /// spawn-time with a locally cached policy snapshot.
+    McpGovernance,
 }
 
 static FLAG_STATES: [AtomicBool; cardinality::<FeatureFlag>()] =

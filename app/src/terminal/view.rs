@@ -221,10 +221,9 @@ use crate::ai::blocklist::agent_view::{
     agent_view_bg_fill, fork_from_last_known_good_state_exchange_id,
     get_agent_view_entry_block_position_id, is_in_cloud_context, AgentViewController,
     AgentViewControllerEvent, AgentViewConversationSelection, AgentViewDisplayMode,
-    AgentViewEntryBlockParams, AgentViewEntryOrigin, AgentViewHeaderDisabledTheme,
-    AgentViewHeaderTheme, AgentViewZeroStateBlock, AgentViewZeroStateEvent, EphemeralMessageModel,
-    ExitConfirmationTrigger, InlineAgentViewHeader, OrchestrationPillBar,
-    ENTER_OR_EXIT_CONFIRMATION_WINDOW,
+    AgentViewEntryBlockParams, AgentViewEntryOrigin, AgentViewZeroStateBlock,
+    AgentViewZeroStateEvent, EphemeralMessageModel, ExitConfirmationTrigger, InlineAgentViewHeader,
+    OrchestrationPillBar, ENTER_OR_EXIT_CONFIRMATION_WINDOW,
 };
 use crate::ai::blocklist::block::cli::{CLISubagentView, CLISubagentViewEvent};
 use crate::ai::blocklist::block::cli_controller::{
@@ -324,8 +323,8 @@ use crate::features::FeatureFlag;
 use crate::menu::{Event as MenuEvent, Menu, MenuItem, MenuItemFields};
 use crate::pane_group::focus_state::PaneFocusHandle;
 use crate::pane_group::{
-    CodeReviewPanelArg, PaneConfiguration, PaneEvent, PaneGroupAction, PaneHeaderAction,
-    SplitPaneState, TerminalViewResources,
+    CodeReviewPanelArg, PaneConfiguration, PaneEvent, PaneGroupAction, SplitPaneState,
+    TerminalViewResources,
 };
 use crate::persistence::{self, FinishedCommandMetadata};
 use crate::projects::ProjectManagementModel;
@@ -519,7 +518,6 @@ use crate::util::file::external_editor::{settings::EditorLayout, EditorSettings}
 use crate::util::openable_file_type::{is_markdown_file, resolve_file_target, FileTarget};
 use crate::util::repo_detection::{detect_possible_git_repo, RepoDetectionSessionType};
 use crate::util::truncation::truncate_from_end;
-use crate::view_components::action_button::{ActionButton, ButtonSize, KeystrokeSource};
 use crate::view_components::find::{Event as FindEvent, Find, FindDirection, FindWithinBlockState};
 use crate::view_components::{DismissibleToast, ToastFlavor};
 use crate::workflows::workflow::Workflow;
@@ -2833,7 +2831,6 @@ pub struct TerminalView {
     use_agent_footer: ViewHandle<UseAgentToolbar>,
 
     agent_view_controller: ModelHandle<AgentViewController>,
-    agent_view_back_button: ViewHandle<ActionButton>,
     /// Pill bar shown above the agent view header listing the orchestrator and
     /// child agents. Always constructed; render-time guards control whether it draws anything.
     orchestration_pill_bar: ViewHandle<OrchestrationPillBar>,
@@ -3246,7 +3243,6 @@ impl TerminalView {
                                 ScrollPositionUpdate::AfterEnterAgentView,
                                 ctx,
                             );
-                            me.update_agent_view_back_button_state(ctx);
                             ctx.notify();
                         }
                     }
@@ -4204,28 +4200,6 @@ impl TerminalView {
         });
         ctx.subscribe_to_view(&orchestration_pill_bar, |_, _, _, ctx| ctx.notify());
 
-        let agent_view_back_button = ctx.add_typed_action_view(|ctx| {
-            ActionButton::new("for terminal", AgentViewHeaderTheme)
-                .with_icon(icons::Icon::ArrowLeft)
-                .with_size(ButtonSize::Small)
-                .with_keybinding(
-                    KeystrokeSource::Fixed(Keystroke {
-                        key: "escape".to_string(),
-                        ..Default::default()
-                    }),
-                    ctx,
-                )
-                .with_disabled_theme(AgentViewHeaderDisabledTheme)
-                .with_keybinding_before_label(true)
-                .on_click(|ctx| {
-                    ctx.dispatch_typed_action(
-                        PaneHeaderAction::<TerminalAction, TerminalAction>::CustomAction(
-                            TerminalAction::ExitAgentView,
-                        ),
-                    )
-                })
-        });
-
         // Conversation details panel (cloud Oz runs and any active local AI conversation).
         let conversation_details_panel = ctx.add_typed_action_view(|ctx| {
             crate::ai::conversation_details_panel::ConversationDetailsPanel::new(
@@ -4382,7 +4356,6 @@ impl TerminalView {
             cli_subagent_controller,
             use_agent_footer: use_agent_button_bar,
             agent_view_controller,
-            agent_view_back_button,
             orchestration_pill_bar,
             is_orchestration_split_off: false,
             is_using_conversation_for_pane_header_title: false,
@@ -7875,6 +7848,41 @@ impl TerminalView {
             .active_conversation_id()
     }
 
+    /// Returns the active conversation id when it can be forked locally, agent-view-aware.
+    ///
+    /// Mirrors the conversation-list `can_fork_locally` capability: the conversation must be
+    /// loaded/persisted locally, and we exclude someone else's shared session or a transcript.
+    pub(crate) fn forkable_active_conversation_id(
+        &self,
+        ctx: &AppContext,
+    ) -> Option<AIConversationId> {
+        // Don't allow forking someone else's shared session or a transcript.
+        {
+            let model = self.model.lock();
+            if model.is_conversation_transcript_viewer()
+                || model.shared_session_status().is_viewer()
+            {
+                return None;
+            }
+        }
+        let history = BlocklistAIHistoryModel::as_ref(ctx);
+        let conversation_id = if FeatureFlag::AgentView.is_enabled() {
+            self.agent_view_controller
+                .as_ref(ctx)
+                .agent_view_state()
+                .active_conversation_id()
+        } else {
+            history.active_conversation_id(self.id())
+        }?;
+        // Forkable locally == the conversation is loaded/persisted locally (mirror
+        // `can_fork_locally` = `has_local_persisted_data`, where
+        // `has_loaded_conversation = history.conversation(&id).is_some()`).
+        history
+            .conversation(&conversation_id)
+            .is_some()
+            .then_some(conversation_id)
+    }
+
     pub fn active_conversation_task_id(&self, app: &AppContext) -> Option<AmbientAgentTaskId> {
         let history = BlocklistAIHistoryModel::as_ref(app);
         let conversation_id = self.active_conversation_id(app).or_else(|| {
@@ -11243,43 +11251,6 @@ impl TerminalView {
         }
     }
 
-    /// Updates the back button's state and label. For child agents the
-    /// label becomes "for Orchestrator" since ESC swaps to the parent
-    /// instead of exiting in place.
-    pub(crate) fn update_agent_view_back_button_state(&mut self, ctx: &mut ViewContext<Self>) {
-        let active_conv_id = self
-            .agent_view_controller
-            .as_ref(ctx)
-            .agent_view_state()
-            .active_conversation_id();
-        let is_child_agent = active_conv_id
-            .and_then(|id| BlocklistAIHistoryModel::as_ref(ctx).conversation(&id))
-            .and_then(|c| c.parent_conversation_id())
-            .is_some();
-
-        // Never disable for child agents: the swap-back path can't be blocked.
-        let disabled_reason = if is_child_agent {
-            None
-        } else {
-            self.agent_view_controller
-                .as_ref(ctx)
-                .can_exit_agent_view()
-                .err()
-                .map(|e| e.to_string())
-        };
-        let label = if is_child_agent {
-            "for Orchestrator"
-        } else {
-            "for terminal"
-        };
-
-        self.agent_view_back_button.update(ctx, |button, ctx| {
-            button.set_label(label, ctx);
-            button.set_disabled(disabled_reason.is_some(), ctx);
-            button.set_tooltip(disabled_reason, ctx);
-        });
-    }
-
     /// Apply a block metadata update from either the precmd hook
     /// ([`Event::BlockMetadataReceived`]) or an OSC 7 sequence emitted
     /// mid-block ([`Event::BlockWorkingDirectoryUpdated`]). The `source`
@@ -11959,11 +11930,10 @@ impl TerminalView {
                                             },
                                         )
                                     });
-                                    // Update agent view back button state when command becomes long-running
+                                    // Update agent view pane header when command becomes long-running
                                     if FeatureFlag::AgentView.is_enabled()
                                         && me.agent_view_controller.as_ref(ctx).is_fullscreen()
                                     {
-                                        me.update_agent_view_back_button_state(ctx);
                                         me.update_agent_view_pane_header(ctx);
                                     }
                                 },
@@ -12253,11 +12223,10 @@ impl TerminalView {
                     self.did_notify_long_running = false;
                     self.set_current_state(terminal_view_state, ctx);
 
-                    // Update agent view back button state when command completes
+                    // Update agent view pane header when command completes
                     if FeatureFlag::AgentView.is_enabled()
                         && self.agent_view_controller.as_ref(ctx).is_fullscreen()
                     {
-                        self.update_agent_view_back_button_state(ctx);
                         self.update_agent_view_pane_header(ctx);
                     }
 
@@ -12527,13 +12496,6 @@ impl TerminalView {
                 if self.find_model.as_ref(ctx).is_find_bar_open() {
                     self.close_find_bar(ctx);
                     self.redetermine_global_focus(ctx);
-                }
-
-                // Update agent view back button state when alt screen becomes active/inactive
-                if FeatureFlag::AgentView.is_enabled()
-                    && self.agent_view_controller.as_ref(ctx).is_fullscreen()
-                {
-                    self.update_agent_view_back_button_state(ctx);
                 }
             }
             ModelEvent::DetectedEndOfSshLogin(check_type) => {

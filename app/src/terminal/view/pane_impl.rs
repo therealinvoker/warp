@@ -107,12 +107,9 @@ impl TerminalView {
     }
 
     pub fn refresh_pane_header(&mut self, ctx: &mut ViewContext<Self>) {
-        let is_active_session = self.is_active_session(ctx);
-        self.pane_configuration
-            .update(ctx, move |pane_config, ctx| {
-                pane_config.set_show_active_pane_indicator(is_active_session, ctx);
-                pane_config.refresh_pane_header_overflow_menu_items(ctx);
-            });
+        self.pane_configuration.update(ctx, |pane_config, ctx| {
+            pane_config.refresh_pane_header_overflow_menu_items(ctx);
+        });
     }
 
     /// Set the pane title from agent chrome when available, falling back to the regular terminal title.
@@ -236,35 +233,6 @@ impl TerminalView {
         self.focus_handle
             .as_ref()
             .map_or(SplitPaneState::NotInSplitPane, |h| h.split_pane_state(app))
-    }
-
-    /// Renders the back button for the pane header, or an empty element if the
-    /// back button should not be shown.
-    fn maybe_render_header_back_button(&self, app: &AppContext) -> Box<dyn Element> {
-        if !FeatureFlag::AgentView.is_enabled() || warpui::platform::is_mobile_device() {
-            return Flex::row().finish();
-        }
-
-        let in_nav_stack = self
-            .pane_stack
-            .as_ref()
-            .and_then(|h| h.upgrade(app))
-            .is_some_and(|stack| stack.as_ref(app).depth() > 1);
-
-        let is_transcript_viewer = self.model.lock().is_conversation_transcript_viewer();
-        let is_ambient_agent = self.is_ambient_agent_session(app);
-        let has_parent_terminal = (is_ambient_agent && self.is_nested_cloud_mode(app))
-            || (!is_ambient_agent && !is_transcript_viewer);
-        let is_fullscreen_agent_view = self.agent_view_controller.as_ref(app).is_fullscreen();
-
-        if in_nav_stack || (is_fullscreen_agent_view && has_parent_terminal) {
-            Flex::row()
-                .with_cross_axis_alignment(CrossAxisAlignment::Center)
-                .with_child(ChildView::new(&self.agent_view_back_button).finish())
-                .finish()
-        } else {
-            Flex::row().finish()
-        }
     }
 
     fn render_header_title(
@@ -561,7 +529,7 @@ impl TerminalView {
             && self.agent_view_controller.as_ref(app).is_fullscreen();
         let parent_conversation_header_card = self.render_parent_conversation_header_card(app);
 
-        let left = self.maybe_render_header_back_button(app);
+        let left = Flex::row().finish();
         let center = self.render_header_title(is_fullscreen_agent_view, header_ctx, app);
         let (right, min_actions_width) = self.render_header_actions(header_ctx, app);
 

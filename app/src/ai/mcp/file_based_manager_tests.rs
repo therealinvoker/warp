@@ -11,7 +11,10 @@ use warpui::{App, Entity, ModelHandle, SingletonEntity as _};
 use watcher::HomeDirectoryWatcher;
 
 use super::{CloudEnvMcpScanServer, FileBasedMCPManager, FileBasedMCPManagerEvent, MCPProvider};
-use crate::ai::mcp::{FileMCPWatcher, ParsedTemplatableMCPServerResult};
+use crate::ai::mcp::{
+    EffectiveMcpMode, EffectiveMcpPolicy, FileMCPWatcher, McpGovernance,
+    ParsedTemplatableMCPServerResult,
+};
 use crate::auth::AuthStateProvider;
 use crate::settings::{AISettings, FocusedTerminalInfo};
 use crate::warp_managed_paths_watcher::{warp_managed_mcp_config_path, WarpManagedPathsWatcher};
@@ -28,8 +31,18 @@ fn setup_app(app: &mut App) -> warpui::ModelHandle<FileBasedMCPManager> {
     app.add_singleton_model(AISettings::new_with_defaults);
     app.add_singleton_model(|_| AuthStateProvider::new_for_test());
     app.add_singleton_model(UserWorkspaces::default_mock);
+    // Registered before FileBasedMCPManager, mirroring production ordering,
+    // so governance gates the first auto-start decision.
+    app.add_singleton_model(|ctx| McpGovernance::new(None, ctx));
     app.add_singleton_model(FocusedTerminalInfo::new);
     app.add_singleton_model(FileBasedMCPManager::new)
+}
+
+/// Force the effective governance policy for tests.
+fn set_governance_policy(app: &mut App, policy: EffectiveMcpPolicy) {
+    McpGovernance::handle(app).update(app, |governance, ctx| {
+        governance.set_policy_for_tests(policy, ctx);
+    });
 }
 
 /// Parses an MCP JSON string directly into server results, bypassing file I/O.
@@ -371,6 +384,99 @@ fn test_global_non_warp_server_respects_toggle() {
                 e.despawned_uuids,
                 vec![installation_uuid],
                 "Global non-Warp server should despawn when toggle flips off"
+            );
+        });
+    });
+}
+
+/// Under an org governance DISABLE policy, detection of a global third-party
+/// server must not auto-spawn it even with the file-based MCP toggle on, and
+/// flipping the toggle on afterwards must not spawn it either.
+#[test]
+fn test_governance_disable_blocks_global_auto_start() {
+    let _file_based_flag = FeatureFlag::FileBasedMcp.override_enabled(true);
+    let _governance_flag = FeatureFlag::McpGovernance.override_enabled(true);
+    let Some(home_dir) = dirs::home_dir() else {
+        return;
+    };
+    let parsed = parse_mcp_json(r#"{"global-claude": {"command": "npx", "args": ["claude"]}}"#);
+
+    App::test((), |mut app| async move {
+        let manager = setup_app(&mut app);
+        let events = subscribe_events(&mut app, &manager);
+
+        set_governance_policy(
+            &mut app,
+            EffectiveMcpPolicy {
+                mode: EffectiveMcpMode::Disable,
+                allow_file_based_servers: true,
+            },
+        );
+        set_file_based_mcp_enabled(&mut app, true);
+        events.update(&mut app, |e, _| e.spawned_uuids.clear());
+
+        manager.update(&mut app, |m, ctx| {
+            m.apply_parsed_servers(home_dir.clone(), MCPProvider::Claude, parsed, ctx);
+        });
+        events.update(&mut app, |e, _| {
+            assert!(
+                e.spawned_uuids.is_empty(),
+                "Global server must not auto-spawn under a DISABLE governance policy, got: {:?}",
+                e.spawned_uuids
+            );
+        });
+
+        // The server stays listed for visibility.
+        manager.update(&mut app, |m, _| {
+            assert_eq!(m.file_based_servers().len(), 1);
+        });
+
+        // Flipping the toggle off and on again must not spawn it either.
+        set_file_based_mcp_enabled(&mut app, false);
+        set_file_based_mcp_enabled(&mut app, true);
+        events.update(&mut app, |e, _| {
+            assert!(
+                e.spawned_uuids.is_empty(),
+                "Toggle changes must not spawn servers under a DISABLE governance policy, got: {:?}",
+                e.spawned_uuids
+            );
+        });
+    });
+}
+
+/// `allow_file_based_servers: false` blocks auto-start even when the mode is
+/// ENABLE_ALL, including for global Warp servers.
+#[test]
+fn test_governance_file_based_gate_blocks_auto_start() {
+    let _file_based_flag = FeatureFlag::FileBasedMcp.override_enabled(true);
+    let _governance_flag = FeatureFlag::McpGovernance.override_enabled(true);
+    let Some(home_dir) = dirs::home_dir() else {
+        return;
+    };
+    let parsed = parse_mcp_json(r#"{"global-claude": {"command": "npx", "args": ["claude"]}}"#);
+
+    App::test((), |mut app| async move {
+        let manager = setup_app(&mut app);
+        let events = subscribe_events(&mut app, &manager);
+
+        set_governance_policy(
+            &mut app,
+            EffectiveMcpPolicy {
+                mode: EffectiveMcpMode::EnableAll,
+                allow_file_based_servers: false,
+            },
+        );
+        set_file_based_mcp_enabled(&mut app, true);
+        events.update(&mut app, |e, _| e.spawned_uuids.clear());
+
+        manager.update(&mut app, |m, ctx| {
+            m.apply_parsed_servers(home_dir.clone(), MCPProvider::Claude, parsed, ctx);
+        });
+        events.update(&mut app, |e, _| {
+            assert!(
+                e.spawned_uuids.is_empty(),
+                "File-based servers must not auto-spawn when allow_file_based_servers is false, got: {:?}",
+                e.spawned_uuids
             );
         });
     });

@@ -148,7 +148,7 @@ use crate::view_components::action_button::{
 };
 use crate::view_components::find::{Event as FindViewEvent, Find, FindEvent, FindWithinBlockState};
 use crate::view_components::DismissibleToast;
-use crate::workspace::view::right_panel::{ReviewDestination, ReviewSubmissionResult};
+use crate::workspace::view::code_review_panel::{ReviewDestination, ReviewSubmissionResult};
 use crate::workspace::{ToastStack, Workspace, WorkspaceAction};
 #[cfg(feature = "local_fs")]
 use crate::TelemetryEvent;
@@ -439,9 +439,8 @@ pub enum CodeReviewViewEvent {
         target: FileTarget,
         line_col: Option<LineAndColumnArg>,
     },
-    ReviewSubmitted,
     /// Emitted when review comments are ready to be submitted.
-    /// A higher-level view (RightPanelView) handles routing to an available terminal.
+    /// A higher-level view (CodeReviewPanelView) handles routing to an available terminal.
     SubmitReviewComments {
         comments: AgentReviewCommentBatch,
         repo_path: LocalOrRemotePath,
@@ -587,7 +586,7 @@ struct RelocateCommentsResult {
 
 /// Resolves which terminal code review actions should target.
 ///
-/// Injected by the hosting view (`RightPanelView`) so target selection is
+/// Injected by the hosting view (`CodeReviewPanelView`) so target selection is
 /// late-bound: actions land in the conversation the user is currently focused
 /// on rather than a terminal handle captured when the view was constructed.
 pub trait ReviewActionTargetProvider {
@@ -620,8 +619,6 @@ pub struct CodeReviewView {
     git_operations_menu: ViewHandle<Menu<CodeReviewAction>>,
     git_operations_menu_open: bool,
     file_sidebar_expanded: bool,
-    /// The file sidebar state from before a code review panel is maximized.
-    file_sidebar_expanded_before_maximize: Option<bool>,
     scroll_state: ScrollStateHandle,
     viewported_list_state: ListState<RelocatableScrollContext>,
 
@@ -1332,7 +1329,6 @@ impl CodeReviewView {
             git_operations_menu,
             git_operations_menu_open: false,
             file_sidebar_expanded: false,
-            file_sidebar_expanded_before_maximize: None,
             position_id_prefix: random_str,
             viewported_list_state: list_state,
             scroll_state: ScrollStateHandle::default(),
@@ -1447,30 +1443,6 @@ impl CodeReviewView {
             {
                 if let Ok(mut state) = self.ui_state_handles.sidebar_resizable_state.lock() {
                     state.set_size(pane_width * FILE_SIDEBAR_PANE_WIDTH_PERCENTAGE);
-                }
-            }
-        }
-    }
-
-    /// Handles file sidebar state transitions when the maximize state changes.
-    /// On maximize: saves the current sidebar state and opens the sidebar.
-    /// On minimize: restores the sidebar to its pre-maximize state.
-    pub fn handle_maximization_toggle(&mut self, is_maximized: bool, ctx: &mut ViewContext<Self>) {
-        if is_maximized && self.file_sidebar_expanded_before_maximize.is_none() {
-            // Transitioning to maximized: save current sidebar state and open it
-            self.file_sidebar_expanded_before_maximize = Some(self.file_sidebar_expanded);
-            if !self.file_sidebar_expanded {
-                self.open_file_sidebar(ctx);
-                self.update_file_nav_button_tooltip(ctx);
-                ctx.notify();
-            }
-        } else if !is_maximized {
-            if let Some(was_expanded) = self.file_sidebar_expanded_before_maximize.take() {
-                // Transitioning to minimized: restore saved sidebar state
-                if self.file_sidebar_expanded != was_expanded {
-                    self.file_sidebar_expanded = was_expanded;
-                    self.update_file_nav_button_tooltip(ctx);
-                    ctx.notify();
                 }
             }
         }
@@ -4256,7 +4228,7 @@ impl CodeReviewView {
         });
     }
 
-    /// Called by the routing layer (RightPanelView) after attempting to submit review
+    /// Called by the routing layer (CodeReviewPanelView) after attempting to submit review
     /// comments to a terminal.
     pub fn handle_review_submission_result(
         &mut self,
@@ -4286,7 +4258,6 @@ impl CodeReviewView {
                     let toast = DismissibleToast::default("Comments sent to agent".into());
                     stack.add_ephemeral_toast(toast, self.window_id, ctx);
                 });
-                ctx.emit(CodeReviewViewEvent::ReviewSubmitted);
                 ctx.notify();
             }
             ReviewSubmissionResult::Error => {
@@ -7206,11 +7177,6 @@ impl TypedActionView for CodeReviewView {
             CodeReviewAction::ToggleFileSidebar => {
                 if self.file_sidebar_expanded {
                     self.file_sidebar_expanded = false;
-                    // If the sidebar is closed while maximized, update the saved
-                    // pre-maximize state so we don't reopen it on minimize.
-                    if self.file_sidebar_expanded_before_maximize.is_some() {
-                        self.file_sidebar_expanded_before_maximize = Some(false);
-                    }
                 } else {
                     self.open_file_sidebar(ctx);
                 }

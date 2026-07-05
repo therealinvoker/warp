@@ -439,6 +439,21 @@ pub struct UsageVisibilityPolicy {
     pub max_prior_cycles: MaxPriorCycles,
 }
 
+/// Rust representation of the `MarketplacePolicy` tier policy from the
+/// GraphQL schema: entitlement for the MCP marketplace/import feature set.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MarketplacePolicy {
+    /// Whether the plan can use MCP import/marketplace features at all.
+    pub enabled: bool,
+    /// Whether workspace admins may configure `McpGovernanceSettings`.
+    /// Governance settings on workspaces whose tier lacks this entitlement
+    /// are ignored.
+    pub governance_controls_enabled: bool,
+    pub org_sources_enabled: bool,
+    pub max_org_sources: i32,
+}
+
 /// Effective per-viewer visibility, after combining the tier's
 /// `UsageVisibilityPolicy` with the viewer's admin status. Non-admins always
 /// collapse to `granularity == OwnOnly`; `max_prior_cycles` is plan-wide and
@@ -480,6 +495,7 @@ pub struct Tier {
     pub multi_admin_policy: Option<MultiAdminPolicy>,
     pub ambient_agents_policy: Option<AmbientAgentsPolicy>,
     pub usage_visibility_policy: Option<UsageVisibilityPolicy>,
+    pub marketplace_policy: Option<MarketplacePolicy>,
 }
 
 /// This struct is the rust representation of `BillingMetadata` from the GraphQL Schema.
@@ -903,6 +919,56 @@ pub struct SandboxedAgentSettings {
     pub execute_commands_denylist: Option<Vec<AgentModeCommandExecutionPredicate>>,
 }
 
+/// The admin-selected MCP governance mode for a workspace. Rust
+/// representation of `McpGovernanceMode` from the GraphQL schema.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum McpGovernanceMode {
+    /// Kill switch: no MCP servers may be installed or spawned.
+    Disable,
+    /// No restrictions (also the effective behavior for self-managed users).
+    #[default]
+    EnableAll,
+    /// Only allowlisted servers may be installed or spawned.
+    Allowlist,
+}
+
+/// How an allowlist entry identifies MCP apps. Rust representation of
+/// `McpAllowlistEntryKind` from the GraphQL schema.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum McpAllowlistEntryKind {
+    RegistryName,
+    GalleryTemplate,
+    OrgMarketplaceEntry,
+    UrlPattern,
+    CommandPattern,
+    CanonicalHash,
+}
+
+/// A single entry in a workspace's MCP governance allowlist. Rust
+/// representation of `McpAllowlistEntry` from the GraphQL schema.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct McpAllowlistEntry {
+    pub id: String,
+    pub kind: McpAllowlistEntryKind,
+    pub value: String,
+    #[serde(default)]
+    pub pinned_version: Option<String>,
+    #[serde(default)]
+    pub display_name: Option<String>,
+}
+
+/// Admin-configured MCP governance for a workspace. Rust representation of
+/// `McpGovernanceSettings` from the GraphQL schema. Absent on
+/// [`WorkspaceSettings`] means the workspace is self-managed.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct McpGovernanceSettings {
+    pub mode: McpGovernanceMode,
+    pub allowlist: Vec<McpAllowlistEntry>,
+    pub allow_file_based_servers: bool,
+    pub allow_plugin_import: bool,
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct WorkspaceSettings {
     pub llm_settings: LlmSettings,
@@ -925,4 +991,9 @@ pub struct WorkspaceSettings {
     pub enable_warp_attribution: AdminEnablementSetting,
     #[serde(default)]
     pub default_host_slug: Option<String>,
+    /// Admin-configured MCP governance. `None` means self-managed (no
+    /// governance). Only honored when the workspace's tier has
+    /// `marketplace_policy.governance_controls_enabled`.
+    #[serde(default)]
+    pub mcp_governance_settings: Option<McpGovernanceSettings>,
 }

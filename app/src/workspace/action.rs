@@ -184,6 +184,10 @@ pub enum WorkspaceAction {
     CloseTabGroup(TabGroupId),
     /// Toggle collapsed state for the given tab group.
     ToggleTabGroupCollapsed(TabGroupId),
+    /// Toggle collapsed state for the given Workspace-view folder section,
+    /// keyed by the folder's key (git repo root / working directory, or the
+    /// empty string for the "Other" bucket).
+    ToggleWorkspaceFolderCollapsed(String),
     /// Opens an inline editor over the given group's header for renaming.
     RenameTabGroup(TabGroupId),
     /// Creates a new tab group containing the tab at the given index.
@@ -929,6 +933,7 @@ impl WorkspaceAction {
             | CloseTabsRightActiveTab
             | CloseTabGroup(_)
             | ToggleTabGroupCollapsed(_)
+            | ToggleWorkspaceFolderCollapsed(_)
             | RenameTabGroup(_)
             | NewTabGroupFromTab(_)
             | MoveTabToGroup { .. }

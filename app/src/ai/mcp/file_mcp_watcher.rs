@@ -12,12 +12,11 @@ use repo_metadata::repositories::{
 };
 use repo_metadata::repository::{Repository, RepositorySubscriber, SubscriberId};
 use repo_metadata::watcher::{DirectoryWatcher, RepositoryUpdate};
-use strum::IntoEnumIterator;
 use warp_core::safe_warn;
 use warpui::{Entity, ModelContext, ModelHandle, SingletonEntity};
 use watcher::HomeDirectoryWatcherEvent;
 
-use crate::ai::mcp::parsing::normalize_codex_toml_to_json;
+use crate::ai::mcp::parsing::{normalize_codex_toml_to_json, normalize_cursor_json};
 use crate::ai::mcp::{home_config_file_path, MCPProvider, ParsedTemplatableMCPServerResult};
 use crate::warp_managed_paths_watcher::{
     warp_managed_mcp_config_path, WarpManagedPathsWatcher, WarpManagedPathsWatcherEvent,
@@ -190,7 +189,7 @@ impl FileMCPWatcher {
         }
 
         if let Some(home_dir) = dirs::home_dir() {
-            for provider in MCPProvider::iter() {
+            for provider in MCPProvider::iter_available() {
                 if provider == MCPProvider::Warp {
                     continue;
                 }
@@ -348,7 +347,7 @@ impl FileMCPWatcher {
             return;
         };
 
-        for provider in MCPProvider::iter() {
+        for provider in MCPProvider::iter_available() {
             if provider == MCPProvider::Warp {
                 continue;
             }
@@ -593,12 +592,13 @@ impl FileMCPWatcher {
 }
 
 /// Returns an iterator of `(provider, config_path)` pairs for MCP providers whose configuration file
-/// paths fall within the watched directory.
+/// paths fall within the watched directory. Feature-flag-gated providers that are
+/// unavailable (e.g. Cursor without `CursorMcpImport`) are excluded.
 fn providers_in_scope(
     root_path: PathBuf,
     watched_dir: PathBuf,
 ) -> impl Iterator<Item = (MCPProvider, PathBuf)> {
-    MCPProvider::iter().flat_map(move |provider| {
+    MCPProvider::iter_available().flat_map(move |provider| {
         let mut results = HashSet::new();
         for path in [
             root_path.join(provider.home_config_path()),
@@ -640,7 +640,10 @@ fn substitute_env_vars(json_content: &str) -> Result<String, anyhow::Error> {
 /// Asynchronously reads and parses an MCP config file and returns parsed MCP servers.
 /// Dispatches to the appropriate parser based on `provider` rather than inferring from path.
 /// Returns an empty vec if the file doesn't exist or parsing fails.
-async fn parse_mcp_config_file(
+///
+/// Also used by the "Import from Cursor" flow so that imports share the exact
+/// parse path used for file-based detection.
+pub(crate) async fn parse_mcp_config_file(
     file_path: &Path,
     provider: MCPProvider,
 ) -> Vec<ParsedTemplatableMCPServerResult> {
@@ -681,6 +684,30 @@ async fn parse_mcp_config_file(
                 return vec![];
             }
         },
+        MCPProvider::Cursor => {
+            // The Cursor config always lives at `<root>/.cursor/mcp.json`, so the
+            // workspace root (used to resolve `${workspaceFolder}`) is two levels up.
+            // For the home config this resolves to the home directory, matching the
+            // spawn-root convention for global file-based servers.
+            let workspace_root = file_path.parent().and_then(Path::parent);
+            match normalize_cursor_json(&file_contents, workspace_root) {
+                Ok(json) => json,
+                Err(err) => {
+                    safe_warn!(
+                        safe: (
+                            "Failed to normalize Cursor mcp.json: {:#}",
+                            err
+                        ),
+                        full: (
+                            "Failed to normalize Cursor mcp.json {}: {:#}",
+                            file_path.display(),
+                            err
+                        )
+                    );
+                    return vec![];
+                }
+            }
+        }
         MCPProvider::Claude | MCPProvider::Warp | MCPProvider::Agents => file_contents,
     };
 

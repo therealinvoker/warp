@@ -961,11 +961,22 @@ impl LoginSlideView {
                 WARP_DRIVE_FEATURES,
                 "Enable Warp Drive",
             ),
-            LoginPurpose::WarpAgent | LoginPurpose::ThirdParty => (
+            LoginPurpose::WarpAgent => (
                 "Continue without signing in?",
                 "Without an account, you won't have access to Warp's AI features. Sign in anytime to unlock agents and other AI features.",
                 &[],
                 "Sign in",
+            ),
+            // Third-party-agents path: skipping leaves AI off, so offer an
+            // explicit "Create account" recovery CTA. It routes through
+            // `LoginFromSkipDialog` -> `start_login`, which opens
+            // `sign_up_url()` in the browser; the pending onboarding settings
+            // stay stored so AI is enabled once the user returns logged in.
+            LoginPurpose::ThirdParty => (
+                "Continue without an account?",
+                "Without a Warp account, you won't have access to Warp's AI features. Create an account anytime to unlock agents and other AI features.",
+                &[],
+                "Create account",
             ),
         };
 

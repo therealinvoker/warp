@@ -1,6 +1,9 @@
 use std::env;
+use std::path::PathBuf;
 
-use super::substitute_env_vars;
+use super::{home_subdir_to_watch, providers_in_scope, substitute_env_vars};
+use crate::ai::mcp::MCPProvider;
+use crate::features::FeatureFlag;
 
 fn cleanup_env_vars(vars: &[&str]) {
     for var in vars {
@@ -72,4 +75,56 @@ fn test_substitute_env_vars_missing_or_empty() {
 
     // Cleanup
     cleanup_env_vars(&["EMPTY_VAR"]);
+}
+
+// ── Cursor provider watcher wiring ─────────────────────────────────────
+
+/// Cursor's home config lives one directory deep, so the watcher registers a
+/// dedicated `~/.cursor` subdir watcher (like `~/.codex` for Codex).
+#[test]
+fn home_subdir_to_watch_returns_dot_cursor_for_cursor() {
+    assert_eq!(
+        home_subdir_to_watch(MCPProvider::Cursor),
+        Some(PathBuf::from(".cursor"))
+    );
+}
+
+/// With the `CursorMcpImport` flag enabled, a project scan includes the
+/// project-level `.cursor/mcp.json`.
+#[test]
+fn providers_in_scope_includes_cursor_when_flag_enabled() {
+    let _flag = FeatureFlag::CursorMcpImport.override_enabled(true);
+    let root = PathBuf::from("/repo");
+    let pairs: Vec<_> = providers_in_scope(root.clone(), root).collect();
+    assert!(
+        pairs.contains(&(MCPProvider::Cursor, PathBuf::from("/repo/.cursor/mcp.json"))),
+        "Cursor project config should be in scope, got: {pairs:?}"
+    );
+}
+
+/// With the flag disabled (test default), Cursor configs are never in scope.
+#[test]
+fn providers_in_scope_excludes_cursor_when_flag_disabled() {
+    let root = PathBuf::from("/repo");
+    let pairs: Vec<_> = providers_in_scope(root.clone(), root).collect();
+    assert!(
+        !pairs.iter().any(|(p, _)| *p == MCPProvider::Cursor),
+        "Cursor must not be scanned while the flag is disabled, got: {pairs:?}"
+    );
+}
+
+/// A home `.cursor` subdir watcher scopes the scan to Cursor's config only.
+#[test]
+fn providers_in_scope_for_home_cursor_subdir_only_matches_cursor() {
+    let _flag = FeatureFlag::CursorMcpImport.override_enabled(true);
+    let home = PathBuf::from("/home/user");
+    let watched = home.join(".cursor");
+    let pairs: Vec<_> = providers_in_scope(home.clone(), watched).collect();
+    assert_eq!(
+        pairs,
+        vec![(
+            MCPProvider::Cursor,
+            PathBuf::from("/home/user/.cursor/mcp.json")
+        )]
+    );
 }

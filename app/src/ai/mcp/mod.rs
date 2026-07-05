@@ -12,6 +12,7 @@ use strum_macros::EnumIter;
 #[cfg(not(target_family = "wasm"))]
 pub use templatable_manager::McpIntegration;
 pub use templatable_manager::TemplatableMCPServerManager;
+use warp_core::features::FeatureFlag;
 use warp_core::ui::appearance::Appearance;
 use warp_core::ui::Icon;
 
@@ -49,6 +50,9 @@ cfg_if::cfg_if! {
 
 pub mod gallery;
 pub use gallery::MCPGalleryManager;
+pub mod governance;
+pub use governance::{EffectiveMcpMode, EffectiveMcpPolicy, McpGovernance, McpGovernanceEvent};
+pub mod telemetry;
 pub mod templatable;
 #[cfg(not(target_family = "wasm"))]
 pub use cloud_object_models::{
@@ -57,7 +61,7 @@ pub use cloud_object_models::{
 pub use cloud_object_models::{
     CloudMCPServer, CloudMCPServerModel, MCPServer, MCPServerState, TransportType,
 };
-pub use templatable::{JsonTemplate, TemplatableMCPServer, TemplateVariable};
+pub use templatable::{JsonTemplate, ServerOrigin, TemplatableMCPServer, TemplateVariable};
 pub mod logs;
 pub mod templatable_installation;
 pub use templatable_installation::TemplatableMCPServerInstallation;
@@ -428,6 +432,7 @@ impl MCPServerExt for MCPServer {
             template: JsonTemplate { json, variables },
             version: chrono::Local::now().timestamp(),
             gallery_data: None,
+            origin: ServerOrigin::default(),
         };
         let templatable_mcp_server_installation: Option<TemplatableMCPServerInstallation> =
             Some(TemplatableMCPServerInstallation::new(
@@ -497,6 +502,7 @@ pub enum MCPProvider {
     Claude,
     Codex,
     Agents,
+    Cursor,
 }
 
 impl MCPProvider {
@@ -506,6 +512,7 @@ impl MCPProvider {
             MCPProvider::Claude => "Claude",
             MCPProvider::Codex => "Codex",
             MCPProvider::Agents => "Other Agents",
+            MCPProvider::Cursor => "Cursor",
         }
     }
 
@@ -515,6 +522,7 @@ impl MCPProvider {
             MCPProvider::Claude => Icon::ClaudeLogo,
             MCPProvider::Codex => Icon::OpenAILogo,
             MCPProvider::Agents => Icon::Warp,
+            MCPProvider::Cursor => Icon::CursorLogo,
         }
     }
 
@@ -525,6 +533,7 @@ impl MCPProvider {
             MCPProvider::Claude => Path::new(".claude.json"),
             MCPProvider::Codex => Path::new(".codex/config.toml"),
             MCPProvider::Agents => Path::new(".agents/.mcp.json"),
+            MCPProvider::Cursor => Path::new(".cursor/mcp.json"),
         }
     }
 
@@ -535,7 +544,29 @@ impl MCPProvider {
             MCPProvider::Claude => Path::new(".mcp.json"),
             MCPProvider::Codex => Path::new(".codex/config.toml"),
             MCPProvider::Agents => Path::new(".agents/.mcp.json"),
+            MCPProvider::Cursor => Path::new(".cursor/mcp.json"),
         }
+    }
+
+    /// Returns whether the provider is available in this session.
+    ///
+    /// Feature-flag-gated providers (currently only Cursor, behind
+    /// [`FeatureFlag::CursorMcpImport`]) report `false` when their flag is
+    /// disabled; unavailable providers are skipped by config detection,
+    /// watching, and parsing.
+    pub fn is_available(&self) -> bool {
+        match self {
+            MCPProvider::Cursor => FeatureFlag::CursorMcpImport.is_enabled(),
+            MCPProvider::Warp | MCPProvider::Claude | MCPProvider::Codex | MCPProvider::Agents => {
+                true
+            }
+        }
+    }
+
+    /// Iterates over providers that are available in this session
+    /// (see [`MCPProvider::is_available`]).
+    pub fn iter_available() -> impl Iterator<Item = MCPProvider> {
+        Self::iter().filter(MCPProvider::is_available)
     }
 }
 
@@ -545,7 +576,7 @@ impl MCPProvider {
 /// project-level configs (e.g. `.mcp.json` anywhere in the path).
 pub fn mcp_provider_from_file_path(file_path: &Path) -> Option<MCPProvider> {
     // Try exact home-config match first (unambiguous).
-    for provider in MCPProvider::iter() {
+    for provider in MCPProvider::iter_available() {
         if home_config_file_path(provider)
             .as_ref()
             .is_some_and(|home_config_path| file_path == home_config_path)
@@ -557,7 +588,7 @@ pub fn mcp_provider_from_file_path(file_path: &Path) -> Option<MCPProvider> {
     // (most-specific) suffix.
     // This avoids `.mcp.json` shadowing `.warp/.mcp.json`, for example.
     let mut best: Option<(MCPProvider, usize)> = None;
-    for provider in MCPProvider::iter() {
+    for provider in MCPProvider::iter_available() {
         let cfg = provider.project_config_path();
         if file_path.ends_with(cfg) {
             let len = cfg.as_os_str().len();

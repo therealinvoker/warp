@@ -87,9 +87,11 @@ fn hide_title_bar_search_bar_in_vertical_tabs_uses_vertical_tabs_path() {
 }
 
 #[test]
-fn header_toolbar_chip_selection_default_contains_code_review() {
+fn header_toolbar_chip_selection_default_omits_code_review() {
+    // Code review moved into the tools panel as a tab, so it is no longer part
+    // of the default header toolbar configuration.
     let config = HeaderToolbarChipSelection::Default;
-    assert!(config.contains_item(&HeaderToolbarItemKind::CodeReview));
+    assert!(!config.contains_item(&HeaderToolbarItemKind::CodeReview));
 }
 
 #[test]

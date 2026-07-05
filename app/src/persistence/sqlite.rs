@@ -747,6 +747,10 @@ fn handle_model_event(event: ModelEvent, connection: &mut SqliteConnection) -> a
             running,
         } => update_mcp_server_running(connection, installation_uuid, running)
             .context("Error updating running field for MCP installation"),
+        ModelEvent::UpsertMcpGovernancePolicy { policy_json } => {
+            upsert_mcp_governance_policy(connection, policy_json)
+                .context("error upserting MCP governance policy snapshot")
+        }
         ModelEvent::UpsertWorkspaceLanguageServer {
             workspace_path,
             lsp_type,
@@ -911,6 +915,9 @@ fn save_app_state(conn: &mut SqliteConnection, app_state: &AppState) -> Result<(
                     .agent_management_filters
                     .as_ref()
                     .and_then(|f| serde_json::to_string(f).ok()),
+                workspace_folder_collapse: (!window.workspace_folder_collapse.is_empty())
+                    .then(|| serde_json::to_string(&window.workspace_folder_collapse).ok())
+                    .flatten(),
             };
             diesel::insert_into(schema::windows::dsl::windows)
                 .values(new_window)
@@ -1727,6 +1734,39 @@ fn upsert_mcp_server_installation(
             .set(&new_installation)
             .execute(conn)?;
 
+        Ok(())
+    })?;
+
+    Ok(())
+}
+
+/// Reads the single-row MCP governance policy snapshot, if any.
+fn read_mcp_governance_policy(
+    conn: &mut SqliteConnection,
+) -> Result<Option<String>, diesel::result::Error> {
+    use schema::mcp_governance_policy::dsl::*;
+
+    Ok(mcp_governance_policy
+        .select(policy_json)
+        .first::<String>(conn)
+        .optional()?)
+}
+
+/// Replaces the single-row MCP governance policy snapshot.
+fn upsert_mcp_governance_policy(
+    conn: &mut SqliteConnection,
+    new_policy_json: String,
+) -> Result<()> {
+    use schema::mcp_governance_policy::dsl::*;
+
+    conn.transaction::<_, Error, _>(|conn| {
+        diesel::delete(mcp_governance_policy).execute(conn)?;
+        diesel::insert_into(mcp_governance_policy)
+            .values(model::MCPGovernancePolicy {
+                id: 0,
+                policy_json: new_policy_json,
+            })
+            .execute(conn)?;
         Ok(())
     })?;
 
@@ -2597,6 +2637,10 @@ fn read_sqlite_data(
                         .agent_management_filters
                         .and_then(|s| serde_json::from_str(&s).ok()),
                     tab_groups: tab_groups_snapshots,
+                    workspace_folder_collapse: window
+                        .workspace_folder_collapse
+                        .and_then(|s| serde_json::from_str(&s).ok())
+                        .unwrap_or_default(),
                 }
             },
         )
@@ -2765,6 +2809,7 @@ fn read_sqlite_data(
     let ignored_suggestions = get_all_ignored_suggestions(conn)?;
     let mcp_server_installations = get_all_mcp_server_installations(conn)?;
     let mcp_servers_to_restore = get_mcp_servers_to_restore(conn)?;
+    let mcp_governance_policy_json = read_mcp_governance_policy(conn)?;
 
     Ok(PersistedData {
         app_state,
@@ -2785,6 +2830,7 @@ fn read_sqlite_data(
         ignored_suggestions,
         mcp_server_installations,
         mcp_servers_to_restore,
+        mcp_governance_policy_json,
     })
 }
 

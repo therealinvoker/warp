@@ -40,6 +40,9 @@ impl VerticalTabsDisplayOption {
         match self {
             Self::DisplayGranularity(VerticalTabsDisplayGranularity::Panes) => json!("panes"),
             Self::DisplayGranularity(VerticalTabsDisplayGranularity::Tabs) => json!("tabs"),
+            Self::DisplayGranularity(VerticalTabsDisplayGranularity::Workspace) => {
+                json!("workspace")
+            }
             Self::TabItemMode(VerticalTabsTabItemMode::FocusedSession) => json!("focused_session"),
             Self::TabItemMode(VerticalTabsTabItemMode::Summary) => json!("summary"),
             Self::ViewMode(VerticalTabsViewMode::Compact) => json!("compact"),

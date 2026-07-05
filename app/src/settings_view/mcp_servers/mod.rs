@@ -7,6 +7,7 @@ use crate::server::ids::ObjectUid;
 
 pub mod destructive_mcp_confirmation_dialog;
 pub mod edit_page;
+pub mod import_from_cursor_modal;
 pub mod installation_modal;
 pub mod list_page;
 pub mod server_card;

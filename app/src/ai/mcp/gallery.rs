@@ -4,7 +4,7 @@ use uuid::Uuid;
 use warpui::{Entity, ModelContext, SingletonEntity};
 
 use crate::ai::mcp::templatable::{
-    GalleryData, JsonTemplate, TemplatableMCPServer, TemplateVariable,
+    GalleryData, JsonTemplate, ServerOrigin, TemplatableMCPServer, TemplateVariable,
 };
 use crate::server::cloud_objects::update_manager::{UpdateManager, UpdateManagerEvent};
 
@@ -87,6 +87,7 @@ impl TryFrom<GalleryMCPServer> for TemplatableMCPServer {
                 gallery_item_id: gallery_uuid,
                 version: gallery_version,
             }),
+            origin: ServerOrigin::Gallery,
         })
     }
 }

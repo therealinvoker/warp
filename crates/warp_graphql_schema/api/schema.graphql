@@ -2310,6 +2310,53 @@ type ManagedSecretsOutput implements Response {
 
 union ManagedSecretsResult = ManagedSecretsOutput | UserFacingError
 
+"""
+Tier entitlement for the MCP marketplace/import feature set. Governs whether
+the plan can use import/marketplace at all and whether workspace admins may
+configure McpGovernanceSettings.
+"""
+type MarketplacePolicy {
+  enabled: Boolean!
+  governanceControlsEnabled: Boolean!
+  maxOrgSources: Int!
+  orgSourcesEnabled: Boolean!
+}
+
+"""A single entry in a workspace's MCP governance allowlist."""
+type McpAllowlistEntry {
+  displayName: String
+  id: ID!
+  kind: McpAllowlistEntryKind!
+  pinnedVersion: String
+  value: String!
+}
+
+enum McpAllowlistEntryKind {
+  CANONICAL_HASH
+  COMMAND_PATTERN
+  GALLERY_TEMPLATE
+  ORG_MARKETPLACE_ENTRY
+  REGISTRY_NAME
+  URL_PATTERN
+}
+
+enum McpGovernanceMode {
+  ALLOWLIST
+  DISABLE
+  ENABLE_ALL
+}
+
+"""
+Admin-configured MCP governance for a workspace. Absent (null) means the
+workspace is self-managed (no governance).
+"""
+type McpGovernanceSettings {
+  allowFileBasedServers: Boolean!
+  allowPluginImport: Boolean!
+  allowlist: [McpAllowlistEntry!]!
+  mode: McpGovernanceMode!
+}
+
 type MemberSpendLimit {
   maxMonthlySpendCents: Int!
   principalType: PrincipalType!
@@ -3624,6 +3671,7 @@ type Tier {
   enterpriseSecretRedactionPolicy: EnterpriseSecretRedactionPolicy
   enterpriseSpendingLimitsPolicy: EnterpriseSpendingLimitsPolicy
   enterpriseUsageThresholdsPolicy: EnterpriseUsageThresholdsPolicy
+  marketplacePolicy: MarketplacePolicy
   multiAdminPolicy: MultiAdminPolicy
   name: String!
   pricing: TierPricing
@@ -4427,6 +4475,7 @@ type WorkspaceSettings {
   isInviteLinkEnabled: Boolean!
   linkSharingSettings: LinkSharingSettings!
   llmSettings: LlmSettings!
+  mcpGovernanceSettings: McpGovernanceSettings
   sandboxedAgentSettings: SandboxedAgentSettings
   secretRedactionSettings: SecretRedactionSettings!
   telemetrySettings: TelemetrySettings!

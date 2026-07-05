@@ -203,6 +203,13 @@ diesel::table! {
 }
 
 diesel::table! {
+    mcp_governance_policy (id) {
+        id -> Integer,
+        policy_json -> Text,
+    }
+}
+
+diesel::table! {
     mcp_server_installations (id) {
         id -> Text,
         templatable_mcp_server -> Text,
@@ -452,6 +459,7 @@ diesel::table! {
         agent_management_filters -> Nullable<Text>,
         left_panel_open -> Nullable<Bool>,
         vertical_tabs_panel_open -> Nullable<Bool>,
+        workspace_folder_collapse -> Nullable<Text>,
     }
 }
 

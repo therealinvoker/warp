@@ -1,6 +1,7 @@
 pub(crate) mod auto_handoff_sleep_modal;
 mod build_plan_migration_modal;
 pub(crate) mod cloud_agent_capacity_modal;
+pub(crate) mod code_review_panel;
 pub(crate) mod codex_modal;
 pub mod conversation_list;
 #[cfg(enable_crash_recovery)]
@@ -13,7 +14,6 @@ pub(crate) mod left_panel;
 pub(crate) mod onboarding;
 pub(crate) mod openwarp_launch_modal;
 pub(crate) mod orchestration_launch_modal;
-pub(crate) mod right_panel;
 mod startup_directory;
 mod tab_grouping;
 #[cfg(test)]
@@ -156,7 +156,7 @@ use super::util::{
     WorkspaceMouseStates, WorkspaceState,
 };
 use super::{util, ActiveSession, TabBarDropTargetData, TabBarLocation, WorkspaceRegistry};
-use crate::ai::active_agent_views_model::ActiveAgentViewsModel;
+use crate::ai::active_agent_views_model::{ActiveAgentViewsModel, ConversationOrTaskId};
 use crate::ai::agent::api::ServerConversationToken;
 #[cfg(not(target_family = "wasm"))]
 use crate::ai::agent::conversation::AIAgentHarness;
@@ -221,8 +221,8 @@ use crate::ai_assistant::panel::{AIAssistantPanelEvent, AIAssistantPanelView};
 use crate::ai_assistant::{AskAIType, AI_ASSISTANT_FEATURE_NAME, AI_ASSISTANT_LOGO_COLOR};
 use crate::app_state::{
     LeafContents, LeafSnapshot, LeftPanelDisplayedTab, LeftPanelSnapshot, NotebookPaneSnapshot,
-    PaneNodeSnapshot, PaneUuid, RightPanelSnapshot, SettingsPaneSnapshot, TabGroupSnapshot,
-    TabSnapshot, TerminalPaneSnapshot, WindowSnapshot, WorkflowPaneSnapshot,
+    PaneNodeSnapshot, PaneUuid, SettingsPaneSnapshot, TabGroupSnapshot, TabSnapshot,
+    TerminalPaneSnapshot, WindowSnapshot, WorkflowPaneSnapshot,
 };
 use crate::appearance::{Appearance, AppearanceManager};
 use crate::auth::auth_manager::{AuthManager, AuthManagerEvent};
@@ -504,6 +504,7 @@ use crate::workspace::view::build_plan_migration_modal::{
 use crate::workspace::view::cloud_agent_capacity_modal::{
     CloudAgentCapacityModal, CloudAgentCapacityModalEvent, CloudAgentCapacityModalVariant,
 };
+use crate::workspace::view::code_review_panel::CodeReviewPanelEvent;
 use crate::workspace::view::codex_modal::{CodexModal, CodexModalEvent};
 use crate::workspace::view::free_ai_removal_modal::{
     FreeAiRemovalModal, FreeAiRemovalModalEvent, FreeAiRemovalModalTelemetryEvent,
@@ -523,7 +524,6 @@ use crate::workspace::view::openwarp_launch_modal::{
 use crate::workspace::view::orchestration_launch_modal::{
     OrchestrationLaunchModal, OrchestrationLaunchModalEvent,
 };
-use crate::workspace::view::right_panel::{RightPanelEvent, RightPanelView};
 use crate::workspace::{ForkFromExchange, ForkedConversationDestination};
 use crate::workspaces::user_workspaces::UserWorkspaces;
 use crate::workspaces::workspace::AdminEnablementSetting;
@@ -961,7 +961,6 @@ pub struct TransferredTab {
     pub left_panel_open: bool,
     pub vertical_tabs_panel_open: bool,
     pub right_panel_open: bool,
-    pub is_right_panel_maximized: bool,
     pub draggable_state: DraggableState,
 }
 #[cfg(not(target_family = "wasm"))]
@@ -1001,6 +1000,10 @@ pub struct Workspace {
     traffic_light_mouse_states: TrafficLightMouseStates,
     /// Tab groups in this workspace, keyed by id.
     pub(crate) tab_groups: HashMap<TabGroupId, TabGroup>,
+    /// Collapsed state for Workspace-view folder sections, keyed by folder key
+    /// (git repo root / working directory, or the empty string for "Other").
+    /// Absent key means expanded. Persisted per-window across restarts.
+    pub(crate) workspace_folder_collapsed: HashMap<String, bool>,
     /// Per-group hover state for the horizontal tab bar.
     horizontal_tab_group_mouse_states: RefCell<HashMap<TabGroupId, HorizontalTabGroupMouseStates>>,
     tab_rename_editor: ViewHandle<EditorView>,
@@ -1133,7 +1136,6 @@ pub struct Workspace {
     vertical_tabs_panel: VerticalTabsPanelState,
     left_panel_view: ViewHandle<LeftPanelView>,
     left_panel_views: Vec<ToolPanelView>,
-    right_panel_view: ViewHandle<RightPanelView>,
     working_directories_model: ModelHandle<pane_group::WorkingDirectoriesModel>,
     agent_management_view: ViewHandle<AgentManagementView>,
     notification_mailbox_view: Option<ViewHandle<NotificationMailboxView>>,
@@ -1197,7 +1199,8 @@ impl Workspace {
                 .value()
             {
                 VerticalTabsDisplayGranularity::Panes => 10.,
-                VerticalTabsDisplayGranularity::Tabs => 12.,
+                VerticalTabsDisplayGranularity::Tabs
+                | VerticalTabsDisplayGranularity::Workspace => 12.,
             }
         } else {
             appearance.ui_font_size()
@@ -3016,13 +3019,6 @@ impl Workspace {
             me.handle_left_panel_event(event, ctx);
         });
 
-        let right_panel_view = ctx.add_typed_action_view(|ctx| {
-            RightPanelView::new(working_directories_model.clone(), ctx)
-        });
-        ctx.subscribe_to_view(&right_panel_view, |me, _, event, ctx| {
-            me.handle_right_panel_event(event.clone(), ctx);
-        });
-
         // Get persisted filters from window snapshot if restoring.
         let agent_management_filters = match workspace_setting {
             NewWorkspaceSource::Restored {
@@ -3327,6 +3323,7 @@ impl Workspace {
             tab_bar_hover_state: Default::default(),
             traffic_light_mouse_states: Default::default(),
             tab_groups: HashMap::new(),
+            workspace_folder_collapsed: HashMap::new(),
             horizontal_tab_group_mouse_states: RefCell::default(),
             tab_rename_editor: Self::tab_rename_editor(ctx),
             pane_rename_editor: Self::pane_rename_editor(ctx),
@@ -3412,7 +3409,6 @@ impl Workspace {
             vertical_tabs_panel: Default::default(),
             left_panel_view,
             left_panel_views,
-            right_panel_view,
             working_directories_model,
             shown_staging_banner_count: 0,
 
@@ -3753,6 +3749,7 @@ impl Workspace {
                         self.close_right_panel(&pane_group, ctx);
                     }
                 }
+                self.update_left_panel_available_views(ctx);
                 ctx.notify();
             }
             TabSettingsChangedEvent::ShowCodeReviewDiffStats { .. } => {
@@ -3882,6 +3879,13 @@ impl Workspace {
                         .collect();
                 }
 
+                // Restore Workspace-view folder collapse state (collapsed keys only).
+                self.workspace_folder_collapsed = window_snapshot
+                    .workspace_folder_collapse
+                    .iter()
+                    .map(|key| (key.clone(), true))
+                    .collect();
+
                 window_snapshot
                     .tabs
                     .iter()
@@ -3913,12 +3917,8 @@ impl Workspace {
                             self.restore_left_panel_for_tab(&pane_group, left_panel_snapshot, ctx);
                         }
 
-                        if let Some(right_panel_snapshot) = &saved_tab.right_panel {
-                            self.restore_right_panel_for_tab(
-                                &pane_group,
-                                right_panel_snapshot,
-                                ctx,
-                            );
+                        if saved_tab.right_panel.is_some() {
+                            self.restore_right_panel_for_tab(&pane_group, ctx);
                         }
                     });
 
@@ -4003,7 +4003,6 @@ impl Workspace {
                 custom_title,
                 left_panel_open,
                 right_panel_open,
-                is_right_panel_maximized,
                 is_tab_drag_preview,
                 ..
             } => {
@@ -4020,10 +4019,9 @@ impl Workspace {
                 if self.left_panel_visibility_across_tabs_enabled(ctx) {
                     self.left_panel_open = left_panel_open;
                 }
+                // Code review now lives as a tab in the tools panel; a
+                // transferred tab that had code review open reopens it there.
                 if right_panel_open {
-                    self.right_panel_view.update(ctx, |rp, ctx| {
-                        rp.set_maximized(is_right_panel_maximized, ctx);
-                    });
                     self.setup_code_review_panel(None, ctx);
                 }
                 self.pending_pane_group_transfer = true;
@@ -4134,6 +4132,11 @@ impl Workspace {
         }
 
         self.left_panel_view.update(ctx, |lp, ctx| {
+            // Point the tools panel at this tab's pane group before restoring
+            // the active view, so the view restore's side effects (e.g. the
+            // per-tab `right_panel_open` sync) apply to the right pane group.
+            lp.set_active_pane_group(pane_group.clone(), &self.working_directories_model, ctx);
+
             // Restore which panel tab was active
             let active_view = match left_panel_snapshot.left_panel_displayed_tab {
                 LeftPanelDisplayedTab::FileTree => ToolPanelView::ProjectExplorer,
@@ -4142,35 +4145,41 @@ impl Workspace {
                 },
                 LeftPanelDisplayedTab::WarpDrive => ToolPanelView::WarpDrive,
                 LeftPanelDisplayedTab::ConversationListView => ToolPanelView::ConversationListView,
+                LeftPanelDisplayedTab::CodeReview => ToolPanelView::CodeReview,
             };
             lp.restore_active_view_from_snapshot(active_view, ctx);
-            lp.set_active_pane_group(pane_group.clone(), &self.working_directories_model, ctx);
         });
 
         ctx.notify();
     }
 
+    /// Back-compat: previously-saved windows may still carry a right-panel
+    /// snapshot for code review. Code review now lives as a tab inside the
+    /// tools panel, so restore by opening the tools panel on the code review
+    /// tab instead of a separate right panel.
     fn restore_right_panel_for_tab(
         &mut self,
         pane_group: &ViewHandle<PaneGroup>,
-        right_panel_snapshot: &RightPanelSnapshot,
         ctx: &mut ViewContext<Self>,
     ) {
-        pane_group.update(ctx, |pg, _| {
-            pg.right_panel_open = true;
-            pg.is_right_panel_maximized = right_panel_snapshot.is_maximized;
-        });
-
-        let resizable = ResizableData::handle(ctx);
-        if let Some(modal_sizes) = resizable.as_ref(ctx).get_all_handles(self.window_id) {
-            if let Ok(mut handle) = modal_sizes.right_panel_width.lock() {
-                handle.set_size(right_panel_snapshot.width as f32);
-            }
+        // Skip when the code review tools view isn't available (e.g. the
+        // setting was disabled after the snapshot was written); the left panel
+        // stays as `restore_left_panel_for_tab` left it.
+        if !Self::compute_left_panel_views(ctx).contains(&ToolPanelView::CodeReview) {
+            return;
         }
 
-        self.right_panel_view.update(ctx, |rp, ctx| {
-            rp.set_active_pane_group(pane_group.clone(), &self.working_directories_model, ctx);
-            rp.set_maximized(right_panel_snapshot.is_maximized, ctx);
+        pane_group.update(ctx, |pg, ctx| {
+            pg.set_left_panel_open(true, ctx);
+            pg.right_panel_open = true;
+        });
+
+        self.left_panel_view.update(ctx, |lp, ctx| {
+            // Point the tools panel at this tab's pane group before restoring
+            // the active view, so the view restore's side effects (e.g. the
+            // per-tab `right_panel_open` sync) apply to the right pane group.
+            lp.set_active_pane_group(pane_group.clone(), &self.working_directories_model, ctx);
+            lp.restore_active_view_from_snapshot(ToolPanelView::CodeReview, ctx);
         });
 
         ctx.notify();
@@ -4668,9 +4677,36 @@ impl Workspace {
         });
     }
 
+    /// Returns the terminal view ID of the user's most recently active agent conversation,
+    /// mirroring the "Active" section ordering in the conversation list (newest first, `None`
+    /// last). Returns `None` if no open conversation resolves to a live terminal view.
+    fn most_recently_active_agent_terminal_view_id(&self, ctx: &AppContext) -> Option<EntityId> {
+        let model = ActiveAgentViewsModel::as_ref(ctx);
+        let mut ids: Vec<ConversationOrTaskId> = model
+            .get_all_open_conversation_ids(ctx)
+            .into_iter()
+            .collect();
+        ids.sort_by(|a, b| {
+            model
+                .get_last_opened_time(b)
+                .cmp(&model.get_last_opened_time(a))
+        });
+        ids.into_iter().find_map(|id| match id {
+            ConversationOrTaskId::ConversationId(conversation_id) => {
+                model.get_terminal_view_id_for_conversation(conversation_id, ctx)
+            }
+            ConversationOrTaskId::TaskId(task_id) => {
+                model.get_terminal_view_id_for_ambient_task(task_id)
+            }
+        })
+    }
+
     /// Add a new terminal tab and enter the agent view with a new conversation.
     fn add_terminal_tab_with_new_agent_view(&mut self, ctx: &mut ViewContext<Self>) {
         let was_left_panel_open = self.active_tab_pane_group().as_ref(ctx).left_panel_open;
+        // Capture the source before creating/activating the new tab, since activating the new
+        // tab overwrites focus/recency state in ActiveAgentViewsModel.
+        let source_terminal_view_id = self.most_recently_active_agent_terminal_view_id(ctx);
         self.add_new_session_tab_internal_with_default_session_mode_behavior(
             NewSessionSource::Tab,
             Some(ctx.window_id()),
@@ -4680,20 +4716,34 @@ impl Workspace {
             DefaultSessionModeBehavior::Ignore,
             ctx,
         );
-        self.active_tab_pane_group().update(ctx, |pane_group, ctx| {
+        let new_terminal_view_id = self.active_tab_pane_group().update(ctx, |pane_group, ctx| {
             if was_left_panel_open {
                 pane_group.set_left_panel_open(true, ctx);
             }
-            if let Some(terminal_view) = pane_group.active_session_view(ctx) {
-                terminal_view.update(ctx, |view, ctx| {
-                    view.enter_agent_view_for_new_conversation(
-                        None,
-                        AgentViewEntryOrigin::ConversationListView,
-                        ctx,
-                    );
-                });
-            }
+            let terminal_view = pane_group.active_session_view(ctx)?;
+            terminal_view.update(ctx, |view, ctx| {
+                view.enter_agent_view_for_new_conversation(
+                    None,
+                    AgentViewEntryOrigin::ConversationListView,
+                    ctx,
+                );
+            });
+            Some(terminal_view.as_ref(ctx).id())
         });
+
+        // Default the new agent tab to the model of the most recently active agent conversation.
+        // Only the model is copied here (not the execution profile).
+        if let (Some(source_terminal_view_id), Some(new_terminal_view_id)) =
+            (source_terminal_view_id, new_terminal_view_id)
+        {
+            if source_terminal_view_id != new_terminal_view_id {
+                Self::copy_agent_model_to_terminal_view(
+                    source_terminal_view_id,
+                    new_terminal_view_id,
+                    ctx,
+                );
+            }
+        }
     }
 
     fn toggle_ai_assistant_panel(&mut self, ctx: &mut ViewContext<Self>) {
@@ -4781,9 +4831,6 @@ impl Workspace {
         if self.left_panel_view.is_self_or_child_focused(app) {
             return FocusRegion::LeftPanel;
         }
-        if self.right_panel_view.is_self_or_child_focused(app) {
-            return FocusRegion::RightPanel;
-        }
 
         if self.ai_assistant_panel.is_self_or_child_focused(app)
             || self.resource_center_view.is_self_or_child_focused(app)
@@ -4798,9 +4845,8 @@ impl Workspace {
         self.active_tab_pane_group().as_ref(app).left_panel_open
     }
 
-    fn has_right_region(&self, app: &AppContext) -> bool {
-        let group = self.active_tab_pane_group().as_ref(app);
-        group.right_panel_open || self.current_workspace_state.is_right_panel_open()
+    fn has_right_region(&self) -> bool {
+        self.current_workspace_state.is_right_panel_open()
     }
 
     fn focus_next_pane_in_group(&mut self, ctx: &mut ViewContext<Self>) -> bool {
@@ -4832,11 +4878,6 @@ impl Workspace {
     }
 
     fn focus_right_region_entry(&mut self, ctx: &mut ViewContext<Self>) {
-        let group = self.active_tab_pane_group().as_ref(ctx);
-        if group.right_panel_open {
-            ctx.focus(&self.right_panel_view);
-            return;
-        }
         if self.current_workspace_state.is_ai_assistant_panel_open {
             ctx.focus(&self.ai_assistant_panel);
         } else if self.current_workspace_state.is_resource_center_open {
@@ -4851,7 +4892,7 @@ impl Workspace {
     ) {
         let current_region = self.current_focus_region(ctx);
         let has_left_panel = self.has_left_region(ctx);
-        let has_right_panel = self.has_right_region(ctx);
+        let has_right_panel = self.has_right_region();
 
         let target_region = self.compute_target_focus_region(
             current_region,
@@ -5366,19 +5407,11 @@ impl Workspace {
         }
 
         let left_active_pane_group = self.active_tab_pane_group().clone();
-        let right_active_pane_group = self.active_tab_pane_group().clone();
         let working_directories_model = self.working_directories_model.clone();
 
         self.left_panel_view.update(ctx, |left_panel, ctx| {
             left_panel.set_active_pane_group(
                 left_active_pane_group,
-                &working_directories_model,
-                ctx,
-            );
-        });
-        self.right_panel_view.update(ctx, |right_pane, ctx| {
-            right_pane.set_active_pane_group(
-                right_active_pane_group,
                 &working_directories_model,
                 ctx,
             );
@@ -6016,16 +6049,8 @@ impl Workspace {
         } else {
             PanelPosition::Right
         };
-        let code_review_position = if left_items.contains(&HeaderToolbarItemKind::CodeReview) {
-            PanelPosition::Left
-        } else {
-            PanelPosition::Right
-        };
         self.left_panel_view.update(ctx, |view, ctx| {
             view.set_panel_position(tools_position, ctx);
-        });
-        self.right_panel_view.update(ctx, |view, ctx| {
-            view.set_panel_position(code_review_position, ctx);
         });
     }
 
@@ -6357,66 +6382,56 @@ impl Workspace {
                     ctx,
                 );
             }
-        }
-    }
-
-    fn handle_right_panel_event(&mut self, event: RightPanelEvent, ctx: &mut ViewContext<Self>) {
-        #[cfg(feature = "local_fs")]
-        match event {
-            RightPanelEvent::ToggleMaximize => {
-                self.toggle_right_panel_maximized(ctx);
-            }
-            RightPanelEvent::OpenFileWithTarget {
-                path,
-                target,
-                line_col,
-            } => {
-                // Exit maximized mode so the opened file is visible.
-                if self
-                    .active_tab_pane_group()
-                    .as_ref(ctx)
-                    .is_right_panel_maximized
-                {
-                    self.toggle_right_panel_maximized(ctx);
-                }
-
-                self.open_file_with_target(
-                    path.clone(),
+            LeftPanelEvent::CodeReview(event) => match event {
+                #[cfg(feature = "local_fs")]
+                CodeReviewPanelEvent::OpenFileWithTarget {
+                    path,
                     target,
                     line_col,
-                    CodeSource::Link {
-                        path,
-                        range_start: None,
-                        range_end: None,
-                    },
-                    ctx,
-                );
-            }
-            RightPanelEvent::OpenFileInNewTab {
-                path,
-                line_and_column,
-            } => match path {
-                LocalOrRemotePath::Local(path) => {
-                    self.add_tab_for_code_file(path, line_and_column, ctx);
-                }
-                path @ LocalOrRemotePath::Remote(_) => {
-                    self.open_code(
-                        CodeSource::FileTree { location: path },
-                        EditorLayout::NewTab,
-                        line_and_column,
-                        false,
-                        &[],
+                } => {
+                    self.open_file_with_target(
+                        path.clone(),
+                        target.clone(),
+                        *line_col,
+                        CodeSource::Link {
+                            path: path.clone(),
+                            range_start: None,
+                            range_end: None,
+                        },
                         ctx,
                     );
                 }
+                CodeReviewPanelEvent::OpenFileInNewTab {
+                    path,
+                    line_and_column,
+                } => {
+                    #[cfg(feature = "local_fs")]
+                    match path {
+                        LocalOrRemotePath::Local(path) => {
+                            self.add_tab_for_code_file(path.clone(), *line_and_column, ctx);
+                        }
+                        LocalOrRemotePath::Remote(_) => {
+                            self.open_code(
+                                CodeSource::FileTree {
+                                    location: path.clone(),
+                                },
+                                crate::util::openable_file_type::EditorLayout::NewTab,
+                                *line_and_column,
+                                false,
+                                &[],
+                                ctx,
+                            );
+                        }
+                    }
+                    #[cfg(not(feature = "local_fs"))]
+                    let _ = (path, line_and_column);
+                }
+                #[cfg(not(target_family = "wasm"))]
+                CodeReviewPanelEvent::OpenLspLogs { log_path } => {
+                    self.open_lsp_logs(log_path, ctx);
+                }
             },
-            #[cfg(not(target_family = "wasm"))]
-            RightPanelEvent::OpenLspLogs { log_path } => {
-                self.open_lsp_logs(&log_path, ctx);
-            }
         }
-        #[cfg(not(feature = "local_fs"))]
-        let _ = (event, ctx);
     }
 
     /// Show the referral reward modal page, informing the user they have earned a theme reward
@@ -7037,6 +7052,22 @@ impl Workspace {
             ctx.dispatch_global_action("workspace:save_app", ());
             ctx.notify();
         }
+    }
+
+    /// Toggles the collapsed state of a Workspace-view folder section, keyed by
+    /// its folder key. Persists (per-window) via `workspace:save_app`.
+    pub fn toggle_workspace_folder_collapsed(
+        &mut self,
+        folder_key: String,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let collapsed = self
+            .workspace_folder_collapsed
+            .entry(folder_key)
+            .or_insert(false);
+        *collapsed = !*collapsed;
+        ctx.dispatch_global_action("workspace:save_app", ());
+        ctx.notify();
     }
 
     /// Ensures the group is expanded (not collapsed). No-op if the group does
@@ -9124,12 +9155,9 @@ impl Workspace {
             }
         });
 
-        // Notify panels about the agent management view state change so they can
-        // update their top border visibility accordingly.
+        // Notify the tools panel about the agent management view state change so
+        // it can update its top border visibility accordingly.
         self.left_panel_view.update(ctx, |panel, ctx| {
-            panel.set_agent_management_view_open(is_open, ctx);
-        });
-        self.right_panel_view.update(ctx, |panel, ctx| {
             panel.set_agent_management_view_open(is_open, ctx);
         });
     }
@@ -9225,12 +9253,12 @@ impl Workspace {
             };
 
         if let Some((repo, diff_state_model)) = context_data {
-            self.right_panel_view.update(ctx, |right_pane_view, ctx| {
-                right_pane_view.open_code_review(repo, diff_state_model, ctx);
+            self.left_panel_view.update(ctx, |left_panel, ctx| {
+                left_panel.open_code_review(repo, diff_state_model, ctx);
             });
         } else {
-            self.right_panel_view.update(ctx, |right_panel_view, ctx| {
-                right_panel_view.close_code_review(ctx);
+            self.left_panel_view.update(ctx, |left_panel, ctx| {
+                left_panel.close_code_review(ctx);
             })
         }
     }
@@ -9241,13 +9269,19 @@ impl Workspace {
         pane_group: ViewHandle<PaneGroup>,
         ctx: &mut ViewContext<Self>,
     ) {
-        // Skip the full panel setup when the panel is already open for the target repo.
-        let panel_already_showing_repo = pane_group.as_ref(ctx).right_panel_open
+        // Skip the full panel setup when the code review tab is already open for
+        // the target repo.
+        let panel_already_showing_repo = pane_group.as_ref(ctx).left_panel_open
+            && self.left_panel_view.as_ref(ctx).is_code_review_active()
             && panel_context
                 .repo_path
                 .as_ref()
                 .is_some_and(|target_repo_path| {
-                    self.right_panel_view.as_ref(ctx).selected_repo_path() == Some(target_repo_path)
+                    self.left_panel_view
+                        .as_ref(ctx)
+                        .code_review_selected_repo_path(ctx)
+                        .as_ref()
+                        == Some(target_repo_path)
                 });
         if panel_already_showing_repo {
             return;
@@ -9298,47 +9332,19 @@ impl Workspace {
         ctx: &mut ViewContext<Self>,
     ) {
         let should_open = panel_update_params.target_open_state;
-        let should_close = !panel_update_params.target_open_state;
 
-        let new_is_maximized = panel_update_params.pane_group.update(ctx, |pane_group, _| {
+        // Keep the per-tab `right_panel_open` flag in sync so an in-progress tab
+        // drag/transfer reopens code review in its new home. Code review now
+        // renders as a tab inside the tools panel, so opening/closing drives the
+        // left panel.
+        panel_update_params.pane_group.update(ctx, |pane_group, _| {
             pane_group.right_panel_open = should_open;
-            pane_group.is_right_panel_maximized
-        });
-
-        self.right_panel_view.update(ctx, |view, ctx| {
-            view.set_maximized(new_is_maximized, ctx);
-            if should_close {
-                view.close_code_review(ctx);
-            }
         });
 
         if should_open {
+            self.open_left_panel_view(&LeftPanelAction::CodeReview, ctx);
             #[cfg(feature = "local_fs")]
             {
-                let window_id = ctx.window_id();
-                let resizable_data = ResizableData::handle(ctx);
-                if let Some(handle) = resizable_data
-                    .as_ref(ctx)
-                    .get_handle(window_id, ModalType::RightPanelWidth)
-                {
-                    if let Ok(mut state) = handle.lock() {
-                        // Get the current width from ResizableData - this reflects the most recent tab's width
-                        let current_width = state.size();
-
-                        // Only recompute default if the current width is at the default value
-                        // This preserves the width from the most recent tab
-                        if current_width == DEFAULT_RIGHT_PANEL_WIDTH {
-                            let has_horizontal_split = panel_update_params
-                                .pane_group
-                                .read(ctx, |pane_group, _| pane_group.has_horizontal_split());
-                            let (_left_width, right_width) =
-                                compute_default_panel_widths(ctx, window_id, has_horizontal_split);
-                            state.set_size(right_width);
-                        }
-                        // If current_width is not the default, it means we have a width from a previous tab,
-                        // so we don't need to do anything - the width is already preserved
-                    }
-                }
                 send_telemetry_from_ctx!(
                     CodeReviewTelemetryEvent::PaneOpened {
                         is_local: panel_update_params
@@ -9354,6 +9360,14 @@ impl Workspace {
                 self.setup_code_review_panel(panel_update_params.review_pane_context, ctx);
             }
         } else {
+            self.left_panel_view.update(ctx, |left_panel, ctx| {
+                left_panel.close_code_review(ctx);
+            });
+            let should_close_tools_panel = self.left_panel_view.as_ref(ctx).is_code_review_active()
+                && self.active_tab_pane_group().as_ref(ctx).left_panel_open;
+            if should_close_tools_panel {
+                self.close_left_panel(ctx);
+            }
             self.focus_active_tab(ctx);
         }
 
@@ -9365,8 +9379,9 @@ impl Workspace {
         pane_group_handle: &ViewHandle<PaneGroup>,
         ctx: &mut ViewContext<Self>,
     ) {
-        let target_open_state =
-            pane_group_handle.read(ctx, |pane_group, _| !pane_group.right_panel_open);
+        let currently_open = pane_group_handle.as_ref(ctx).left_panel_open
+            && self.left_panel_view.as_ref(ctx).is_code_review_active();
+        let target_open_state = !currently_open;
 
         // Read repo_path and preferred session from pane group (immutable context).
         let read_result = pane_group_handle.read(ctx, |pane_group, ctx| {
@@ -9395,7 +9410,7 @@ impl Workspace {
             RightPanelUpdateParams {
                 pane_group: pane_group_handle,
                 target_open_state,
-                entrypoint: Some(CodeReviewPaneEntrypoint::RightPanel),
+                entrypoint: Some(CodeReviewPaneEntrypoint::ToolsPanel),
                 cli_agent: None,
                 review_pane_context: context.as_ref(),
             },
@@ -9412,10 +9427,12 @@ impl Workspace {
         cli_agent: Option<crate::terminal::CLIAgent>,
         ctx: &mut ViewContext<Self>,
     ) {
-        if pane_group_handle.as_ref(ctx).right_panel_open {
+        let already_open = pane_group_handle.as_ref(ctx).left_panel_open
+            && self.left_panel_view.as_ref(ctx).is_code_review_active();
+        if already_open {
             if let Some(repo_path) = &context.repo_path {
-                self.right_panel_view.update(ctx, |right_panel, ctx| {
-                    right_panel.update_selected_repo(repo_path.clone(), ctx);
+                self.left_panel_view.update(ctx, |left_panel, ctx| {
+                    left_panel.update_code_review_selected_repo(repo_path.clone(), ctx);
                 });
             }
             return;
@@ -9432,8 +9449,8 @@ impl Workspace {
             ctx,
         );
         if let Some(repo_path) = &context.repo_path {
-            self.right_panel_view.update(ctx, |right_panel, ctx| {
-                right_panel.update_selected_repo(repo_path.clone(), ctx);
+            self.left_panel_view.update(ctx, |left_panel, ctx| {
+                left_panel.update_code_review_selected_repo(repo_path.clone(), ctx);
             });
         }
     }
@@ -9464,26 +9481,6 @@ impl Workspace {
             },
             ctx,
         );
-    }
-
-    #[cfg_attr(not(feature = "local_fs"), allow(dead_code))]
-    fn toggle_right_panel_maximized(&mut self, ctx: &mut ViewContext<Self>) {
-        let pane_group = self.active_tab_pane_group().clone();
-        let is_maximized = pane_group.update(ctx, |pane_group, _| {
-            pane_group.is_right_panel_maximized = !pane_group.is_right_panel_maximized;
-            pane_group.is_right_panel_maximized
-        });
-
-        self.right_panel_view.update(ctx, |view, ctx| {
-            view.set_maximized(is_maximized, ctx);
-            if is_maximized {
-                view.focus_active_code_review_view(ctx);
-            }
-        });
-        if !is_maximized {
-            self.focus_active_tab(ctx);
-        }
-        ctx.notify();
     }
 
     fn user_menu_items(&self, app: &AppContext) -> Vec<MenuItem<WorkspaceAction>> {
@@ -11375,19 +11372,10 @@ impl Workspace {
                         .size()
                 });
 
-                let right_panel_width = modal_sizes.map(|ms| {
-                    ms.right_panel_width
-                        .lock()
-                        .expect("should be able to lock right panel handle")
-                        .size()
-                });
-
                 let pane_group = pane_group_view.as_ref(app);
                 let root = pane_group.snapshot(app);
                 let left_panel =
                     self.compute_left_panel_snapshot(pane_group_view, left_panel_width, app);
-                let right_panel =
-                    self.compute_right_panel_snapshot(pane_group_view, right_panel_width, app);
                 TabSnapshot {
                     root,
                     custom_title: pane_group.custom_title(app),
@@ -11401,7 +11389,11 @@ impl Workspace {
                         .map(|tab| tab.selected_color)
                         .unwrap_or_default(),
                     left_panel,
-                    right_panel,
+                    // Code review lives as a tab in the tools panel now; we no
+                    // longer persist right-panel snapshots. The field is kept
+                    // only to deserialize legacy sessions (see
+                    // `restore_right_panel_for_tab`).
+                    right_panel: None,
                     group_id: if FeatureFlag::GroupedTabs.is_enabled() {
                         self.tabs.get(tab_index).and_then(|tab| tab.group_id)
                     } else {
@@ -11499,6 +11491,14 @@ impl Workspace {
                 .read(app, |view, _| view.get_filters()),
         );
 
+        // Persist only the collapsed folder keys; absent keys restore as expanded.
+        let workspace_folder_collapse = self
+            .workspace_folder_collapsed
+            .iter()
+            .filter(|(_, collapsed)| **collapsed)
+            .map(|(key, _)| key.clone())
+            .collect();
+
         WindowSnapshot {
             tabs,
             active_tab_index,
@@ -11515,6 +11515,7 @@ impl Workspace {
             right_panel_width,
             agent_management_filters,
             tab_groups,
+            workspace_folder_collapse,
         }
     }
 
@@ -11537,27 +11538,6 @@ impl Workspace {
                 pane_group_id: pane_group_id.to_string(),
                 width: left_panel_width.unwrap_or(DEFAULT_LEFT_PANEL_WIDTH) as usize,
             })
-        })
-    }
-
-    fn compute_right_panel_snapshot(
-        &self,
-        pane_group: &ViewHandle<PaneGroup>,
-        right_panel_width: Option<f32>,
-        app: &AppContext,
-    ) -> Option<RightPanelSnapshot> {
-        let pane_group_ref = pane_group.as_ref(app);
-        if !pane_group_ref.right_panel_open {
-            return None;
-        }
-
-        let pane_group_id = pane_group.id();
-        let is_maximized = pane_group_ref.is_right_panel_maximized;
-
-        Some(RightPanelSnapshot {
-            pane_group_id: pane_group_id.to_string(),
-            width: right_panel_width.unwrap_or(DEFAULT_RIGHT_PANEL_WIDTH) as usize,
-            is_maximized,
         })
     }
 
@@ -13751,6 +13731,22 @@ impl Workspace {
             .id();
         AIExecutionProfilesModel::handle(ctx).update(ctx, |profiles, ctx| {
             profiles.set_active_profile(new_terminal_view_id, source_profile_id, ctx);
+        });
+    }
+
+    /// Copy only the model selection (not the execution profile) from the source terminal view
+    /// to a new terminal view.
+    fn copy_agent_model_to_terminal_view(
+        source_terminal_view_id: EntityId,
+        new_terminal_view_id: EntityId,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let source_llm_id = LLMPreferences::as_ref(ctx)
+            .get_active_base_model(ctx, Some(source_terminal_view_id))
+            .id
+            .clone();
+        LLMPreferences::handle(ctx).update(ctx, |prefs, ctx| {
+            prefs.update_preferred_agent_mode_llm(&source_llm_id, new_terminal_view_id, ctx);
         });
     }
 
@@ -17309,8 +17305,8 @@ impl Workspace {
 
             #[cfg(feature = "local_fs")]
             {
-                self.right_panel_view.update(ctx, |right_panel, ctx| {
-                    right_panel.update_session_env(is_remote, is_wsl_session, ctx);
+                self.left_panel_view.update(ctx, |left_panel, ctx| {
+                    left_panel.update_code_review_session_env(is_remote, is_wsl_session, ctx);
                 });
 
                 // Code review panel setup is handled by the RepositoriesChanged
@@ -17332,8 +17328,8 @@ impl Workspace {
 
             #[cfg(feature = "local_fs")]
             {
-                self.right_panel_view.update(ctx, |right_panel, ctx| {
-                    right_panel.update_session_env(false, false, ctx);
+                self.left_panel_view.update(ctx, |left_panel, ctx| {
+                    left_panel.update_code_review_session_env(false, false, ctx);
                 });
             }
         }
@@ -20178,6 +20174,7 @@ impl Workspace {
                         ToolPanelView::GlobalSearch { .. } => "Global search",
                         ToolPanelView::WarpDrive => "Warp Drive",
                         ToolPanelView::ConversationListView => "Agent conversations",
+                        ToolPanelView::CodeReview => "Code review",
                     }
                 } else {
                     "Tools panel"
@@ -20232,6 +20229,7 @@ impl Workspace {
                 ToolPanelView::GlobalSearch { .. } => "Global search",
                 ToolPanelView::WarpDrive => "Warp Drive",
                 ToolPanelView::ConversationListView => "Agent conversations",
+                ToolPanelView::CodeReview => "Code review",
             }
         } else {
             "Tools panel"
@@ -21807,8 +21805,6 @@ impl Workspace {
         let vertical_tabs_active =
             FeatureFlag::VerticalTabs.is_enabled() && *TabSettings::as_ref(app).use_vertical_tabs;
         let pane_group = self.active_tab_pane_group().as_ref(app);
-        let is_right_open = pane_group.right_panel_open;
-        let is_right_maximized = is_right_open && pane_group.is_right_panel_maximized;
 
         let mut main_content = Flex::row();
 
@@ -21829,14 +21825,11 @@ impl Workspace {
                 );
             }
 
-            if !is_right_maximized {
-                if prev_panel_added {
-                    main_content.add_child(Self::render_panel_separator(app));
-                }
-                main_content =
-                    main_content.with_child(Shrinkable::new(1.0, terminal_content).finish());
-                prev_panel_added = true;
+            if prev_panel_added {
+                main_content.add_child(Self::render_panel_separator(app));
             }
+            main_content = main_content.with_child(Shrinkable::new(1.0, terminal_content).finish());
+            prev_panel_added = true;
 
             for item in config.right_items() {
                 Self::add_panel_with_separator(
@@ -21846,28 +21839,7 @@ impl Workspace {
                     app,
                 );
             }
-
-            if is_right_maximized {
-                Self::add_panel_with_separator(
-                    &mut main_content,
-                    &mut prev_panel_added,
-                    self.render_config_panel_maximized(pane_group, &config, app),
-                    app,
-                );
-            } else if !config.contains_item(&HeaderToolbarItemKind::CodeReview) {
-                Self::add_panel_with_separator(
-                    &mut main_content,
-                    &mut prev_panel_added,
-                    self.render_config_panel(
-                        &HeaderToolbarItemKind::CodeReview,
-                        pane_group,
-                        &config,
-                        app,
-                    ),
-                    app,
-                );
-            }
-        } else if !is_right_maximized {
+        } else {
             main_content = main_content.with_child(Shrinkable::new(1.0, terminal_content).finish());
         }
 
@@ -22488,27 +22460,6 @@ impl Workspace {
                     app,
                 );
             }
-
-            if pane_group.right_panel_open && pane_group.is_right_panel_maximized {
-                Self::add_panel_with_separator(
-                    &mut panels_view,
-                    &mut prev_panel_added,
-                    self.render_config_panel_maximized(pane_group, &config, app),
-                    app,
-                );
-            } else if !config.contains_item(&HeaderToolbarItemKind::CodeReview) {
-                Self::add_panel_with_separator(
-                    &mut panels_view,
-                    &mut prev_panel_added,
-                    self.render_config_panel(
-                        &HeaderToolbarItemKind::CodeReview,
-                        pane_group,
-                        &config,
-                        app,
-                    ),
-                    app,
-                );
-            }
         }
 
         #[cfg(target_family = "wasm")]
@@ -22598,34 +22549,12 @@ impl Workspace {
                 }
                 Some(ChildView::new(&self.left_panel_view).finish())
             }
-            HeaderToolbarItemKind::CodeReview => {
-                if !pane_group.right_panel_open {
-                    return None;
-                }
-                if pane_group.is_right_panel_maximized {
-                    return None;
-                }
-                Some(ChildView::new(&self.right_panel_view).finish())
-            }
-            HeaderToolbarItemKind::AgentManagement
+            // Code review now lives as a tab inside the tools panel, so it no
+            // longer participates in configurable left/right placement.
+            HeaderToolbarItemKind::CodeReview
+            | HeaderToolbarItemKind::AgentManagement
             | HeaderToolbarItemKind::NotificationsMailbox => None,
         }
-    }
-
-    /// Renders the maximized code review panel if it is configured and maximized.
-    fn render_config_panel_maximized(
-        &self,
-        pane_group: &PaneGroup,
-        _config: &HeaderToolbarChipSelection,
-        app: &AppContext,
-    ) -> Option<Box<dyn Element>> {
-        if !pane_group.right_panel_open || !pane_group.is_right_panel_maximized {
-            return None;
-        }
-        if !HeaderToolbarItemKind::CodeReview.is_supported(app) {
-            return None;
-        }
-        Some(Shrinkable::new(1.0, ChildView::new(&self.right_panel_view).finish()).finish())
     }
 
     /// Offset positioning for agent toasts.
@@ -23474,6 +23403,9 @@ impl Workspace {
         if WarpDriveSettings::is_warp_drive_enabled(ctx) {
             views.push(ToolPanelView::WarpDrive);
         }
+        if cfg!(feature = "local_fs") && *TabSettings::as_ref(ctx).show_code_review_button.value() {
+            views.push(ToolPanelView::CodeReview);
+        }
         views
     }
 
@@ -23633,6 +23565,9 @@ impl TypedActionView for Workspace {
             }
             CloseTabGroup(group_id) => self.close_tab_group(*group_id, ctx),
             ToggleTabGroupCollapsed(group_id) => self.toggle_tab_group_collapsed(*group_id, ctx),
+            ToggleWorkspaceFolderCollapsed(folder_key) => {
+                self.toggle_workspace_folder_collapsed(folder_key.clone(), ctx)
+            }
             RenameTabGroup(group_id) => self.rename_tab_group(*group_id, ctx),
             NewTabGroupFromTab(tab_index) => self.new_tab_group_from_tab(*tab_index, ctx),
             MoveTabToGroup {
@@ -24078,8 +24013,8 @@ impl TypedActionView for Workspace {
             OpenLinkOnDesktop(url) => self.open_link_on_desktop(url, ctx),
             DumpDebugInfo => self.dump_debug_info(ctx),
             LogReviewCommentSendStatusForActiveTab => {
-                self.right_panel_view.update(ctx, |right_panel_view, ctx| {
-                    right_panel_view.log_review_comment_send_status_for_active_tab(ctx);
+                self.left_panel_view.read(ctx, |left_panel, ctx| {
+                    left_panel.log_review_comment_send_status_for_active_tab(ctx);
                 });
             }
             #[cfg(target_os = "macos")]
@@ -24571,9 +24506,6 @@ impl TypedActionView for Workspace {
             ClosePanel => {
                 if self.left_panel_view.is_self_or_child_focused(ctx) {
                     self.close_left_panel(ctx);
-                } else if self.right_panel_view.is_self_or_child_focused(ctx) {
-                    let pane_group_handle = self.active_tab_pane_group().clone();
-                    self.close_right_panel(&pane_group_handle, ctx);
                 }
             }
             OpenInExplorer { path } => {
@@ -27417,7 +27349,6 @@ impl Workspace {
         let custom_title = pane_group.read(ctx, |pg, ctx| pg.custom_title(ctx));
         let left_panel_open = pane_group.read(ctx, |pg, _| pg.left_panel_open);
         let right_panel_open = pane_group.read(ctx, |pg, _| pg.right_panel_open);
-        let is_right_panel_maximized = pane_group.read(ctx, |pg, _| pg.is_right_panel_maximized);
         let vertical_tabs_panel_open = self.vertical_tabs_panel_open;
 
         Some(TransferredTab {
@@ -27426,7 +27357,6 @@ impl Workspace {
             custom_title,
             left_panel_open,
             right_panel_open,
-            is_right_panel_maximized,
             draggable_state,
             vertical_tabs_panel_open,
         })

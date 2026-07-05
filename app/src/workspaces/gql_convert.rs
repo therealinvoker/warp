@@ -10,7 +10,7 @@ use warp_graphql::billing::{
     DelinquencyStatus as GqlDelinquencyStatus,
     EnterpriseCreditsAutoReloadPolicy as GqlEnterpriseCreditsAutoReloadPolicy,
     EnterprisePayAsYouGoPolicy as GqlEnterprisePayAsYouGoPolicy, InstanceShape as GqlInstanceShape,
-    MultiAdminPolicy as GqlMultiAdminPolicy,
+    MarketplacePolicy as GqlMarketplacePolicy, MultiAdminPolicy as GqlMultiAdminPolicy,
     PurchaseAddOnCreditsPolicy as GqlPurchaseAddOnCreditsPolicy, ServiceAgreementType,
     SessionSharingPolicy as GqlSessionSharingPolicy,
     SharedNotebooksPolicy as GqlSharedNotebooksPolicy,
@@ -33,7 +33,9 @@ use warp_graphql::workspace::{
     ComputerUseAutonomyValue as GqlComputerUseAutonomyValue, EmailInvite as GqlEmailInvite,
     HostEnablementSetting as GqlHostEnablementSetting,
     InviteLinkDomainRestriction as GqlInviteLinkDomainRestriction,
-    MembershipRole as GqlMembershipRole, Team as GqlTeam, TeamMember as GqlTeamMember,
+    McpAllowlistEntryKind as GqlMcpAllowlistEntryKind, McpGovernanceMode as GqlMcpGovernanceMode,
+    McpGovernanceSettings as GqlMcpGovernanceSettings, MembershipRole as GqlMembershipRole,
+    Team as GqlTeam, TeamMember as GqlTeamMember,
     UgcCollectionEnablementSetting as GqlUgcCollectionEnablementSetting, Workspace as GqlWorkspace,
     WorkspaceMember as GqlWorkspaceMember, WorkspaceMemberUsageInfo as GqlWorkspaceMemberUsageInfo,
     WorkspaceSettings as GqlWorkspaceSettings,
@@ -48,7 +50,8 @@ use super::workspace::{
     BillingCycleUsageSummary, BillingMetadata, CloudConversationStorageSettings,
     CodebaseContextSettings, CustomerType, DelinquencyStatus, EmailInvite, EnterpriseSecretRegex,
     HostEnablementSetting, InstanceShape, InviteLinkDomainRestriction, LinkSharingSettings,
-    LlmSettings, MaxPriorCycles, SandboxedAgentSettings, SecretRedactionSettings,
+    LlmSettings, MarketplacePolicy, MaxPriorCycles, McpAllowlistEntry, McpAllowlistEntryKind,
+    McpGovernanceMode, McpGovernanceSettings, SandboxedAgentSettings, SecretRedactionSettings,
     SessionSharingPolicy, SharedNotebooksPolicy, SharedWorkflowsPolicy,
     TelemetryDataCollectionPolicy, TelemetrySettings, Tier, UgcCollectionEnablementSetting,
     UgcCollectionSettings, UgcDataCollectionPolicy, UsageBasedPricingPolicy,
@@ -484,6 +487,89 @@ fn from_gql_max_prior_cycles(value: i32) -> MaxPriorCycles {
     }
 }
 
+impl From<GqlMarketplacePolicy> for MarketplacePolicy {
+    fn from(gql_policy: GqlMarketplacePolicy) -> MarketplacePolicy {
+        Self {
+            enabled: gql_policy.enabled,
+            governance_controls_enabled: gql_policy.governance_controls_enabled,
+            org_sources_enabled: gql_policy.org_sources_enabled,
+            max_org_sources: gql_policy.max_org_sources,
+        }
+    }
+}
+
+impl From<GqlMcpGovernanceMode> for McpGovernanceMode {
+    fn from(gql_mode: GqlMcpGovernanceMode) -> McpGovernanceMode {
+        match gql_mode {
+            GqlMcpGovernanceMode::Disable => McpGovernanceMode::Disable,
+            GqlMcpGovernanceMode::EnableAll => McpGovernanceMode::EnableAll,
+            GqlMcpGovernanceMode::Allowlist => McpGovernanceMode::Allowlist,
+            GqlMcpGovernanceMode::Other(value) => {
+                report_error!(
+                    anyhow!(
+                        "Invalid McpGovernanceMode '{value}'. Make sure to update client GraphQL types!"
+                    ),
+                    warp_core::errors::ReportErrorLogMode::OncePerRun
+                );
+                // This is security policy: fail closed to the most
+                // restrictive mode rather than silently allowing everything.
+                McpGovernanceMode::Disable
+            }
+        }
+    }
+}
+
+/// Converts an allowlist entry kind; returns `None` (drop the entry) for
+/// kinds this client doesn't understand. An unknown kind can never match a
+/// local server candidate, so dropping it is equivalent and restrictive-safe.
+fn convert_gql_mcp_allowlist_entry_kind(
+    gql_kind: GqlMcpAllowlistEntryKind,
+) -> Option<McpAllowlistEntryKind> {
+    match gql_kind {
+        GqlMcpAllowlistEntryKind::RegistryName => Some(McpAllowlistEntryKind::RegistryName),
+        GqlMcpAllowlistEntryKind::GalleryTemplate => Some(McpAllowlistEntryKind::GalleryTemplate),
+        GqlMcpAllowlistEntryKind::OrgMarketplaceEntry => {
+            Some(McpAllowlistEntryKind::OrgMarketplaceEntry)
+        }
+        GqlMcpAllowlistEntryKind::UrlPattern => Some(McpAllowlistEntryKind::UrlPattern),
+        GqlMcpAllowlistEntryKind::CommandPattern => Some(McpAllowlistEntryKind::CommandPattern),
+        GqlMcpAllowlistEntryKind::CanonicalHash => Some(McpAllowlistEntryKind::CanonicalHash),
+        GqlMcpAllowlistEntryKind::Other(value) => {
+            report_error!(
+                anyhow!(
+                    "Invalid McpAllowlistEntryKind '{value}'. Make sure to update client GraphQL types!"
+                ),
+                warp_core::errors::ReportErrorLogMode::OncePerRun
+            );
+            None
+        }
+    }
+}
+
+impl From<GqlMcpGovernanceSettings> for McpGovernanceSettings {
+    fn from(gql_settings: GqlMcpGovernanceSettings) -> McpGovernanceSettings {
+        Self {
+            mode: gql_settings.mode.into(),
+            allowlist: gql_settings
+                .allowlist
+                .into_iter()
+                .filter_map(|gql_entry| {
+                    let kind = convert_gql_mcp_allowlist_entry_kind(gql_entry.kind)?;
+                    Some(McpAllowlistEntry {
+                        id: gql_entry.id.into_inner(),
+                        kind,
+                        value: gql_entry.value,
+                        pinned_version: gql_entry.pinned_version,
+                        display_name: gql_entry.display_name,
+                    })
+                })
+                .collect(),
+            allow_file_based_servers: gql_settings.allow_file_based_servers,
+            allow_plugin_import: gql_settings.allow_plugin_import,
+        }
+    }
+}
+
 impl From<GqlUsageVisibilityPolicy> for UsageVisibilityPolicy {
     fn from(gql_policy: GqlUsageVisibilityPolicy) -> UsageVisibilityPolicy {
         Self {
@@ -550,6 +636,7 @@ impl From<GqlTier> for Tier {
             multi_admin_policy: gql_tier.multi_admin_policy.map(From::from),
             ambient_agents_policy: gql_tier.ambient_agents_policy.map(From::from),
             usage_visibility_policy: gql_tier.usage_visibility_policy.map(From::from),
+            marketplace_policy: gql_tier.marketplace_policy.map(From::from),
         }
     }
 }
@@ -933,6 +1020,9 @@ impl From<GqlWorkspaceSettings> for WorkspaceSettings {
                 .ambient_agent_settings
                 .as_ref()
                 .and_then(|s| s.default_host_slug.clone()),
+            mcp_governance_settings: gql_workspace_settings
+                .mcp_governance_settings
+                .map(From::from),
         }
     }
 }
@@ -1140,3 +1230,7 @@ impl From<GqlDiscoverableTeamData> for DiscoverableTeam {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "gql_convert_tests.rs"]
+mod tests;

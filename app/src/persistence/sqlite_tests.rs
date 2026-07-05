@@ -299,6 +299,7 @@ fn test_terminal_window_snapshot(vertical_tabs_panel_open: bool) -> WindowSnapsh
         right_panel_width: None,
         agent_management_filters: None,
         tab_groups: vec![],
+        workspace_folder_collapse: vec![],
     }
 }
 
@@ -333,6 +334,63 @@ fn test_sqlite_round_trips_vertical_tabs_panel_open() {
             .collect::<Vec<_>>(),
         vec![false, true]
     );
+}
+
+#[test]
+fn test_sqlite_round_trips_workspace_folder_collapse() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let database_path = tempdir.path().join("warp.sqlite");
+    let mut conn = setup_database(&database_path).expect("database should initialize");
+
+    let mut window = test_terminal_window_snapshot(true);
+    window.workspace_folder_collapse = vec!["/repos/warp".to_string(), "/repos/api".to_string()];
+
+    let app_state = AppState {
+        windows: vec![window],
+        active_window_index: Some(0),
+        block_lists: Default::default(),
+        running_mcp_servers: Default::default(),
+    };
+
+    save_app_state(&mut conn, &app_state).expect("app state should save");
+
+    let restored = read_sqlite_data(&mut conn, None)
+        .expect("app state should load")
+        .app_state;
+
+    assert_eq!(restored.windows.len(), 1);
+    let mut restored_keys = restored.windows[0].workspace_folder_collapse.clone();
+    restored_keys.sort();
+
+    assert_eq!(
+        restored_keys,
+        vec!["/repos/api".to_string(), "/repos/warp".to_string()]
+    );
+}
+
+#[test]
+fn test_sqlite_round_trips_empty_workspace_folder_collapse() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let database_path = tempdir.path().join("warp.sqlite");
+    let mut conn = setup_database(&database_path).expect("database should initialize");
+
+    // Default snapshot has no collapsed folders; the NULL column must restore
+    // as an empty list rather than erroring.
+    let app_state = AppState {
+        windows: vec![test_terminal_window_snapshot(false)],
+        active_window_index: Some(0),
+        block_lists: Default::default(),
+        running_mcp_servers: Default::default(),
+    };
+
+    save_app_state(&mut conn, &app_state).expect("app state should save");
+
+    let restored = read_sqlite_data(&mut conn, None)
+        .expect("app state should load")
+        .app_state;
+
+    assert_eq!(restored.windows.len(), 1);
+    assert!(restored.windows[0].workspace_folder_collapse.is_empty());
 }
 
 #[test]
@@ -385,6 +443,7 @@ fn test_sqlite_round_trips_custom_vertical_tabs_title() {
             right_panel_width: None,
             agent_management_filters: None,
             tab_groups: vec![],
+            workspace_folder_collapse: vec![],
         }],
         active_window_index: Some(0),
         block_lists: Default::default(),
@@ -462,6 +521,7 @@ fn test_sqlite_round_trips_code_pane_with_multiple_tabs() {
             right_panel_width: None,
             agent_management_filters: None,
             tab_groups: vec![],
+            workspace_folder_collapse: vec![],
         }],
         active_window_index: Some(0),
         block_lists: Default::default(),
@@ -585,6 +645,7 @@ fn test_sqlite_round_trips_tab_groups() {
                 collapsed: true,
                 pinned: false,
             }],
+            workspace_folder_collapse: vec![],
         }],
         active_window_index: Some(0),
         block_lists: Default::default(),
@@ -744,6 +805,7 @@ fn test_sqlite_round_trips_pinned_state() {
                     pinned: false,
                 },
             ],
+            workspace_folder_collapse: vec![],
         }],
         active_window_index: Some(0),
         block_lists: Default::default(),

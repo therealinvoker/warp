@@ -9,6 +9,7 @@ use languages::language_by_local_filename;
 use pathfinder_color::ColorU;
 use pathfinder_geometry::rect::RectF;
 use pathfinder_geometry::vector::{vec2f, Vector2F};
+use repo_metadata::repositories::DetectedRepositories;
 use settings::Setting as _;
 use warp_core::context_flag::ContextFlag;
 use warp_core::telemetry::TelemetryEvent as _;
@@ -43,6 +44,7 @@ use crate::ai::conversation_status_ui::render_status_element;
 use crate::appearance::Appearance;
 use crate::cloud_object::model::generic_string_model::StringModel;
 use crate::cloud_object::CloudObjectLookup as _;
+use crate::code::buffer_location::LocalOrRemotePath;
 use crate::code::editor::{add_color, remove_color};
 use crate::code::icon_from_file_path;
 use crate::context_chips::display_chip::GitLineChanges;
@@ -55,6 +57,7 @@ use crate::pane_group::{
     CodePane, NotebookPane, PaneGroup, PaneId, TabBarHoverIndex, TerminalPane, WorkflowPane,
 };
 use crate::safe_triangle::SafeTriangle;
+use crate::settings::AISettings;
 use crate::tab::{tab_position_id, SelectedTabColor, TabData};
 use crate::terminal::cli_agent_sessions::CLIAgentSessionsModel;
 use crate::terminal::session_settings::SessionSettings;
@@ -169,10 +172,12 @@ fn detail_target_for_hovered_row(
             pane_group_id,
             pane_id,
         },
-        VerticalTabsDisplayGranularity::Tabs => VerticalTabsDetailTarget::Tab {
-            pane_group_id,
-            source_pane_id: pane_id,
-        },
+        VerticalTabsDisplayGranularity::Tabs | VerticalTabsDisplayGranularity::Workspace => {
+            VerticalTabsDetailTarget::Tab {
+                pane_group_id,
+                source_pane_id: pane_id,
+            }
+        }
     }
 }
 
@@ -712,10 +717,15 @@ pub(super) struct VerticalTabsPanelState {
     detail_overlay_state: Arc<Mutex<VerticalTabsDetailOverlayState>>,
     new_tab_hover_state: MouseStateHandle,
     new_tab_button_state: MouseStateHandle,
+    new_agent_button_mouse_state: MouseStateHandle,
+    new_terminal_button_mouse_state: MouseStateHandle,
     pub(super) search_query: String,
     settings_button_mouse_state: MouseStateHandle,
     panes_segment_mouse_state: MouseStateHandle,
     tabs_segment_mouse_state: MouseStateHandle,
+    workspace_segment_mouse_state: MouseStateHandle,
+    /// Hover states for Workspace-view folder section headers, keyed by folder key.
+    workspace_folder_header_mouse_states: RefCell<HashMap<String, TabGroupMouseStates>>,
     focused_session_option_mouse_state: MouseStateHandle,
     summary_option_mouse_state: MouseStateHandle,
     compact_segment_mouse_state: MouseStateHandle,
@@ -750,10 +760,14 @@ impl Default for VerticalTabsPanelState {
             detail_overlay_state: Arc::new(Mutex::new(VerticalTabsDetailOverlayState::default())),
             new_tab_hover_state: Default::default(),
             new_tab_button_state: Default::default(),
+            new_agent_button_mouse_state: Default::default(),
+            new_terminal_button_mouse_state: Default::default(),
             search_query: String::new(),
             settings_button_mouse_state: Default::default(),
             panes_segment_mouse_state: Default::default(),
             tabs_segment_mouse_state: Default::default(),
+            workspace_segment_mouse_state: Default::default(),
+            workspace_folder_header_mouse_states: RefCell::default(),
             focused_session_option_mouse_state: Default::default(),
             summary_option_mouse_state: Default::default(),
             compact_segment_mouse_state: Default::default(),
@@ -1006,7 +1020,23 @@ fn resolve_vertical_tabs_mode(app: &AppContext) -> VerticalTabsResolvedMode {
                 }
             }
         },
+        // Workspace view renders one focused-pane row per tab (like Tabs/FocusedSession),
+        // grouped under collapsible folder sections handled in `render_groups`.
+        VerticalTabsDisplayGranularity::Workspace => VerticalTabsResolvedMode::FocusedSession,
     }
+}
+
+/// True when the sidebar is in "View as: Workspace" mode. Rows in this mode reach the
+/// renderers with `props.display_granularity` already collapsed to `Tabs` (Workspace maps
+/// to `FocusedSession`/`Tabs` in `resolve_vertical_tabs_mode`), so the row's own field can't
+/// distinguish Workspace from Tabs. We read the granularity setting directly instead.
+fn in_workspace_view(app: &AppContext) -> bool {
+    matches!(
+        *TabSettings::as_ref(app)
+            .vertical_tabs_display_granularity
+            .value(),
+        VerticalTabsDisplayGranularity::Workspace
+    )
 }
 
 fn push_normalized_unique_summary_text(
@@ -1261,6 +1291,8 @@ const CONTROL_BAR_SPACING: f32 = 4.;
 const SEARCH_ICON_SIZE: f32 = 12.;
 const SEARCH_BAR_HEIGHT: f32 = 24.;
 const CONTROL_BAR_BUTTON_RADIUS: Radius = Radius::Pixels(4.);
+const NEW_SESSION_BUTTON_ICON_SIZE: f32 = 14.;
+const NEW_SESSION_BUTTON_ICON_LABEL_SPACING: f32 = 6.;
 const SPLIT_BUTTON_HEIGHT: f32 = SEARCH_BAR_HEIGHT;
 pub(super) const VERTICAL_TABS_ADD_TAB_POSITION_ID: &str = "vertical_tabs_add_tab_button";
 pub(super) const VERTICAL_TABS_SETTINGS_BUTTON_POSITION_ID: &str = "vertical_tabs_settings_button";
@@ -1441,6 +1473,120 @@ fn render_control_bar(
             .with_right(GROUP_HORIZONTAL_PADDING),
     )
     .finish()
+}
+
+/// A single secondary quick-access button (icon + label) for the new-session
+/// row. Styled to match `render_settings_button`: transparent at rest with
+/// `sub_text`, `fg_overlay_2` background and `main_text` on hover.
+fn render_new_session_button(
+    label: &str,
+    icon: WarpIcon,
+    mouse_state: MouseStateHandle,
+    action: WorkspaceAction,
+    appearance: &Appearance,
+    theme: &WarpTheme,
+) -> Box<dyn Element> {
+    let label = label.to_string();
+    let main_text = theme.main_text_color(theme.background());
+    let sub_text = theme.sub_text_color(theme.background());
+
+    Hoverable::new(mouse_state, move |hover_state| {
+        let is_hovered = hover_state.is_hovered();
+        let content_color = if is_hovered { main_text } else { sub_text };
+        let background = if is_hovered {
+            internal_colors::fg_overlay_2(theme)
+        } else {
+            ThemeFill::Solid(ColorU::transparent_black())
+        };
+
+        let row = Flex::row()
+            .with_main_axis_size(MainAxisSize::Min)
+            .with_cross_axis_alignment(CrossAxisAlignment::Center)
+            .with_spacing(NEW_SESSION_BUTTON_ICON_LABEL_SPACING)
+            .with_child(
+                ConstrainedBox::new(icon.to_warpui_icon(content_color).finish())
+                    .with_width(NEW_SESSION_BUTTON_ICON_SIZE)
+                    .with_height(NEW_SESSION_BUTTON_ICON_SIZE)
+                    .finish(),
+            )
+            .with_child(
+                Text::new_inline(label.clone(), appearance.ui_font_family(), 12.)
+                    .with_color(content_color.into())
+                    .finish(),
+            )
+            .finish();
+
+        Container::new(Align::new(row).finish())
+            .with_background(background)
+            .with_corner_radius(CornerRadius::with_all(CONTROL_BAR_BUTTON_RADIUS))
+            .with_vertical_padding(CONTROL_BAR_VERTICAL_PADDING)
+            .finish()
+    })
+    .on_click(move |ctx, _, _| {
+        ctx.dispatch_typed_action(action.clone());
+    })
+    .with_cursor(Cursor::PointingHand)
+    .finish()
+}
+
+/// Quick-access row beneath the search/control bar exposing the canonical
+/// "New agent" and "New terminal" actions (mirroring the `+` new-session menu).
+/// The agent button is gated on AI being enabled; when hidden, the terminal
+/// button expands to fill the full width.
+fn render_new_session_buttons(
+    state: &VerticalTabsPanelState,
+    appearance: &Appearance,
+    app: &AppContext,
+) -> Box<dyn Element> {
+    let theme = appearance.theme();
+    let is_any_ai_enabled = AISettings::as_ref(app).is_any_ai_enabled(app);
+
+    let mut row = Flex::row()
+        .with_main_axis_size(MainAxisSize::Max)
+        .with_cross_axis_alignment(CrossAxisAlignment::Center)
+        .with_spacing(CONTROL_BAR_SPACING);
+
+    if is_any_ai_enabled {
+        row = row.with_child(
+            Expanded::new(
+                1.,
+                render_new_session_button(
+                    "New agent",
+                    WarpIcon::Oz,
+                    state.new_agent_button_mouse_state.clone(),
+                    WorkspaceAction::AddAgentTab,
+                    appearance,
+                    theme,
+                ),
+            )
+            .finish(),
+        );
+    }
+
+    row = row.with_child(
+        Expanded::new(
+            1.,
+            render_new_session_button(
+                "New terminal",
+                WarpIcon::Terminal,
+                state.new_terminal_button_mouse_state.clone(),
+                WorkspaceAction::AddTerminalTab {
+                    hide_homepage: false,
+                },
+                appearance,
+                theme,
+            ),
+        )
+        .finish(),
+    );
+
+    Container::new(row.finish())
+        .with_padding(
+            Padding::uniform(CONTROL_BAR_VERTICAL_PADDING)
+                .with_left(GROUP_HORIZONTAL_PADDING)
+                .with_right(GROUP_HORIZONTAL_PADDING),
+        )
+        .finish()
 }
 
 fn render_detail_kind_badge_icon(
@@ -1683,6 +1829,7 @@ fn render_vertical_tabs_panel(
             &workspace.vertical_tabs_search_input,
             app,
         ))
+        .with_child(render_new_session_buttons(state, appearance, app))
         .with_child(Shrinkable::new(1., scrollable_groups).finish())
         .finish();
 
@@ -1772,6 +1919,14 @@ fn render_groups(
         }
     };
     let uses_outer_group_container = uses_outer_group_container(display_granularity);
+    // Workspace view groups tabs by folder rather than by contiguous tab group,
+    // so it takes a dedicated render path below.
+    let is_workspace_view = matches!(
+        *TabSettings::as_ref(app)
+            .vertical_tabs_display_granularity
+            .value(),
+        VerticalTabsDisplayGranularity::Workspace
+    );
     let query = state.search_query.as_str();
     let visible_tabs: Vec<(usize, Option<Vec<PaneId>>)> = if query.is_empty() {
         workspace
@@ -1915,71 +2070,82 @@ fn render_groups(
         groups = groups.with_spacing(TABS_MODE_ITEM_SPACING);
     }
 
-    // Consecutive tabs sharing a group_id collapse into a single group container.
-    // TODO(johnturcoo) adopt horizontal tabs 'tab slot' pattern to remove this while loop.
-    let total_visible = visible_tabs.len();
-    let mut i = 0;
-    while i < total_visible {
-        let (tab_index, ref filtered_pane_ids) = visible_tabs[i];
-        if ghost_insertion_index == Some(tab_index) {
+    if is_workspace_view {
+        render_workspace_folder_sections(
+            &mut groups,
+            state,
+            workspace,
+            &visible_tabs,
+            is_any_pane_dragging,
+            app,
+        );
+    } else {
+        // Consecutive tabs sharing a group_id collapse into a single group container.
+        // TODO(johnturcoo) adopt horizontal tabs 'tab slot' pattern to remove this while loop.
+        let total_visible = visible_tabs.len();
+        let mut i = 0;
+        while i < total_visible {
+            let (tab_index, ref filtered_pane_ids) = visible_tabs[i];
+            if ghost_insertion_index == Some(tab_index) {
+                groups.add_child(render_ghost_vertical_tab_slot(workspace, app));
+            }
+            let tab = &workspace.tabs[tab_index];
+            match tab.group_id.and_then(|gid| {
+                workspace
+                    .tab_groups
+                    .get(&gid)
+                    .map(|group| (gid, group.clone()))
+            }) {
+                Some((group_id, group)) => {
+                    // Members are a contiguous subslice of `visible_tabs`.
+                    let run_len = visible_tabs[i..]
+                        .iter()
+                        .take_while(|(idx, _)| workspace.tabs[*idx].group_id == Some(group_id))
+                        .count();
+                    let members = &visible_tabs[i..i + run_len];
+                    // The group's last member needs an "after" drop target only when
+                    // it's also the absolute last visible tab.
+                    let last_member_after_index =
+                        (i + run_len == total_visible).then(|| members.last().unwrap().0 + 1);
+                    groups.add_child(render_grouped_tab_container(
+                        state,
+                        workspace,
+                        &group,
+                        members,
+                        last_member_after_index,
+                        is_any_pane_dragging,
+                        app,
+                    ));
+                    i += run_len;
+                }
+                None => {
+                    let insert_before_index = tab_index;
+                    // Gaps between tabs are covered by the next tab's before-indicator,
+                    // and the area after the last tab by the trailing indicator below,
+                    // so an ungrouped row doesn't render its own "after" indicator.
+                    let insert_after_index = None;
+                    groups.add_child(render_tab_group(
+                        state,
+                        workspace,
+                        tab_index,
+                        tab,
+                        filtered_pane_ids.as_deref(),
+                        TabGroupDragState {
+                            is_any_pane_dragging,
+                            insert_before_index,
+                            insert_after_index,
+                        },
+                        false, // in_tab_group
+                        app,
+                    ));
+                    i += 1;
+                }
+            }
+        }
+        // Ghost after all tab groups (fencepost).
+        if ghost_insertion_index == Some(workspace.tabs.len()) {
             groups.add_child(render_ghost_vertical_tab_slot(workspace, app));
         }
-        let tab = &workspace.tabs[tab_index];
-        match tab.group_id.and_then(|gid| {
-            workspace
-                .tab_groups
-                .get(&gid)
-                .map(|group| (gid, group.clone()))
-        }) {
-            Some((group_id, group)) => {
-                // Members are a contiguous subslice of `visible_tabs`.
-                let run_len = visible_tabs[i..]
-                    .iter()
-                    .take_while(|(idx, _)| workspace.tabs[*idx].group_id == Some(group_id))
-                    .count();
-                let members = &visible_tabs[i..i + run_len];
-                // The group's last member needs an "after" drop target only when
-                // it's also the absolute last visible tab.
-                let last_member_after_index =
-                    (i + run_len == total_visible).then(|| members.last().unwrap().0 + 1);
-                groups.add_child(render_grouped_tab_container(
-                    state,
-                    workspace,
-                    &group,
-                    members,
-                    last_member_after_index,
-                    is_any_pane_dragging,
-                    app,
-                ));
-                i += run_len;
-            }
-            None => {
-                let insert_before_index = tab_index;
-                // Gaps between tabs are covered by the next tab's before-indicator,
-                // and the area after the last tab by the trailing indicator below,
-                // so an ungrouped row doesn't render its own "after" indicator.
-                let insert_after_index = None;
-                groups.add_child(render_tab_group(
-                    state,
-                    workspace,
-                    tab_index,
-                    tab,
-                    filtered_pane_ids.as_deref(),
-                    TabGroupDragState {
-                        is_any_pane_dragging,
-                        insert_before_index,
-                        insert_after_index,
-                    },
-                    false, // in_tab_group
-                    app,
-                ));
-                i += 1;
-            }
-        }
-    }
-    // Ghost after all tab groups (fencepost).
-    if ghost_insertion_index == Some(workspace.tabs.len()) {
-        groups.add_child(render_ghost_vertical_tab_slot(workspace, app));
     }
 
     // Trailing indicator for an ungrouped insertion after the last tab/group
@@ -2021,6 +2187,239 @@ fn render_groups(
             .with_padding(Padding::uniform(8.).with_top(0.))
             .finish()
     }
+}
+
+/// Collapse-map key used for the Workspace-view "Other" bucket (tabs with no
+/// resolvable folder). Empty because a resolvable folder key is always a
+/// non-empty path, so it can never collide with a real folder.
+const OTHER_FOLDER_KEY: &str = "";
+
+/// Buckets `visible_tabs` by folder (git repo root, working-dir fallback) and
+/// appends one collapsible folder section per bucket to `groups`, preserving
+/// first-appearance order. Tabs with no resolvable folder are grouped into an
+/// "Other" section rendered last.
+fn render_workspace_folder_sections(
+    groups: &mut Flex,
+    state: &VerticalTabsPanelState,
+    workspace: &Workspace,
+    visible_tabs: &[(usize, Option<Vec<PaneId>>)],
+    is_any_pane_dragging: bool,
+    app: &AppContext,
+) {
+    let mut order: Vec<String> = Vec::new();
+    let mut labels: HashMap<String, String> = HashMap::new();
+    // Values are positions into `visible_tabs`, not raw tab indices.
+    let mut buckets: HashMap<String, Vec<usize>> = HashMap::new();
+    let mut other: Vec<usize> = Vec::new();
+
+    for (position, (tab_index, _)) in visible_tabs.iter().enumerate() {
+        let pane_group_handle = &workspace.tabs[*tab_index].pane_group;
+        let pane_group_id = pane_group_handle.id();
+        let pane_group = pane_group_handle.as_ref(app);
+        match workspace_folder_for_tab(workspace, pane_group_id, pane_group, app) {
+            Some((key, label)) => {
+                if !buckets.contains_key(&key) {
+                    order.push(key.clone());
+                    labels.insert(key.clone(), label);
+                }
+                buckets.entry(key).or_default().push(position);
+            }
+            None => other.push(position),
+        }
+    }
+
+    for key in &order {
+        let members = &buckets[key];
+        let label = labels.get(key).map(String::as_str).unwrap_or(key.as_str());
+        groups.add_child(render_workspace_folder_section(
+            state,
+            workspace,
+            visible_tabs,
+            members,
+            key,
+            label,
+            is_any_pane_dragging,
+            app,
+        ));
+    }
+
+    if !other.is_empty() {
+        groups.add_child(render_workspace_folder_section(
+            state,
+            workspace,
+            visible_tabs,
+            &other,
+            OTHER_FOLDER_KEY,
+            "Other",
+            is_any_pane_dragging,
+            app,
+        ));
+    }
+
+    // Drop hover states for folder headers that are no longer rendered.
+    let mut live_keys: std::collections::HashSet<&str> = order.iter().map(String::as_str).collect();
+    if !other.is_empty() {
+        live_keys.insert(OTHER_FOLDER_KEY);
+    }
+    state
+        .workspace_folder_header_mouse_states
+        .borrow_mut()
+        .retain(|key, _| live_keys.contains(key.as_str()));
+}
+
+/// Renders a single Workspace-view folder section: a collapsible header
+/// followed (when expanded) by one focused-pane row per member tab.
+#[allow(clippy::too_many_arguments)]
+fn render_workspace_folder_section(
+    state: &VerticalTabsPanelState,
+    workspace: &Workspace,
+    visible_tabs: &[(usize, Option<Vec<PaneId>>)],
+    member_positions: &[usize],
+    folder_key: &str,
+    label: &str,
+    is_any_pane_dragging: bool,
+    app: &AppContext,
+) -> Box<dyn Element> {
+    let is_collapsed = workspace
+        .workspace_folder_collapsed
+        .get(folder_key)
+        .copied()
+        .unwrap_or(false);
+    let mut section = Flex::column()
+        .with_main_axis_size(MainAxisSize::Min)
+        .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
+        .with_spacing(TABS_MODE_ITEM_SPACING);
+    section.add_child(render_workspace_folder_header(
+        state,
+        folder_key,
+        label,
+        member_positions.len(),
+        is_collapsed,
+        app,
+    ));
+    if !is_collapsed {
+        for &position in member_positions {
+            let (tab_index, ref filtered_pane_ids) = visible_tabs[position];
+            let tab = &workspace.tabs[tab_index];
+            section.add_child(render_tab_group(
+                state,
+                workspace,
+                tab_index,
+                tab,
+                filtered_pane_ids.as_deref(),
+                TabGroupDragState {
+                    is_any_pane_dragging,
+                    insert_before_index: tab_index,
+                    insert_after_index: None,
+                },
+                true, // in_tab_group
+                app,
+            ));
+        }
+    }
+    section.finish()
+}
+
+/// Header row for a Workspace-view folder section: a chevron (down when
+/// expanded, right when collapsed), the folder basename, and a "N tabs" count.
+/// Clicking toggles the folder's collapse state.
+fn render_workspace_folder_header(
+    state: &VerticalTabsPanelState,
+    folder_key: &str,
+    label: &str,
+    member_count: usize,
+    is_collapsed: bool,
+    app: &AppContext,
+) -> Box<dyn Element> {
+    let appearance = Appearance::as_ref(app);
+    let theme = appearance.theme();
+    let font_family = appearance.ui_font_family();
+    let main_text_color = theme.main_text_color(theme.background());
+    let sub_text_color = theme.sub_text_color(theme.background());
+
+    let mouse_states = state
+        .workspace_folder_header_mouse_states
+        .borrow_mut()
+        .entry(folder_key.to_string())
+        .or_default()
+        .clone();
+
+    let toggle_action = WorkspaceAction::ToggleWorkspaceFolderCollapsed(folder_key.to_string());
+    let chevron_icon = if is_collapsed {
+        WarpIcon::ChevronRight
+    } else {
+        WarpIcon::ChevronDown
+    };
+    let chevron_button = render_tab_group_header_icon_button(
+        chevron_icon,
+        TAB_GROUP_ICON_SIZE,
+        main_text_color,
+        internal_colors::fg_overlay_2(theme),
+        mouse_states.chevron.clone(),
+        Some(toggle_action.clone()),
+    );
+    let icon_slot = ConstrainedBox::new(
+        Flex::row()
+            .with_main_axis_size(MainAxisSize::Max)
+            .with_main_axis_alignment(MainAxisAlignment::Center)
+            .with_cross_axis_alignment(CrossAxisAlignment::Center)
+            .with_child(chevron_button)
+            .finish(),
+    )
+    .with_width(VERTICAL_TABS_ICON_SIZE)
+    .with_height(VERTICAL_TABS_ICON_SIZE)
+    .finish();
+
+    let folder_icon = ConstrainedBox::new(WarpIcon::Folder.to_warpui_icon(sub_text_color).finish())
+        .with_width(TAB_GROUP_ICON_SIZE)
+        .with_height(TAB_GROUP_ICON_SIZE)
+        .finish();
+
+    let title = Text::new_inline(label.to_string(), font_family, 12.)
+        .with_clip(ClipConfig::ellipsis())
+        .with_color(main_text_color.into())
+        .finish();
+    let subtitle_text = if member_count == 1 {
+        "1 tab".to_string()
+    } else {
+        format!("{member_count} tabs")
+    };
+    let subtitle = Text::new_inline(subtitle_text, font_family, 10.)
+        .with_clip(ClipConfig::ellipsis())
+        .with_color(sub_text_color.into())
+        .finish();
+    let text_column = Flex::column()
+        .with_main_axis_size(MainAxisSize::Min)
+        .with_cross_axis_alignment(CrossAxisAlignment::Start)
+        .with_spacing(1.)
+        .with_child(title)
+        .with_child(subtitle)
+        .finish();
+
+    let row = Flex::row()
+        .with_main_axis_size(MainAxisSize::Max)
+        .with_cross_axis_alignment(CrossAxisAlignment::Center)
+        .with_spacing(ICON_WITH_STATUS_GAP)
+        .with_child(icon_slot)
+        .with_child(folder_icon)
+        .with_child(Shrinkable::new(1., text_column).finish())
+        .finish();
+
+    Hoverable::new(mouse_states.header.clone(), move |hover_state| {
+        let mut container = Container::new(row)
+            .with_padding(Padding::uniform(GROUP_HORIZONTAL_PADDING))
+            .with_corner_radius(CornerRadius::with_all(Radius::Pixels(ROW_CORNER_RADIUS)));
+        if hover_state.is_hovered() {
+            container = container.with_background(internal_colors::fg_overlay_2(theme));
+        }
+        container.finish()
+    })
+    .with_cursor(Cursor::PointingHand)
+    .with_defer_events_to_children()
+    .on_click(move |ctx, _, _| {
+        ctx.dispatch_typed_action(toggle_action.clone());
+    })
+    .finish()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3395,14 +3794,57 @@ fn render_title_indicator(theme: &WarpTheme) -> Box<dyn Element> {
     .finish()
 }
 
+/// Diameter (px) of the small filled dot that replaces the leading icon-with-status
+/// widget in vertical-tabs sidebar rows.
+const PANE_LEADING_DOT_SIZE: f32 = 6.;
+
+/// Renders a small filled dot in place of the row's icon-with-status widget for every
+/// variant (plain terminals AND agents). The dot reuses the color the variant would have
+/// used (the `Neutral` icon color, the Oz accent, or the CLI agent's brand color) so an
+/// active/running agent still reads as a colored dot while idle rows stay muted; variants
+/// without an obvious color fall back to muted sub-text. It is centered inside a
+/// `VERTICAL_TABS_ICON_SIZE`-wide slot so row titles stay left-aligned regardless of
+/// whether a dot or a full icon is drawn.
+fn render_pane_leading_dot(variant: &IconWithStatusVariant, theme: &WarpTheme) -> Box<dyn Element> {
+    let muted = theme.sub_text_color(theme.background());
+    let dot_color: WarpThemeFill = match variant {
+        IconWithStatusVariant::Neutral { icon_color, .. } => *icon_color,
+        IconWithStatusVariant::OzAgent { .. } => theme.accent(),
+        IconWithStatusVariant::CLIAgent { agent, .. } => {
+            agent.brand_color().map(WarpThemeFill::Solid).unwrap_or(muted)
+        }
+        IconWithStatusVariant::NeutralElement { .. }
+        | IconWithStatusVariant::CustomAvatar { .. } => muted,
+    };
+
+    let dot = ConstrainedBox::new(WarpIcon::CircleFilled.to_warpui_icon(dot_color).finish())
+        .with_width(PANE_LEADING_DOT_SIZE)
+        .with_height(PANE_LEADING_DOT_SIZE)
+        .finish();
+
+    // Center the dot in a full-size icon slot so titles align with icon rows.
+    ConstrainedBox::new(
+        Flex::row()
+            .with_main_axis_size(MainAxisSize::Max)
+            .with_main_axis_alignment(MainAxisAlignment::Center)
+            .with_cross_axis_alignment(CrossAxisAlignment::Center)
+            .with_child(dot)
+            .finish(),
+    )
+    .with_width(VERTICAL_TABS_ICON_SIZE)
+    .with_height(VERTICAL_TABS_ICON_SIZE)
+    .finish()
+}
+
 fn render_pane_row(props: PaneProps<'_>, app: &AppContext) -> Box<dyn Element> {
     let effective_subtitle = props.subtitle.clone();
     let appearance = Appearance::as_ref(app);
     let theme = appearance.theme();
     let font_family = appearance.ui_font_family();
 
-    let icon = render_pane_icon_with_status(
-        resolve_icon_with_status_variant(&props.typed, &props.title, appearance, app),
+    // Vertical-tabs rows show a small colored dot instead of the icon-with-status widget.
+    let icon = render_pane_leading_dot(
+        &resolve_icon_with_status_variant(&props.typed, &props.title, appearance, app),
         theme,
     );
 
@@ -3908,6 +4350,8 @@ fn pane_matches_query(props: &PaneProps<'_>, query_lower: &str, app: &AppContext
 }
 
 fn uses_outer_group_container(display_granularity: VerticalTabsDisplayGranularity) -> bool {
+    // Workspace view supplies its own folder-section containers, so it opts out
+    // of the outer group container just like Tabs.
     matches!(display_granularity, VerticalTabsDisplayGranularity::Panes)
 }
 
@@ -4248,6 +4692,59 @@ fn resolved_terminal_working_directory(
         .or(working_directory)
 }
 
+/// Folder key + display label for a tab in Workspace view. The key is the git
+/// repo root of the tab's focused pane, falling back to the pane's working
+/// directory when it isn't inside a repo. `None` means the tab has no
+/// resolvable folder and belongs in the "Other" bucket. The label is the
+/// key's basename (e.g. `warp`).
+fn workspace_folder_for_tab(
+    workspace: &Workspace,
+    pane_group_id: EntityId,
+    pane_group: &PaneGroup,
+    app: &AppContext,
+) -> Option<(String, String)> {
+    // Prefer the pane group's most-recent repository root, which the
+    // WorkingDirectoriesModel already resolves to git repo roots.
+    let repo_root = workspace
+        .working_directories_model
+        .as_ref(app)
+        .most_recent_repositories_for_pane_group(pane_group_id)
+        .and_then(|mut repos| repos.next());
+    if let Some(repo) = repo_root {
+        return Some(workspace_folder_key_and_label(&repo));
+    }
+
+    // Fallback: the focused pane's working directory, resolved to a repo root
+    // when one can be detected, otherwise used as-is (covers remote paths).
+    let focused_pane_id = pane_group.focused_pane_id(app);
+    let TypedPane::Terminal(terminal_pane) = pane_group.resolve_pane_type(focused_pane_id, app)
+    else {
+        return None;
+    };
+    let terminal_view = terminal_pane.terminal_view(app);
+    let working_directory = terminal_view
+        .as_ref(app)
+        .display_working_directory(app)
+        .filter(|wd| !wd.trim().is_empty())?;
+    let cwd = LocalOrRemotePath::Local(PathBuf::from(&working_directory));
+    let resolved = DetectedRepositories::as_ref(app)
+        .get_root_for_path(&cwd)
+        .unwrap_or(cwd);
+    Some(workspace_folder_key_and_label(&resolved))
+}
+
+/// Builds the `(key, label)` pair for a resolved folder path. The key is the
+/// full display path (used for bucketing + collapse persistence); the label is
+/// the basename, falling back to the full path when there is no file name.
+fn workspace_folder_key_and_label(path: &LocalOrRemotePath) -> (String, String) {
+    let key = path.display_path();
+    let label = match path.file_name() {
+        Some(name) if !name.is_empty() => name.to_string(),
+        Some(_) | None => key.clone(),
+    };
+    (key, label)
+}
+
 /// For cloud agent panes, builds a composite string from the environment name,
 /// setup status, and/or working directory. Returns `None` for non-cloud sessions.
 fn cloud_agent_working_directory_and_env(
@@ -4301,7 +4798,16 @@ fn render_terminal_row_content(
     // | Command          | command/conversation | working directory       | git branch           |
     // | WorkingDirectory | working directory    | command/conversation    | git branch           |
     // | Branch           | git branch           | command/conversation    | working directory    |
-    let (first_line, second_line, metadata_left) = match primary_info {
+    // "View as: Workspace" hides the working-directory path line; the folder section
+    // header already conveys the directory context. Only the Command layout renders the
+    // working directory as a secondary line (the other layouts use it as the title or a
+    // metadata chip), so suppression is scoped there.
+    let hide_working_directory_line = in_workspace_view(app);
+    let (first_line, second_line, metadata_left): (
+        Box<dyn Element>,
+        Option<Box<dyn Element>>,
+        MetadataLeftContent,
+    ) = match primary_info {
         VerticalTabsPrimaryInfo::Command => (
             render_pane_title_slot(
                 props,
@@ -4319,12 +4825,16 @@ fn render_terminal_row_content(
                 appearance,
                 app,
             ),
-            render_text_line(
-                &working_directory,
-                sub_text_color,
-                ClipConfig::start(),
-                appearance,
-            ),
+            if hide_working_directory_line {
+                None
+            } else {
+                Some(render_text_line(
+                    &working_directory,
+                    sub_text_color,
+                    ClipConfig::start(),
+                    appearance,
+                ))
+            },
             MetadataLeftContent::GitBranch(git_branch),
         ),
         VerticalTabsPrimaryInfo::WorkingDirectory => (
@@ -4344,7 +4854,12 @@ fn render_terminal_row_content(
                 appearance,
                 app,
             ),
-            render_terminal_primary_line_for_view(terminal_view, appearance, sub_text_color, app),
+            Some(render_terminal_primary_line_for_view(
+                terminal_view,
+                appearance,
+                sub_text_color,
+                app,
+            )),
             MetadataLeftContent::GitBranch(git_branch),
         ),
         VerticalTabsPrimaryInfo::Branch => {
@@ -4371,12 +4886,12 @@ fn render_terminal_row_content(
                     appearance,
                     app,
                 ),
-                render_terminal_primary_line_for_view(
+                Some(render_terminal_primary_line_for_view(
                     terminal_view,
                     appearance,
                     sub_text_color,
                     app,
-                ),
+                )),
                 MetadataLeftContent::WorkingDirectory(working_directory),
             )
         }
@@ -4402,7 +4917,11 @@ fn render_terminal_row_content(
         .with_main_axis_size(MainAxisSize::Min)
         .with_cross_axis_alignment(CrossAxisAlignment::Start);
     content.add_child(first_line_element);
-    content.add_child(Container::new(second_line).with_margin_top(2.).finish());
+    // Suppressed in "View as: Workspace" (working-directory line); skip the child entirely
+    // so no empty element or dangling top margin remains.
+    if let Some(second_line) = second_line {
+        content.add_child(Container::new(second_line).with_margin_top(2.).finish());
+    }
     content.add_child(
         Container::new(render_terminal_metadata_line(
             terminal_view,
@@ -4425,7 +4944,9 @@ fn chip_entrypoint_for_granularity(
 ) -> VerticalTabsChipEntrypoint {
     match granularity {
         VerticalTabsDisplayGranularity::Panes => VerticalTabsChipEntrypoint::Pane,
-        VerticalTabsDisplayGranularity::Tabs => VerticalTabsChipEntrypoint::Tab,
+        VerticalTabsDisplayGranularity::Tabs | VerticalTabsDisplayGranularity::Workspace => {
+            VerticalTabsChipEntrypoint::Tab
+        }
     }
 }
 
@@ -5728,6 +6249,23 @@ pub(super) fn render_settings_popup(
                 )
                 .finish(),
             )
+            .with_child(
+                Expanded::new(
+                    1.,
+                    render_popup_text_segment(
+                        "Workspace",
+                        matches!(
+                            current_granularity,
+                            VerticalTabsDisplayGranularity::Workspace
+                        ),
+                        state.workspace_segment_mouse_state.clone(),
+                        VerticalTabsDisplayGranularity::Workspace,
+                        appearance,
+                        theme,
+                    ),
+                )
+                .finish(),
+            )
             .finish(),
     )
     .with_uniform_padding(4.)
@@ -6382,13 +6920,16 @@ fn pane_ids_for_display_granularity(
 ) -> Vec<PaneId> {
     match granularity {
         VerticalTabsDisplayGranularity::Panes => visible_pane_ids.to_vec(),
-        VerticalTabsDisplayGranularity::Tabs => visible_pane_ids
-            .iter()
-            .copied()
-            .find(|pane_id| *pane_id == focused_pane_id)
-            .or_else(|| visible_pane_ids.first().copied())
-            .into_iter()
-            .collect(),
+        // Workspace view renders one focused-pane row per tab, same as Tabs.
+        VerticalTabsDisplayGranularity::Tabs | VerticalTabsDisplayGranularity::Workspace => {
+            visible_pane_ids
+                .iter()
+                .copied()
+                .find(|pane_id| *pane_id == focused_pane_id)
+                .or_else(|| visible_pane_ids.first().copied())
+                .into_iter()
+                .collect()
+        }
     }
 }
 
@@ -7130,8 +7671,9 @@ fn render_compact_pane_row(props: PaneProps<'_>, app: &AppContext) -> Box<dyn El
     let font_family = appearance.ui_font_family();
     let has_indicator = props.typed.badge(app).is_some() || has_unread_activity(&props.typed, app);
 
-    let icon = render_pane_icon_with_status(
-        resolve_icon_with_status_variant(&props.typed, &props.title, appearance, app),
+    // Vertical-tabs rows show a small colored dot instead of the icon-with-status widget.
+    let icon = render_pane_leading_dot(
+        &resolve_icon_with_status_variant(&props.typed, &props.title, appearance, app),
         theme,
     );
 
@@ -7206,6 +7748,9 @@ fn render_compact_pane_row(props: PaneProps<'_>, app: &AppContext) -> Box<dyn El
                             .finish()
                     }
                 }),
+                // "View as: Workspace" hides the working-directory path subtitle; the
+                // folder section header already conveys the directory context.
+                VerticalTabsCompactSubtitle::WorkingDirectory if in_workspace_view(app) => None,
                 VerticalTabsCompactSubtitle::WorkingDirectory => working_directory.map(|wd| {
                     Text::new_inline(wd, font_family, 10.)
                         .with_clip(ClipConfig::start())
@@ -7316,7 +7861,15 @@ fn render_compact_pane_row(props: PaneProps<'_>, app: &AppContext) -> Box<dyn El
         .with_child(Shrinkable::new(1., text_col.finish()).finish())
         .finish();
 
-    render_pane_row_element(props, Padding::uniform(8.), true, content, theme)
+    // Compact density uses tighter vertical padding (~3px) than the shared 8px so rows
+    // pack more densely; horizontal padding stays at 8px.
+    render_pane_row_element(
+        props,
+        Padding::uniform(8.).with_vertical(3.),
+        true,
+        content,
+        theme,
+    )
 }
 
 impl Workspace {

@@ -50,7 +50,8 @@ use crate::workspace::tab_settings::{
     TabCloseButtonPosition, TabSettings, VerticalTabsDisplayGranularity,
 };
 use crate::workspace::{
-    PaneViewLocator, TabBarDropTargetData, TabBarLocation, TabContextMenuAnchor, WorkspaceAction,
+    ForkedConversationDestination, PaneViewLocator, TabBarDropTargetData, TabBarLocation,
+    TabContextMenuAnchor, WorkspaceAction,
 };
 use crate::BlocklistAIHistoryModel;
 
@@ -254,6 +255,7 @@ impl TabData {
             self.pin_menu_items(index),
             self.tab_group_menu_items(index, tab_groups, is_only_member_of_group),
             self.session_sharing_menu_items(index, ctx),
+            self.fork_chat_menu_items(ctx),
             self.copy_metadata_menu_items(pane_name_target, ctx),
             self.modify_tab_menu_items(index, can_move_left, can_move_right, pane_name_target, ctx),
             self.close_tab_menu_items(index, tabs_len, ctx),
@@ -306,12 +308,6 @@ impl TabData {
                             })
                             .into_item(),
                     );
-                } else {
-                    menu_items.push(
-                        MenuItemFields::new("Share session")
-                            .with_on_select_action(WorkspaceAction::OpenShareSessionModal(index))
-                            .into_item(),
-                    );
                 }
             }
 
@@ -352,6 +348,26 @@ impl TabData {
         }
 
         menu_items
+    }
+
+    fn fork_chat_menu_items(&self, ctx: &AppContext) -> Vec<MenuItem<WorkspaceAction>> {
+        let Some(view) = self.pane_group.as_ref(ctx).focused_session_view(ctx) else {
+            return vec![];
+        };
+        let Some(conversation_id) = view.as_ref(ctx).forkable_active_conversation_id(ctx) else {
+            return vec![];
+        };
+        vec![MenuItemFields::new("Fork chat")
+            .with_on_select_action(WorkspaceAction::ForkAIConversation {
+                conversation_id,
+                fork_from_exchange: None,
+                summarize_after_fork: false,
+                summarization_prompt: None,
+                initial_prompt: None,
+                initial_attachments: vec![],
+                destination: ForkedConversationDestination::SplitPane,
+            })
+            .into_item()]
     }
 
     fn copyable_pane_title(
@@ -446,6 +462,10 @@ impl TabData {
         label: &'static str,
         value: Option<String>,
     ) {
+        // Personal fork: hide these copy-metadata entries from the tab menu.
+        if matches!(label, "Copy tab title" | "Copy working directory") {
+            return;
+        }
         if let Some(value) = value {
             menu_items.push(
                 MenuItemFields::new(label)
@@ -549,40 +569,12 @@ impl TabData {
 
     fn close_tab_menu_items(
         &self,
-        index: usize,
-        tabs_len: usize,
-        ctx: &AppContext,
+        _index: usize,
+        _tabs_len: usize,
+        _ctx: &AppContext,
     ) -> Vec<MenuItem<WorkspaceAction>> {
-        let mut menu_items = vec![];
-        let uses_vertical_tabs = uses_vertical_tabs(ctx);
-
-        if ContextFlag::CloseWindow.is_enabled() || tabs_len != 1 {
-            menu_items.push(
-                MenuItemFields::new("Close tab")
-                    .with_on_select_action(WorkspaceAction::CloseTab(index))
-                    .into_item(),
-            );
-        }
-        if tabs_len > 1 {
-            menu_items.push(
-                MenuItemFields::new("Close other tabs")
-                    .with_on_select_action(WorkspaceAction::CloseOtherTabs(index))
-                    .into_item(),
-            );
-        }
-        let not_last_tab = index != tabs_len - 1;
-        if not_last_tab {
-            menu_items.push(
-                MenuItemFields::new(if uses_vertical_tabs {
-                    "Close Tabs Below"
-                } else {
-                    "Close Tabs to the Right"
-                })
-                .with_on_select_action(WorkspaceAction::CloseTabsRight(index))
-                .into_item(),
-            );
-        }
-        menu_items
+        // Personal fork: close-tab options removed from the tab context menu.
+        vec![]
     }
 
     fn save_config_menu_items(index: usize) -> Vec<MenuItem<WorkspaceAction>> {

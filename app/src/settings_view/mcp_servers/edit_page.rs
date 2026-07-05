@@ -728,6 +728,10 @@ impl MCPServersEditPageView {
         let original_template =
             TemplatableMCPServerManager::as_ref(ctx).get_templatable_mcp_server(template_uuid);
         let gallery_data = original_template.and_then(|template| template.gallery_data);
+        // Preserve the original provenance across edits.
+        let origin = original_template
+            .map(|template| template.origin)
+            .unwrap_or_default();
 
         TemplatableMCPServerManager::handle(ctx).update(ctx, |templatable_manager, ctx| {
             let templatable_mcp_server = TemplatableMCPServer {
@@ -737,6 +741,7 @@ impl MCPServersEditPageView {
                 template: parsed_result.templatable_mcp_server.template,
                 version: parsed_result.templatable_mcp_server.version,
                 gallery_data,
+                origin,
             };
 
             if let Some(old_installation) =

@@ -32,6 +32,7 @@ use crate::ai::mcp::TemplatableMCPServerManager;
 use crate::ai::request_usage_model::{
     AIRequestUsageModel, AIRequestUsageModelEvent, AMBIENT_AGENT_TRIAL_CREDIT_THRESHOLD,
 };
+use crate::pane_group::pane::view::PaneHeaderAction;
 use crate::search::slash_command_menu::static_commands::commands;
 use crate::settings::AISettings;
 use crate::terminal::input::buffer_model::{InputBufferModel, InputBufferUpdateEvent};
@@ -69,6 +70,7 @@ pub struct AgentMessageBarMouseStates {
     pub toggle_plan: MouseStateHandle,
     pub toggle_conversation_menu: MouseStateHandle,
     pub toggle_code_review: MouseStateHandle,
+    pub exit_agent_view: MouseStateHandle,
     pub handoff_to_cloud: MouseStateHandle,
     pub clear_attached_context: MouseStateHandle,
     /// Mouse state handle for the "Get Figma MCP" contextual button.
@@ -686,6 +688,31 @@ impl MessageProvider<AgentMessageArgs<'_>> for ZeroStateMessageProducer {
                 mouse_states.toggle_code_review.clone(),
             ));
         }
+
+        // "esc for terminal" (or "for Orchestrator" for child agents) mirrors the
+        // former agent-view header back button and exits the agent view on click.
+        let is_child_agent = active_conversation.parent_conversation_id().is_some();
+        items.push(MessageItem::clickable(
+            vec![
+                MessageItem::keystroke(Keystroke {
+                    key: "escape".to_string(),
+                    ..Default::default()
+                }),
+                MessageItem::text(if is_child_agent {
+                    "for Orchestrator"
+                } else {
+                    "for terminal"
+                }),
+            ],
+            |ctx| {
+                ctx.dispatch_typed_action(
+                    PaneHeaderAction::<TerminalAction, TerminalAction>::CustomAction(
+                        TerminalAction::ExitAgentView,
+                    ),
+                );
+            },
+            mouse_states.exit_agent_view.clone(),
+        ));
 
         if has_plan {
             let is_plan_for_this_conversation_open = agent_view_controller

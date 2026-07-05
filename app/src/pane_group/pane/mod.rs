@@ -691,7 +691,6 @@ pub struct PaneConfiguration {
     title: String,
     title_secondary: String,
     custom_vertical_tabs_title: Option<String>,
-    show_active_pane_indicator: bool,
 
     /// If true, we draw an accent border around the pane.
     show_accent_border: bool,
@@ -718,7 +717,6 @@ impl PaneConfiguration {
             title: title.into(),
             title_secondary: String::from(""),
             custom_vertical_tabs_title: None,
-            show_active_pane_indicator: false,
             show_accent_border: false,
             has_open_modal: false,
             dim_even_if_focused: false,
@@ -740,16 +738,6 @@ impl PaneConfiguration {
 
     pub fn dim_even_if_focused(&self) -> bool {
         self.dim_even_if_focused
-    }
-
-    pub fn set_show_active_pane_indicator(
-        &mut self,
-        show_active_pane_indicator: bool,
-        ctx: &mut ModelContext<Self>,
-    ) {
-        self.show_active_pane_indicator = show_active_pane_indicator;
-        ctx.emit(PaneConfigurationEvent::ShowActivePaneIndicatorUpdated);
-        ctx.emit(PaneConfigurationEvent::HeaderContentChanged);
     }
 
     pub fn set_title(&mut self, title: impl Into<String>, ctx: &mut ModelContext<Self>) {
@@ -870,7 +858,6 @@ impl PaneConfiguration {
 pub enum PaneConfigurationEvent {
     TitleUpdated,
     VerticalTabsTitleUpdated,
-    ShowActivePaneIndicatorUpdated,
     RenderElementFnUpdated,
     ShowAccentBorderUpdated,
     OpenModalUpdated,

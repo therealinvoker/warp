@@ -11,7 +11,7 @@ use warpui::{AppContext, Entity, ModelContext, SingletonEntity};
 
 use super::{FileMCPWatcher, FileMCPWatcherEvent, MCPProvider};
 use crate::ai::mcp::templatable_installation::TemplatableMCPServerInstallation;
-use crate::ai::mcp::ParsedTemplatableMCPServerResult;
+use crate::ai::mcp::{McpGovernance, ParsedTemplatableMCPServerResult, ServerOrigin};
 use crate::settings::ai::AISettings;
 use crate::settings::AISettingsChangedEvent;
 use crate::warp_managed_paths_watcher::warp_managed_mcp_config_path;
@@ -261,7 +261,10 @@ impl FileBasedMCPManager {
                     }
                     match provider {
                         MCPProvider::Warp => Self::is_global_warp_root(root_path),
-                        MCPProvider::Claude | MCPProvider::Codex | MCPProvider::Agents => {
+                        MCPProvider::Claude
+                        | MCPProvider::Codex
+                        | MCPProvider::Agents
+                        | MCPProvider::Cursor => {
                             home_dir.as_ref().is_some_and(|home| root_path == home)
                         }
                     }
@@ -285,7 +288,21 @@ impl FileBasedMCPManager {
     fn is_global_warp_root(root_path: &Path) -> bool {
         warp_managed_mcp_config_path().is_some_and(|path| root_path == path.root_path.as_path())
     }
-    fn auto_start_decision(&self, hash: u64, file_based_mcp_enabled: bool) -> AutoStartDecision {
+    /// Whether org governance policy currently allows file-based servers to
+    /// run at all. `true` when the `McpGovernance` flag is off or the user
+    /// is self-managed. The cached policy snapshot is loaded before this
+    /// model is registered, so the first auto-start decision after startup
+    /// already honors it.
+    fn governance_allows_file_based_servers(app: &AppContext) -> bool {
+        McpGovernance::current_policy(app).allows_spawn(ServerOrigin::FileBased)
+    }
+
+    fn auto_start_decision(
+        &self,
+        hash: u64,
+        file_based_mcp_enabled: bool,
+        governance_allows_file_based: bool,
+    ) -> AutoStartDecision {
         let server_type = if self.is_global_warp_server(hash) {
             FileBasedMCPServerType::GlobalWarp
         } else if self.is_global_server(hash) {
@@ -293,11 +310,16 @@ impl FileBasedMCPManager {
         } else {
             FileBasedMCPServerType::ProjectScoped
         };
-        let should_autostart = match server_type {
-            FileBasedMCPServerType::GlobalWarp => true,
-            FileBasedMCPServerType::GlobalThirdParty => file_based_mcp_enabled,
-            FileBasedMCPServerType::ProjectScoped => false,
-        };
+        // Org governance is a hard gate on top of the per-scope rules: when
+        // it disallows file-based servers (kill switch or
+        // allow_file_based_servers=false), nothing auto-starts, including
+        // global Warp servers.
+        let should_autostart = governance_allows_file_based
+            && match server_type {
+                FileBasedMCPServerType::GlobalWarp => true,
+                FileBasedMCPServerType::GlobalThirdParty => file_based_mcp_enabled,
+                FileBasedMCPServerType::ProjectScoped => false,
+            };
 
         AutoStartDecision {
             should_autostart,
@@ -315,6 +337,7 @@ impl FileBasedMCPManager {
             return Vec::new();
         }
         let mcp_enabled = AISettings::as_ref(ctx).is_file_based_mcp_enabled(ctx);
+        let governance_allows = Self::governance_allows_file_based_servers(ctx);
 
         // Partition servers into three buckets based on scope:
         // - Global Warp: always auto-spawn.
@@ -331,7 +354,7 @@ impl FileBasedMCPManager {
             let server_name = installation.templatable_mcp_server().name.clone();
             let AutoStartDecision {
                 should_autostart, ..
-            } = self.auto_start_decision(hash, mcp_enabled);
+            } = self.auto_start_decision(hash, mcp_enabled, governance_allows);
             if should_autostart {
                 log::info!(
                     "Auto-spawning file-based MCP server '{server_name}' ({installation_uuid})"
@@ -355,6 +378,7 @@ impl FileBasedMCPManager {
         ctx: &mut ModelContext<Self>,
     ) {
         let mcp_enabled = AISettings::as_ref(ctx).is_file_based_mcp_enabled(ctx);
+        let governance_allows = Self::governance_allows_file_based_servers(ctx);
         // FileMCPWatcher emits CloudEnvMcpScanComplete only after emitting ConfigParsed
         // for every provider config in this repo scan. Each ConfigParsed call records
         // the UUIDs actually emitted through SpawnServers in
@@ -378,7 +402,7 @@ impl FileBasedMCPManager {
                     };
                     let uuid = installation.uuid();
                     let auto_start_eligible = self
-                        .auto_start_decision(*hash, mcp_enabled)
+                        .auto_start_decision(*hash, mcp_enabled, governance_allows)
                         .should_autostart;
                     detected_servers.push(CloudEnvMcpScanServer {
                         uuid,
@@ -415,7 +439,7 @@ impl FileBasedMCPManager {
             .file_based_servers
             .iter()
             .filter(|(hash, _)| {
-                self.auto_start_decision(**hash, true).server_type
+                self.auto_start_decision(**hash, true, true).server_type
                     == FileBasedMCPServerType::GlobalThirdParty
             })
             .map(|(_, server)| server.clone())
@@ -428,9 +452,11 @@ impl FileBasedMCPManager {
                     .map(|s| s.uuid())
                     .collect_vec(),
             });
-        } else {
+        } else if Self::governance_allows_file_based_servers(ctx) {
             // Toggle on: spawn global third-party servers (global Warp servers are
-            // already running; project-scoped servers are unaffected).
+            // already running; project-scoped servers are unaffected). Skipped
+            // entirely when org governance disallows file-based servers, to
+            // avoid a spawn that would immediately be blocked.
             ctx.emit(FileBasedMCPManagerEvent::SpawnServers {
                 installations: global_third_party_servers,
             });

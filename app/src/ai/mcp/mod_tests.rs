@@ -24,6 +24,74 @@ fn mcp_provider_from_file_path_recognizes_warp_home_path() {
     }
 }
 
+// ── Cursor provider availability & detection ──────────────────────────
+
+#[test]
+fn cursor_provider_is_gated_on_cursor_mcp_import_flag() {
+    // Flag defaults to disabled in tests.
+    assert!(!MCPProvider::Cursor.is_available());
+    assert!(
+        !MCPProvider::iter_available().any(|p| p == MCPProvider::Cursor),
+        "Cursor should not be iterated while the flag is disabled"
+    );
+
+    let _flag = crate::features::FeatureFlag::CursorMcpImport.override_enabled(true);
+    assert!(MCPProvider::Cursor.is_available());
+    assert!(MCPProvider::iter_available().any(|p| p == MCPProvider::Cursor));
+}
+
+#[test]
+fn non_cursor_providers_are_always_available() {
+    for provider in [
+        MCPProvider::Warp,
+        MCPProvider::Claude,
+        MCPProvider::Codex,
+        MCPProvider::Agents,
+    ] {
+        assert!(provider.is_available(), "{provider:?} should be available");
+    }
+}
+
+#[test]
+fn cursor_config_paths_point_at_dot_cursor_mcp_json() {
+    assert_eq!(
+        MCPProvider::Cursor.home_config_path(),
+        std::path::Path::new(".cursor/mcp.json")
+    );
+    assert_eq!(
+        MCPProvider::Cursor.project_config_path(),
+        std::path::Path::new(".cursor/mcp.json")
+    );
+}
+
+#[test]
+fn mcp_provider_from_file_path_recognizes_cursor_paths_when_enabled() {
+    let _flag = crate::features::FeatureFlag::CursorMcpImport.override_enabled(true);
+
+    // Project-level config anywhere in a repo.
+    assert_eq!(
+        mcp_provider_from_file_path(std::path::Path::new("/repo/.cursor/mcp.json")),
+        Some(MCPProvider::Cursor)
+    );
+
+    // Home-level config.
+    if let Some(home_dir) = dirs::home_dir() {
+        assert_eq!(
+            mcp_provider_from_file_path(&home_dir.join(".cursor/mcp.json")),
+            Some(MCPProvider::Cursor)
+        );
+    }
+}
+
+#[test]
+fn mcp_provider_from_file_path_ignores_cursor_paths_when_disabled() {
+    // Flag defaults to disabled in tests.
+    assert_eq!(
+        mcp_provider_from_file_path(std::path::Path::new("/repo/.cursor/mcp.json")),
+        None
+    );
+}
+
 /// Helper function to create a test TemplatableMCPServerInstallation with custom values
 fn create_test_installation(
     name: &str,
@@ -61,6 +129,7 @@ fn create_test_installation(
         },
         version: 1234567890,
         gallery_data: None,
+        origin: Default::default(),
     };
 
     TemplatableMCPServerInstallation::new(

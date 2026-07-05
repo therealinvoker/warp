@@ -57,7 +57,7 @@ use crate::view_components::action_button::{
     ActionButton, ActionButtonTheme, ButtonSize, KeystrokeSource, NakedTheme, PrimaryTheme,
     SecondaryTheme,
 };
-use crate::workspace::view::right_panel::ReviewDestination;
+use crate::workspace::view::code_review_panel::ReviewDestination;
 
 /// Header text for the outdated section when there is exactly one outdated comment.
 const OUTDATED_SECTION_HEADER_SINGULAR: &str = "1 comment will be omitted because it is outdated.";
@@ -186,7 +186,7 @@ pub struct CommentListView {
     repo_path: Option<LocalOrRemotePath>,
     view_state: ViewState,
     /// The best available destination for sending review comments.
-    /// Pushed down from RightPanelView.
+    /// Pushed down from CodeReviewPanelView.
     review_destination: ReviewDestination,
     overflow_menu: ViewHandle<Menu<CommentListAction>>,
     active_overflow_comment_id: Option<CommentId>,

@@ -551,6 +551,38 @@ fn tabs_granularity_returns_empty_for_empty_visible_panes() {
 }
 
 #[test]
+fn workspace_granularity_returns_focused_pane_like_tabs() {
+    let pane_1 = pane_id();
+    let pane_2 = pane_id();
+    let pane_3 = pane_id();
+
+    assert_eq!(
+        pane_ids_for_display_granularity(
+            &[pane_1, pane_2, pane_3],
+            pane_2,
+            VerticalTabsDisplayGranularity::Workspace,
+        ),
+        vec![pane_2]
+    );
+}
+
+#[test]
+fn workspace_granularity_falls_back_to_first_visible_pane_when_focused_pane_is_absent() {
+    let pane_1 = pane_id();
+    let pane_2 = pane_id();
+    let focused_pane = pane_id();
+
+    assert_eq!(
+        pane_ids_for_display_granularity(
+            &[pane_1, pane_2],
+            focused_pane,
+            VerticalTabsDisplayGranularity::Workspace,
+        ),
+        vec![pane_1]
+    );
+}
+
+#[test]
 fn detail_sidecar_uses_default_width_when_space_allows() {
     let (width, bounds) = detail_sidecar_width_and_bounds(400.);
     assert_eq!(width, 320.);
@@ -633,6 +665,13 @@ fn panes_granularity_uses_outer_group_container() {
 fn tabs_granularity_does_not_use_outer_group_container() {
     assert!(!uses_outer_group_container(
         VerticalTabsDisplayGranularity::Tabs
+    ));
+}
+
+#[test]
+fn workspace_granularity_does_not_use_outer_group_container() {
+    assert!(!uses_outer_group_container(
+        VerticalTabsDisplayGranularity::Workspace
     ));
 }
 

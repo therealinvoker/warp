@@ -1,22 +1,16 @@
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use dunce::canonicalize;
 use itertools::Itertools;
 use pathfinder_color::ColorU;
 use warp_core::features::FeatureFlag;
-use warp_core::ui::Icon;
 use warp_util::path::LineAndColumnArg;
 use warpui::elements::{
-    resizable_state_handle, ChildAnchor, ChildView, Clipped, ConstrainedBox, Container,
-    CrossAxisAlignment, DragBarSide, Element, Empty, Flex, MainAxisAlignment, MainAxisSize,
-    MouseStateHandle, ParentElement, PositionedElementAnchor, Resizable, ResizableStateHandle,
+    ChildAnchor, ChildView, Clipped, ConstrainedBox, Container, CrossAxisAlignment, Element, Flex,
+    MainAxisAlignment, MainAxisSize, MouseStateHandle, ParentElement, PositionedElementAnchor,
     Shrinkable, Text,
 };
 use warpui::fonts::{Properties, Weight};
-use warpui::keymap::EditableBinding;
-use warpui::platform::Cursor;
-use warpui::ui_components::components::UiComponent;
 use warpui::{
     AppContext, Entity, EntityId, ModelHandle, SingletonEntity, TypedActionView, View, ViewContext,
     ViewHandle, WeakViewHandle,
@@ -34,7 +28,6 @@ use crate::code_review::code_review_view::{
 };
 use crate::code_review::diff_state::DiffStateModel;
 use crate::code_review::telemetry_event::CodeReviewContextDestination;
-use crate::drive::panel::{MAX_SIDEBAR_WIDTH_RATIO, MIN_SIDEBAR_WIDTH};
 use crate::pane_group::pane::view::header::components::HEADER_EDGE_PADDING;
 use crate::pane_group::pane::view::header::PANE_HEADER_HEIGHT;
 use crate::pane_group::{
@@ -42,22 +35,14 @@ use crate::pane_group::{
 };
 use crate::settings::{AISettings, AISettingsChangedEvent};
 use crate::terminal::cli_agent_sessions::CLIAgentSessionsModel;
-use crate::terminal::input::MenuPositioning;
-use crate::terminal::resizable_data::{ModalType, ResizableData};
 use crate::terminal::view::TerminalView;
 use crate::terminal::CLIAgent;
-use crate::ui_components::buttons::icon_button_with_color;
-use crate::ui_components::icons;
-use crate::util::bindings::{keybinding_name_to_display_string, CustomAction};
 #[cfg(feature = "local_fs")]
 use crate::util::openable_file_type::FileTarget;
 use crate::util::path::{display_name_with_host, display_path_with_host};
-use crate::view_components::action_button::{ActionButton, PaneHeaderTheme};
 #[cfg(feature = "local_fs")]
-use crate::view_components::action_button::{NakedTheme, TooltipAlignment};
+use crate::view_components::action_button::{ActionButton, NakedTheme, TooltipAlignment};
 use crate::view_components::{Dropdown, DropdownItem};
-use crate::workspace::view::TOGGLE_RIGHT_PANEL_BINDING_NAME;
-use crate::workspace::WorkspaceAction;
 
 /// Describes which agent destination is available for sending review comments.
 #[derive(Clone, Debug, PartialEq)]
@@ -118,25 +103,25 @@ impl ReviewTerminalStatus {
     }
 }
 
-/// `ReviewActionTargetProvider` backed by the right panel's active pane group,
-/// so code review actions resolve their target terminal at action time instead
-/// of using a handle captured when the review view was created.
-struct RightPanelReviewActionTargetProvider {
-    right_panel: WeakViewHandle<RightPanelView>,
+/// `ReviewActionTargetProvider` backed by the code review panel's active pane
+/// group, so code review actions resolve their target terminal at action time
+/// instead of using a handle captured when the review view was created.
+struct CodeReviewPanelReviewActionTargetProvider {
+    code_review_panel: WeakViewHandle<CodeReviewPanelView>,
 }
 
-impl ReviewActionTargetProvider for RightPanelReviewActionTargetProvider {
+impl ReviewActionTargetProvider for CodeReviewPanelReviewActionTargetProvider {
     fn attach_terminal(
         &self,
         repo_path: &LocalOrRemotePath,
         app: &AppContext,
     ) -> Option<ViewHandle<TerminalView>> {
-        let right_panel = self.right_panel.upgrade(app)?;
-        right_panel.read(app, |panel, app| {
-            let pane_group = panel.active_pane_group.as_ref()?;
+        let code_review_panel = self.code_review_panel.upgrade(app)?;
+        code_review_panel.read(app, |panel, app| {
+            let pane_group = panel.active_pane_group(app)?;
             let ai_enabled = AISettings::as_ref(app).is_any_ai_enabled(app);
             panel
-                .find_review_terminal(pane_group, repo_path, ai_enabled, app)
+                .find_review_terminal(&pane_group, repo_path, ai_enabled, app)
                 .or_else(|| {
                     // No terminal is available (e.g. all candidates are
                     // executing). Fall back to the focused terminal when it is
@@ -144,7 +129,7 @@ impl ReviewActionTargetProvider for RightPanelReviewActionTargetProvider {
                     // terminals still targets the focused conversation.
                     let focused = pane_group
                         .read(app, |pane_group, app| pane_group.focused_session_view(app))?;
-                    let status = RightPanelView::review_terminal_status(
+                    let status = CodeReviewPanelView::review_terminal_status(
                         &focused,
                         Some(repo_path),
                         ai_enabled,
@@ -164,9 +149,9 @@ impl ReviewActionTargetProvider for RightPanelReviewActionTargetProvider {
     }
 
     fn focused_terminal(&self, app: &AppContext) -> Option<ViewHandle<TerminalView>> {
-        let right_panel = self.right_panel.upgrade(app)?;
-        right_panel.read(app, |panel, app| {
-            let pane_group = panel.active_pane_group.as_ref()?;
+        let code_review_panel = self.code_review_panel.upgrade(app)?;
+        code_review_panel.read(app, |panel, app| {
+            let pane_group = panel.active_pane_group(app)?;
             pane_group.read(app, |pane_group, app| {
                 pane_group
                     .focused_session_view(app)
@@ -177,7 +162,7 @@ impl ReviewActionTargetProvider for RightPanelReviewActionTargetProvider {
 }
 
 struct CodeReviewState {
-    dropdown: ViewHandle<Dropdown<RightPanelAction>>,
+    dropdown: ViewHandle<Dropdown<CodeReviewPanelAction>>,
     available_repos: Vec<LocalOrRemotePath>,
     /// The repository path of the focused terminal
     focused_repo_path: Option<LocalOrRemotePath>,
@@ -204,7 +189,7 @@ fn repo_dropdown_font_color(appearance: &Appearance) -> ColorU {
 }
 
 impl CodeReviewState {
-    pub fn new(ctx: &mut ViewContext<RightPanelView>) -> Self {
+    pub fn new(ctx: &mut ViewContext<CodeReviewPanelView>) -> Self {
         CodeReviewState {
             dropdown: ctx.add_typed_action_view(|ctx| {
                 let (font_color, ui_font_size) = {
@@ -252,7 +237,7 @@ impl CodeReviewState {
     fn set_available_repos(
         &mut self,
         _repos: Vec<LocalOrRemotePath>,
-        _ctx: &mut ViewContext<RightPanelView>,
+        _ctx: &mut ViewContext<CodeReviewPanelView>,
     ) {
     }
 
@@ -260,7 +245,7 @@ impl CodeReviewState {
     fn set_available_repos(
         &mut self,
         repos: Vec<LocalOrRemotePath>,
-        ctx: &mut ViewContext<RightPanelView>,
+        ctx: &mut ViewContext<CodeReviewPanelView>,
     ) {
         let should_clear = self
             .selected_repo_path
@@ -286,7 +271,7 @@ impl CodeReviewState {
     pub fn set_selected_repo(
         &mut self,
         _repo_path: LocalOrRemotePath,
-        _ctx: &mut ViewContext<RightPanelView>,
+        _ctx: &mut ViewContext<CodeReviewPanelView>,
     ) {
     }
 
@@ -294,7 +279,7 @@ impl CodeReviewState {
     pub fn set_selected_repo(
         &mut self,
         repo_path: LocalOrRemotePath,
-        ctx: &mut ViewContext<RightPanelView>,
+        ctx: &mut ViewContext<CodeReviewPanelView>,
     ) {
         self.set_selected_repo_internal(repo_path, true, ctx);
     }
@@ -302,7 +287,7 @@ impl CodeReviewState {
     pub fn set_focused_repo(
         &mut self,
         repo_path: Option<LocalOrRemotePath>,
-        ctx: &mut ViewContext<RightPanelView>,
+        ctx: &mut ViewContext<CodeReviewPanelView>,
     ) {
         self.did_focused_repo_change = true;
         self.focused_repo_path = repo_path;
@@ -317,7 +302,7 @@ impl CodeReviewState {
         &mut self,
         repo_path: LocalOrRemotePath,
         update_dropdown: bool,
-        ctx: &mut ViewContext<RightPanelView>,
+        ctx: &mut ViewContext<CodeReviewPanelView>,
     ) {
         if repo_path.is_remote() && !FeatureFlag::RemoteCodeReview.is_enabled() {
             return;
@@ -348,10 +333,10 @@ impl CodeReviewState {
     }
 
     #[cfg_attr(not(feature = "local_fs"), allow(dead_code))]
-    fn update_repo_dropdown(&mut self, ctx: &mut ViewContext<RightPanelView>) {
+    fn update_repo_dropdown(&mut self, ctx: &mut ViewContext<CodeReviewPanelView>) {
         // Collect data before borrowing mutably
         let (items, selected_display_name) = {
-            let items: Vec<DropdownItem<RightPanelAction>> = self
+            let items: Vec<DropdownItem<CodeReviewPanelAction>> = self
                 .available_repos
                 .iter()
                 .map(|repo_path| {
@@ -360,7 +345,7 @@ impl CodeReviewState {
                         .unwrap_or_else(|| "Unknown".to_string());
                     DropdownItem::new(
                         display_name,
-                        RightPanelAction::SelectRepo {
+                        CodeReviewPanelAction::SelectRepo {
                             repo_path: repo_path.clone(),
                             from_dropdown: true,
                         },
@@ -390,20 +375,19 @@ impl CodeReviewState {
 
 #[derive(Clone, Debug, PartialEq)]
 #[cfg_attr(not(feature = "local_fs"), allow(dead_code))]
-pub enum RightPanelAction {
+pub enum CodeReviewPanelAction {
     ToggleFileSidebar,
     SelectRepo {
         repo_path: LocalOrRemotePath,
         from_dropdown: bool,
     },
     OpenRepository,
-    ToggleMaximize,
 }
 
 #[derive(Clone, Debug)]
 #[cfg_attr(not(feature = "local_fs"), allow(dead_code))]
-pub enum RightPanelEvent {
-    ToggleMaximize,
+#[allow(clippy::enum_variant_names)]
+pub enum CodeReviewPanelEvent {
     #[cfg(feature = "local_fs")]
     OpenFileWithTarget {
         path: PathBuf,
@@ -415,58 +399,29 @@ pub enum RightPanelEvent {
         line_and_column: Option<LineAndColumnArg>,
     },
     #[cfg(not(target_family = "wasm"))]
-    OpenLspLogs {
-        log_path: PathBuf,
-    },
+    OpenLspLogs { log_path: PathBuf },
 }
 
-pub struct RightPanelView {
-    resizable_state_handle: ResizableStateHandle,
-    close_button_mouse_state: MouseStateHandle,
+pub struct CodeReviewPanelView {
     file_navigation_button_mouse_state: MouseStateHandle,
     #[cfg(feature = "local_fs")]
     open_repository_button: ViewHandle<ActionButton>,
-    pub active_pane_group: Option<ViewHandle<PaneGroup>>,
+    active_pane_group: Option<WeakViewHandle<PaneGroup>>,
     #[cfg_attr(not(feature = "local_fs"), allow(dead_code))]
     working_directories_model: ModelHandle<WorkingDirectoriesModel>,
-    maximize_button: ViewHandle<ActionButton>,
     code_review_state: Option<CodeReviewState>,
     #[cfg(feature = "local_fs")]
     code_review_session_env: Option<CodeReviewSessionEnv>,
-    is_agent_management_view_open: bool,
-    panel_position: super::PanelPosition,
+    /// Whether the code review tab is currently the active, visible tab in the
+    /// tools panel. Gates diff-loading / subscription work (`on_open`).
+    is_open: bool,
 }
 
-impl RightPanelView {
-    pub fn init(app: &mut AppContext) {
-        use warpui::keymap::macros::*;
-
-        app.register_editable_bindings([EditableBinding::new(
-            "workspace:toggle_maximize_code_review_panel",
-            "Toggle Maximize Code Review Panel",
-            RightPanelAction::ToggleMaximize,
-        )
-        .with_enabled(|| cfg!(feature = "local_fs"))
-        .with_context_predicate(id!("RightPanelView"))
-        .with_custom_action(CustomAction::ToggleMaximizePane)]);
-    }
-
+impl CodeReviewPanelView {
     pub fn new(
         working_directories_model: ModelHandle<WorkingDirectoriesModel>,
         ctx: &mut ViewContext<Self>,
     ) -> Self {
-        let resizable_data_handle = ResizableData::handle(ctx);
-        let resizable_state_handle = match resizable_data_handle
-            .as_ref(ctx)
-            .get_handle(ctx.window_id(), ModalType::RightPanelWidth)
-        {
-            Some(handle) => handle,
-            None => {
-                log::error!("Couldn't retrieve Right panel resizable state handle.");
-                resizable_state_handle(600.0)
-            }
-        };
-
         let code_review_state = if cfg!(feature = "local_fs") {
             Some(CodeReviewState::new(ctx))
         } else {
@@ -490,61 +445,32 @@ impl RightPanelView {
             }
         });
 
-        let maximize_button = ctx.add_typed_action_view(|ctx| {
-            let mut button = ActionButton::new("", PaneHeaderTheme)
-                .with_icon(Icon::Maximize)
-                .with_tooltip("Maximize")
-                .with_tooltip_positioning_provider(Arc::new(MenuPositioning::BelowInputBox))
-                .on_click(|ctx| ctx.dispatch_typed_action(RightPanelAction::ToggleMaximize));
-
-            if let Some(keybinding_label) = keybinding_name_to_display_string(
-                "workspace:toggle_maximize_code_review_panel",
-                ctx,
-            ) {
-                button = button.with_tooltip_sublabel(keybinding_label);
-            }
-
-            button
-        });
-
         #[cfg(feature = "local_fs")]
         let open_repository_button = ctx.add_typed_action_view(|_| {
             ActionButton::new("Open repository", NakedTheme)
                 .with_size(crate::view_components::action_button::ButtonSize::Small)
                 .with_tooltip("Navigate to a repo and initialize it for coding")
                 .with_tooltip_alignment(TooltipAlignment::Center)
-                .on_click(|ctx| ctx.dispatch_typed_action(RightPanelAction::OpenRepository))
+                .on_click(|ctx| ctx.dispatch_typed_action(CodeReviewPanelAction::OpenRepository))
         });
 
         Self {
-            resizable_state_handle,
-            close_button_mouse_state: Default::default(),
             file_navigation_button_mouse_state: Default::default(),
             #[cfg(feature = "local_fs")]
             open_repository_button,
             active_pane_group: None,
             working_directories_model,
-            maximize_button,
             code_review_state,
             #[cfg(feature = "local_fs")]
             code_review_session_env: None,
-            is_agent_management_view_open: false,
-            panel_position: super::PanelPosition::Right,
+            is_open: false,
         }
     }
 
-    pub fn set_agent_management_view_open(&mut self, is_open: bool, ctx: &mut ViewContext<Self>) {
-        self.is_agent_management_view_open = is_open;
-        ctx.notify();
-    }
-
-    pub fn set_panel_position(
-        &mut self,
-        position: super::PanelPosition,
-        ctx: &mut ViewContext<Self>,
-    ) {
-        self.panel_position = position;
-        ctx.notify();
+    fn active_pane_group(&self, app: &AppContext) -> Option<ViewHandle<PaneGroup>> {
+        self.active_pane_group
+            .as_ref()
+            .and_then(|pane_group| pane_group.upgrade(app))
     }
 
     #[cfg(feature = "local_fs")]
@@ -571,12 +497,44 @@ impl RightPanelView {
         ctx: &mut ViewContext<Self>,
     ) {
         self.handle_action(
-            &RightPanelAction::SelectRepo {
+            &CodeReviewPanelAction::SelectRepo {
                 repo_path,
                 from_dropdown: false,
             },
             ctx,
         );
+    }
+
+    /// Called by the tools panel when the code review tab becomes the active,
+    /// visible tab (or stops being it). Drives the diff-loading lifecycle that
+    /// used to be gated by the right panel's open state.
+    pub fn set_open(&mut self, is_open: bool, ctx: &mut ViewContext<Self>) {
+        if self.is_open == is_open {
+            return;
+        }
+        self.is_open = is_open;
+
+        let selected = self
+            .code_review_state
+            .as_ref()
+            .and_then(|s| s.selected_repo_path.clone());
+
+        if is_open {
+            if let Some(selected) = &selected {
+                self.ensure_code_review_view_exists(selected, ctx);
+            }
+            if let Some(view) = self.get_active_code_review_view(ctx) {
+                view.update(ctx, |view, ctx| {
+                    view.on_open(ctx);
+                });
+                self.recompute_terminal_availability(ctx);
+            }
+        } else if let Some(view) = self.get_active_code_review_view(ctx) {
+            view.update(ctx, |view, ctx| {
+                view.on_close(ctx);
+            });
+        }
+        ctx.notify();
     }
 
     fn handle_working_directories_event(
@@ -589,7 +547,7 @@ impl RightPanelView {
                 pane_group_id,
                 repositories,
             } => {
-                let Some(active_pane_group) = &self.active_pane_group else {
+                let Some(active_pane_group) = self.active_pane_group(ctx) else {
                     return;
                 };
                 if active_pane_group.id() != *pane_group_id {
@@ -628,7 +586,7 @@ impl RightPanelView {
                 repository_terminal_map: _,
                 focused_repo,
             } => {
-                let Some(active_pane_group) = &self.active_pane_group else {
+                let Some(active_pane_group) = self.active_pane_group(ctx) else {
                     return;
                 };
                 if active_pane_group.id() != *pane_group_id {
@@ -656,6 +614,18 @@ impl RightPanelView {
     ) {
         let pane_group_id = pane_group.id();
 
+        // The tools panel re-broadcasts its active pane group on every tab
+        // activation/restore. Bail out when it hasn't actually changed:
+        // re-subscribing would leak duplicate subscriptions (they accumulate
+        // per call), and repo/selection updates for the current pane group
+        // already arrive via the `WorkingDirectoriesModel` subscription.
+        if self
+            .active_pane_group(ctx)
+            .is_some_and(|current| current.id() == pane_group_id)
+        {
+            return;
+        }
+
         // Subscribe to pane group events so we can recompute terminal
         // availability when terminal state changes (e.g. command
         // starts/finishes).
@@ -665,7 +635,7 @@ impl RightPanelView {
             }
         });
 
-        self.active_pane_group = Some(pane_group);
+        self.active_pane_group = Some(pane_group.downgrade());
 
         if let Some(state) = &mut self.code_review_state {
             let (active_repositories, saved_selection) =
@@ -696,9 +666,6 @@ impl RightPanelView {
             self.ensure_code_review_view_exists(selected, ctx);
         }
 
-        let is_maximized = self.is_maximized(ctx);
-        self.set_maximized(is_maximized, ctx);
-
         ctx.notify();
     }
 
@@ -710,11 +677,13 @@ impl RightPanelView {
         diff_state_model: ModelHandle<DiffStateModel>,
         ctx: &mut ViewContext<Self>,
     ) {
+        let Some(active_pane_group) = self.active_pane_group(ctx) else {
+            return;
+        };
         let Some(repo_dropdown_state) = &mut self.code_review_state else {
             return;
         };
-        let (Some(repo_path), Some(active_pane_group)) = (&repo_path, &self.active_pane_group)
-        else {
+        let Some(repo_path) = &repo_path else {
             return;
         };
         if repo_path.is_remote() && !FeatureFlag::RemoteCodeReview.is_enabled() {
@@ -770,9 +739,10 @@ impl RightPanelView {
         let Some(state) = &self.code_review_state else {
             return;
         };
-        let (Some(repo_path), Some(pane_group)) =
-            (&state.selected_repo_path, &self.active_pane_group)
-        else {
+        let Some(pane_group) = self.active_pane_group(ctx) else {
+            return;
+        };
+        let Some(repo_path) = &state.selected_repo_path else {
             return;
         };
         self.close_code_review_view(pane_group.id(), repo_path, ctx);
@@ -790,9 +760,7 @@ impl RightPanelView {
     }
 
     fn render_repo_dropdown(&self) -> Option<Box<dyn Element>> {
-        let Some(state) = &self.code_review_state else {
-            return None;
-        };
+        let state = self.code_review_state.as_ref()?;
         if state.available_repos.len() <= 1 {
             return None;
         }
@@ -807,73 +775,11 @@ impl RightPanelView {
         )
     }
 
-    fn close_button(&self, appearance: &Appearance, app: &AppContext) -> Box<dyn Element> {
-        let ui_builder = appearance.ui_builder().clone();
-        let tooltip_keybinding =
-            keybinding_name_to_display_string(TOGGLE_RIGHT_PANEL_BINDING_NAME, app);
-
-        let tooltip = if let Some(keybinding) = tooltip_keybinding {
-            ui_builder
-                .tool_tip_with_sublabel("Close panel".to_string(), keybinding)
-                .build()
-                .finish()
-        } else {
-            ui_builder
-                .tool_tip("Close panel".to_string())
-                .build()
-                .finish()
-        };
-
-        let icon_color = appearance
-            .theme()
-            .sub_text_color(appearance.theme().background());
-        icon_button_with_color(
-            appearance,
-            icons::Icon::X,
-            false,
-            self.close_button_mouse_state.clone(),
-            icon_color,
-        )
-        .with_tooltip(move || tooltip)
-        .build()
-        .on_click(move |ctx, _, _| {
-            ctx.dispatch_typed_action(WorkspaceAction::ToggleRightPanel);
-        })
-        .with_cursor(Cursor::PointingHand)
-        .finish()
-    }
-
-    fn render_simple_header(&self, close_button: Box<dyn Element>) -> Box<dyn Element> {
-        let left_spacer = Box::new(Shrinkable::new(1.0, Empty::new().finish()));
-        Container::new(
-            ConstrainedBox::new(
-                Flex::row()
-                    .with_child(left_spacer)
-                    .with_children(vec![close_button])
-                    .with_main_axis_alignment(MainAxisAlignment::SpaceBetween)
-                    .with_cross_axis_alignment(CrossAxisAlignment::Center)
-                    .finish(),
-            )
-            .with_height(PANE_HEADER_HEIGHT)
-            .finish(),
-        )
-        .with_padding_left(16.)
-        .with_padding_right(HEADER_EDGE_PADDING)
-        .finish()
-    }
-
     fn render_panel_content(&self, app: &AppContext) -> Box<dyn Element> {
         let appearance = Appearance::as_ref(app);
-        let close_button = self.close_button(appearance, app);
 
         let Some(state) = &self.code_review_state else {
-            let simple_header = self.render_simple_header(close_button);
-            return Flex::column()
-                .with_child(simple_header)
-                .with_child(
-                    Shrinkable::new(1.0, CodeReviewView::render_loading_state(appearance)).finish(),
-                )
-                .finish();
+            return Shrinkable::new(1.0, CodeReviewView::render_loading_state(appearance)).finish();
         };
 
         let selected_repo_path = state.selected_repo_path.as_ref().filter(|repo_path| {
@@ -885,8 +791,6 @@ impl RightPanelView {
         });
 
         let Some(selected_repo_path) = selected_repo_path else {
-            let simple_header = self.render_simple_header(close_button);
-
             #[cfg(feature = "local_fs")]
             let no_repo_body = {
                 let open_repo_button =
@@ -910,13 +814,10 @@ impl RightPanelView {
             #[cfg(not(feature = "local_fs"))]
             let no_repo_body = CodeReviewView::render_not_repo_state(appearance, None);
 
-            return Flex::column()
-                .with_child(simple_header)
-                .with_child(Shrinkable::new(1.0, no_repo_body).finish())
-                .finish();
+            return Shrinkable::new(1.0, no_repo_body).finish();
         };
 
-        let current_code_review_view = self.active_pane_group.as_ref().and_then(|pane_group| {
+        let current_code_review_view = self.active_pane_group(app).and_then(|pane_group| {
             let pane_group_id = pane_group.id();
             self.working_directories_model
                 .as_ref(app)
@@ -937,22 +838,8 @@ impl RightPanelView {
                 .with_child(code_review_content)
                 .finish()
         } else {
-            let simple_header = self.render_simple_header(close_button);
-            Flex::column()
-                .with_child(simple_header)
-                .with_child(
-                    Shrinkable::new(1.0, CodeReviewView::render_loading_state(appearance)).finish(),
-                )
-                .finish()
+            Shrinkable::new(1.0, CodeReviewView::render_loading_state(appearance)).finish()
         }
-    }
-
-    #[cfg_attr(not(feature = "local_fs"), allow(dead_code))]
-    fn render_maximize_pane_button(&self) -> Box<dyn Element> {
-        ConstrainedBox::new(ChildView::new(&self.maximize_button).finish())
-            .with_height(warp_core::ui::icons::ICON_DIMENSIONS)
-            .with_width(warp_core::ui::icons::ICON_DIMENSIONS)
-            .finish()
     }
 
     fn render_header(
@@ -1001,8 +888,6 @@ impl RightPanelView {
         let stats_element =
             diff_stats.map(|stats| CodeReviewView::render_diff_stats(&stats, appearance));
 
-        let close_button = self.close_button(appearance, app);
-
         let mut left_section = Flex::row()
             .with_cross_axis_alignment(CrossAxisAlignment::Center)
             .with_main_axis_size(MainAxisSize::Max);
@@ -1020,8 +905,6 @@ impl RightPanelView {
         if let Some(repo_dropdown) = self.render_repo_dropdown() {
             right_section.push(repo_dropdown);
         }
-        right_section.push(self.render_maximize_pane_button());
-        right_section.push(close_button);
 
         Container::new(
             ConstrainedBox::new(
@@ -1050,7 +933,7 @@ impl RightPanelView {
                 .as_ref()
                 .and_then(|state| state.selected_repo_path.as_ref())
                 .and_then(|repo_path| {
-                    self.active_pane_group.as_ref().and_then(|pane_group| {
+                    self.active_pane_group(app).and_then(|pane_group| {
                         let pane_group_id = pane_group.id();
                         self.working_directories_model
                             .as_ref(app)
@@ -1074,7 +957,7 @@ impl RightPanelView {
                     file_sidebar_expanded,
                     self.file_navigation_button_mouse_state.clone(),
                     |ctx| {
-                        ctx.dispatch_typed_action(RightPanelAction::ToggleFileSidebar);
+                        ctx.dispatch_typed_action(CodeReviewPanelAction::ToggleFileSidebar);
                     },
                 ))
             } else {
@@ -1094,8 +977,6 @@ impl RightPanelView {
         )
         .finish();
 
-        let close_button = self.close_button(appearance, app);
-
         let mut left_section = Flex::row()
             .with_cross_axis_alignment(CrossAxisAlignment::Center)
             .with_main_axis_size(MainAxisSize::Max);
@@ -1109,8 +990,6 @@ impl RightPanelView {
         if let Some(repo_dropdown) = self.render_repo_dropdown() {
             right_section.push(repo_dropdown);
         }
-        right_section.push(self.render_maximize_pane_button());
-        right_section.push(close_button);
 
         let left_padding = if has_nav_button { 12. } else { 16. };
 
@@ -1131,41 +1010,6 @@ impl RightPanelView {
         .finish()
     }
 
-    pub fn set_maximized(&mut self, is_maximized: bool, ctx: &mut ViewContext<Self>) {
-        let (icon, tooltip) = if is_maximized {
-            (Icon::Minimize, "Minimize")
-        } else {
-            (Icon::Maximize, "Maximize")
-        };
-
-        self.maximize_button.update(ctx, |button, ctx| {
-            let mut new_button = ActionButton::new("", PaneHeaderTheme)
-                .with_icon(icon)
-                .with_tooltip(tooltip)
-                .with_tooltip_positioning_provider(Arc::new(MenuPositioning::BelowInputBox))
-                .on_click(|ctx| {
-                    ctx.dispatch_typed_action(RightPanelAction::ToggleMaximize);
-                });
-
-            if let Some(keybinding_label) = keybinding_name_to_display_string(
-                "workspace:toggle_maximize_code_review_panel",
-                ctx,
-            ) {
-                new_button = new_button.with_tooltip_sublabel(keybinding_label);
-            }
-
-            *button = new_button;
-            ctx.notify();
-        });
-
-        // Propagate maximize state to the active code review view's file sidebar
-        if let Some(code_review_view) = self.get_active_code_review_view(ctx) {
-            code_review_view.update(ctx, |view, ctx| {
-                view.handle_maximization_toggle(is_maximized, ctx);
-            });
-        }
-    }
-
     #[cfg_attr(not(feature = "local_fs"), allow(dead_code))]
     pub fn focus_active_code_review_view(&self, ctx: &mut ViewContext<Self>) {
         let Some(state) = &self.code_review_state else {
@@ -1174,7 +1018,7 @@ impl RightPanelView {
         let Some(selected_repo_path) = &state.selected_repo_path else {
             return;
         };
-        let Some(active_pane_group) = &self.active_pane_group else {
+        let Some(active_pane_group) = self.active_pane_group(ctx) else {
             return;
         };
         let pane_group_id = active_pane_group.id();
@@ -1190,18 +1034,11 @@ impl RightPanelView {
     fn get_active_code_review_view(&self, ctx: &AppContext) -> Option<ViewHandle<CodeReviewView>> {
         let state = self.code_review_state.as_ref()?;
         let selected_repo_path = state.selected_repo_path.as_ref()?;
-        let active_pane_group = self.active_pane_group.as_ref()?;
+        let active_pane_group = self.active_pane_group(ctx)?;
         let pane_group_id = active_pane_group.id();
         self.working_directories_model
             .as_ref(ctx)
             .get_code_review_view(pane_group_id, selected_repo_path)
-    }
-
-    fn is_maximized(&self, app: &AppContext) -> bool {
-        self.active_pane_group
-            .as_ref()
-            .map(|pane_group| pane_group.as_ref(app).is_right_panel_maximized)
-            .unwrap_or(false)
     }
 
     fn create_code_review_view(
@@ -1234,8 +1071,8 @@ impl RightPanelView {
                     working_directories.get_or_create_code_review_comments(repo_path, ctx)
                 });
         let action_target_provider: Box<dyn ReviewActionTargetProvider> =
-            Box::new(RightPanelReviewActionTargetProvider {
-                right_panel: ctx.handle(),
+            Box::new(CodeReviewPanelReviewActionTargetProvider {
+                code_review_panel: ctx.handle(),
             });
         let code_review_view = ctx.add_typed_action_view(|ctx| {
             CodeReviewView::new(
@@ -1262,11 +1099,6 @@ impl RightPanelView {
 
         ctx.subscribe_to_view(&code_review_view, |me, code_review, event, ctx| {
             match event {
-                CodeReviewViewEvent::ReviewSubmitted => {
-                    if me.is_maximized(ctx) {
-                        me.handle_action(&RightPanelAction::ToggleMaximize, ctx);
-                    }
-                }
                 CodeReviewViewEvent::SubmitReviewComments {
                     comments,
                     repo_path,
@@ -1279,7 +1111,7 @@ impl RightPanelView {
                     target,
                     line_col,
                 } => {
-                    ctx.emit(RightPanelEvent::OpenFileWithTarget {
+                    ctx.emit(CodeReviewPanelEvent::OpenFileWithTarget {
                         path: path.clone(),
                         target: target.clone(),
                         line_col: *line_col,
@@ -1289,14 +1121,14 @@ impl RightPanelView {
                     path,
                     line_and_column,
                 } => {
-                    ctx.emit(RightPanelEvent::OpenFileInNewTab {
+                    ctx.emit(CodeReviewPanelEvent::OpenFileInNewTab {
                         path: path.clone(),
                         line_and_column: *line_and_column,
                     });
                 }
                 #[cfg(not(target_family = "wasm"))]
                 CodeReviewViewEvent::OpenLspLogs { log_path } => {
-                    ctx.emit(RightPanelEvent::OpenLspLogs {
+                    ctx.emit(CodeReviewPanelEvent::OpenLspLogs {
                         log_path: log_path.clone(),
                     });
                 }
@@ -1318,7 +1150,7 @@ impl RightPanelView {
         repo_path: &LocalOrRemotePath,
         ctx: &mut ViewContext<Self>,
     ) {
-        let Some(pane_group) = &self.active_pane_group else {
+        let Some(pane_group) = self.active_pane_group(ctx) else {
             code_review_view.update(ctx, |view, ctx| {
                 view.handle_review_submission_result(ReviewSubmissionResult::Error, ctx);
             });
@@ -1326,7 +1158,7 @@ impl RightPanelView {
         };
 
         let ai_enabled = AISettings::as_ref(ctx).is_any_ai_enabled(ctx);
-        let chosen = self.find_review_terminal(pane_group, repo_path, ai_enabled, ctx);
+        let chosen = self.find_review_terminal(&pane_group, repo_path, ai_enabled, ctx);
 
         let Some(terminal_view) = chosen else {
             log::warn!("No available terminal found for submitting review comments");
@@ -1484,7 +1316,7 @@ impl RightPanelView {
                     code_review_view.read(ctx, |view, ctx| view.debug_review_comment_state(ctx))
                 });
 
-        let Some(pane_group) = &self.active_pane_group else {
+        let Some(pane_group) = self.active_pane_group(ctx) else {
             log::info!(
                 "Review comment send status for active tab: no active pane group, selected_repo_path={}, ai_enabled={}",
                 Self::format_optional_location(selected_repo_path.as_ref()),
@@ -1506,7 +1338,7 @@ impl RightPanelView {
                 .get_terminal_id_for_root_path(pane_group_id, repo_path)
         });
         let chosen_terminal_id = selected_repo_path.as_ref().and_then(|repo_path| {
-            self.find_review_terminal(pane_group, repo_path, ai_enabled, ctx)
+            self.find_review_terminal(&pane_group, repo_path, ai_enabled, ctx)
                 .map(|terminal_view| terminal_view.id())
         });
 
@@ -1677,7 +1509,7 @@ impl RightPanelView {
             return;
         };
 
-        let Some(pane_group) = &self.active_pane_group else {
+        let Some(pane_group) = self.active_pane_group(ctx) else {
             code_review_view.update(ctx, |view, ctx| {
                 view.set_review_destination(ReviewDestination::None, ctx);
             });
@@ -1686,7 +1518,7 @@ impl RightPanelView {
 
         let ai_enabled = AISettings::as_ref(ctx).is_any_ai_enabled(ctx);
         let destination = self
-            .find_review_terminal(pane_group, &repo_path, ai_enabled, ctx)
+            .find_review_terminal(&pane_group, &repo_path, ai_enabled, ctx)
             .map(|tv| {
                 tv.read(ctx, |t, ctx| {
                     t.active_cli_agent(ctx)
@@ -1709,13 +1541,13 @@ impl RightPanelView {
         if repo_path.is_remote() && !FeatureFlag::RemoteCodeReview.is_enabled() {
             return;
         }
-        let Some(pane_group) = &self.active_pane_group else {
+        let Some(pane_group) = self.active_pane_group(ctx) else {
             return;
         };
         let pane_group_id = pane_group.id();
         // Only set up subscriptions and diff loading when the panel is visible.
-        // When the panel opens later, open_code_review will call on_open.
-        let is_panel_open = pane_group.as_ref(ctx).right_panel_open;
+        // When the tab opens later, set_open / open_code_review will call on_open.
+        let is_panel_open = self.is_open;
 
         let existing_view = self
             .working_directories_model
@@ -1786,20 +1618,20 @@ impl RightPanelView {
     }
 }
 
-impl Entity for RightPanelView {
-    type Event = RightPanelEvent;
+impl Entity for CodeReviewPanelView {
+    type Event = CodeReviewPanelEvent;
 }
 
 #[cfg(feature = "local_fs")]
-impl TypedActionView for RightPanelView {
-    type Action = RightPanelAction;
+impl TypedActionView for CodeReviewPanelView {
+    type Action = CodeReviewPanelAction;
 
     fn handle_action(&mut self, action: &Self::Action, ctx: &mut ViewContext<Self>) {
         match action {
-            RightPanelAction::ToggleFileSidebar => {
+            CodeReviewPanelAction::ToggleFileSidebar => {
                 if let Some(state) = &self.code_review_state {
                     if let Some(repo_path) = &state.selected_repo_path {
-                        if let Some(pane_group) = &self.active_pane_group {
+                        if let Some(pane_group) = self.active_pane_group(ctx) {
                             let pane_group_id = pane_group.id();
                             let working_directories_model = self.working_directories_model.clone();
                             if let Some(code_review_view) = working_directories_model
@@ -1814,7 +1646,7 @@ impl TypedActionView for RightPanelView {
                     }
                 }
             }
-            RightPanelAction::SelectRepo {
+            CodeReviewPanelAction::SelectRepo {
                 repo_path,
                 from_dropdown,
             } => {
@@ -1842,7 +1674,7 @@ impl TypedActionView for RightPanelView {
                     // persist explicit `SelectRepo` actions (i.e. dropdown picks or
                     // contextual opens) so that the auto-selected default doesn't
                     // overwrite an earlier manual choice for a different pane group.
-                    if let Some(pane_group) = &self.active_pane_group {
+                    if let Some(pane_group) = self.active_pane_group(ctx) {
                         let pane_group_id = pane_group.id();
                         let repo_path = repo_path.clone();
                         self.working_directories_model.update(ctx, |model, _| {
@@ -1853,12 +1685,8 @@ impl TypedActionView for RightPanelView {
                     ctx.notify();
                 }
             }
-            RightPanelAction::ToggleMaximize => {
-                ctx.emit(RightPanelEvent::ToggleMaximize);
-                ctx.notify();
-            }
-            RightPanelAction::OpenRepository => {
-                if let Some(active_pane_group) = &self.active_pane_group {
+            CodeReviewPanelAction::OpenRepository => {
+                if let Some(active_pane_group) = self.active_pane_group(ctx) {
                     let terminal_view = active_pane_group.read(ctx, |pane_group, ctx| {
                         pane_group
                             .active_session_id(ctx)
@@ -1880,40 +1708,20 @@ impl TypedActionView for RightPanelView {
 }
 
 #[cfg(not(feature = "local_fs"))]
-impl TypedActionView for RightPanelView {
-    type Action = RightPanelAction;
+impl TypedActionView for CodeReviewPanelView {
+    type Action = CodeReviewPanelAction;
 
     fn handle_action(&mut self, _action: &Self::Action, _ctx: &mut ViewContext<Self>) {
         // No actions when local_fs is disabled
     }
 }
 
-impl View for RightPanelView {
+impl View for CodeReviewPanelView {
     fn ui_name() -> &'static str {
-        "RightPanelView"
+        "CodeReviewPanelView"
     }
 
     fn render(&self, app: &AppContext) -> Box<dyn Element> {
-        let panel_content = self.render_panel_content(app);
-
-        if self.is_maximized(app) {
-            return Shrinkable::new(1.0, panel_content).finish();
-        }
-
-        let drag_side = match self.panel_position {
-            super::PanelPosition::Left => DragBarSide::Right,
-            super::PanelPosition::Right => DragBarSide::Left,
-        };
-        Resizable::new(self.resizable_state_handle.clone(), panel_content)
-            .with_dragbar_side(drag_side)
-            .on_resize(move |ctx, _| {
-                ctx.notify();
-            })
-            .with_bounds_callback(Box::new(|window_size| {
-                let min_width = MIN_SIDEBAR_WIDTH;
-                let max_width = window_size.x() * MAX_SIDEBAR_WIDTH_RATIO;
-                (min_width, max_width.max(min_width))
-            }))
-            .finish()
+        self.render_panel_content(app)
     }
 }

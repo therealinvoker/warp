@@ -67,6 +67,14 @@ fn primary_info_change_does_not_save_workspace_state() {
 }
 
 #[test]
+fn toggle_workspace_folder_collapsed_saves_workspace_state() {
+    assert!(
+        WorkspaceAction::ToggleWorkspaceFolderCollapsed("/repos/warp".to_string())
+            .should_save_app_state_on_action()
+    );
+}
+
+#[test]
 fn pane_name_actions_save_workspace_state() {
     let locator = PaneViewLocator {
         pane_group_id: EntityId::new(),

@@ -46,6 +46,10 @@ pub struct PersistedUser {
     /// Whether or not this user is on what we consider a "work" domain.
     #[serde(default)]
     pub is_on_work_domain: bool,
+    /// True when the persisted credentials are a plain Bearer token (stored in
+    /// `auth_tokens.id_token`) rather than Firebase tokens. Local OSS fork path.
+    #[serde(default)]
+    pub is_bearer_credential: bool,
 }
 
 #[derive(Debug, thiserror::Error)]

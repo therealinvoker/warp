@@ -8,7 +8,7 @@ use siphasher::sip::SipHasher;
 use uuid::Uuid;
 use warp_managed_secrets::ManagedSecretValue;
 
-use crate::ai::mcp::{TemplatableMCPServer, TemplateVariable};
+use crate::ai::mcp::{ServerOrigin, TemplatableMCPServer, TemplateVariable};
 
 lazy_static! {
     static ref HASHER: SipHasher = SipHasher::new_with_keys(0, 0);
@@ -79,6 +79,17 @@ impl TemplatableMCPServerInstallation {
 
     pub fn templatable_mcp_server(&self) -> &TemplatableMCPServer {
         &self.templatable_mcp_server
+    }
+
+    /// Returns the provenance of the installed server.
+    pub fn origin(&self) -> ServerOrigin {
+        self.templatable_mcp_server.origin
+    }
+
+    /// Sets the provenance of the installed server. Origin is not part of the
+    /// installation [`hash`](Self::hash), so this does not change identity.
+    pub fn set_origin(&mut self, origin: ServerOrigin) {
+        self.templatable_mcp_server.origin = origin;
     }
 
     pub fn template_uuid(&self) -> Uuid {

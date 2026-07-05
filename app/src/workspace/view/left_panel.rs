@@ -24,6 +24,7 @@ use crate::code::buffer_location::LocalOrRemotePath;
 #[cfg(feature = "local_fs")]
 use crate::code::file_tree::FileTreeEvent;
 use crate::code::file_tree::FileTreeView;
+use crate::code_review::diff_state::DiffStateModel;
 use crate::coding_panel_enablement_state::CodingPanelEnablementState;
 use crate::drive::panel::{
     DrivePanel, DrivePanelEvent, MAX_SIDEBAR_WIDTH_RATIO, MIN_SIDEBAR_WIDTH,
@@ -49,6 +50,7 @@ use crate::util::openable_file_type::FileTarget;
 use crate::util::openable_file_type::{
     is_markdown_file, resolve_file_target_with_editor_choice, EditorLayout,
 };
+use crate::workspace::view::code_review_panel::{CodeReviewPanelEvent, CodeReviewPanelView};
 use crate::workspace::view::conversation_list::view::{
     ConversationListView, Event as ConversationListViewEvent,
 };
@@ -59,18 +61,11 @@ use crate::workspace::view::{
     LEFT_PANEL_AGENT_CONVERSATIONS_BINDING_NAME, LEFT_PANEL_GLOBAL_SEARCH_BINDING_NAME,
     LEFT_PANEL_PROJECT_EXPLORER_BINDING_NAME, LEFT_PANEL_WARP_DRIVE_BINDING_NAME,
     OPEN_GLOBAL_SEARCH_BINDING_NAME, TOGGLE_CONVERSATION_LIST_VIEW_BINDING_NAME,
-    TOGGLE_PROJECT_EXPLORER_BINDING_NAME, TOGGLE_WARP_DRIVE_BINDING_NAME,
+    TOGGLE_PROJECT_EXPLORER_BINDING_NAME, TOGGLE_RIGHT_PANEL_BINDING_NAME,
+    TOGGLE_WARP_DRIVE_BINDING_NAME,
 };
 use crate::workspace::WorkspaceAction;
 use crate::TelemetryEvent;
-
-#[derive(Default)]
-struct MouseStateHandles {
-    project_explorer_button: MouseStateHandle,
-    conversation_list_view_button: MouseStateHandle,
-    global_search_button: MouseStateHandle,
-    warp_drive_button: MouseStateHandle,
-}
 
 #[derive(Clone, Debug)]
 pub enum LeftPanelAction {
@@ -78,6 +73,7 @@ pub enum LeftPanelAction {
     GlobalSearch { entry_focus: GlobalSearchEntryFocus },
     WarpDrive,
     ConversationListView,
+    CodeReview,
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -97,6 +93,7 @@ pub enum LeftPanelEvent {
         conversation_title: String,
         terminal_view_id: Option<warpui::EntityId>,
     },
+    CodeReview(CodeReviewPanelEvent),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -105,6 +102,7 @@ pub enum ToolPanelView {
     GlobalSearch { entry_focus: GlobalSearchEntryFocus },
     WarpDrive,
     ConversationListView,
+    CodeReview,
 }
 
 /// Encapsulates the active view state to enforce that all mutations go through
@@ -145,6 +143,7 @@ mod active_view_state {
         }
 
         left_panel.update_active_file_tree_subscription_state(ctx);
+        left_panel.update_code_review_open_state(ctx);
     }
 }
 
@@ -168,10 +167,11 @@ pub struct ToolbeltButtonConfig {
 
 pub struct LeftPanelView {
     resizable_state_handle: ResizableStateHandle,
-    mouse_state_handles: MouseStateHandles,
+    toolbelt_button_mouse_states: Vec<MouseStateHandle>,
     close_button_mouse_state: MouseStateHandle,
     warp_drive_view: ViewHandle<DrivePanel>,
     conversation_list_view: ViewHandle<ConversationListView>,
+    code_review_panel: ViewHandle<CodeReviewPanelView>,
     active_view: active_view_state::ActiveViewState,
     toolbelt_buttons: Vec<ToolbeltButtonConfig>,
     active_pane_group: Option<WeakViewHandle<PaneGroup>>,
@@ -216,6 +216,16 @@ impl LeftPanelView {
         };
         let warp_drive_view = ctx.add_typed_action_view(DrivePanel::new);
         let conversation_list_view = ctx.add_typed_action_view(ConversationListView::new);
+        let code_review_panel = {
+            let working_directories_model = working_directories_model.clone();
+            ctx.add_typed_action_view(|ctx| {
+                CodeReviewPanelView::new(working_directories_model, ctx)
+            })
+        };
+
+        ctx.subscribe_to_view(&code_review_panel, |_me, _, event, ctx| {
+            ctx.emit(LeftPanelEvent::CodeReview(event.clone()));
+        });
 
         ctx.subscribe_to_view(&warp_drive_view, |_me, _, event, ctx| {
             ctx.emit(LeftPanelEvent::WarpDrive(event.clone()));
@@ -239,9 +249,12 @@ impl LeftPanelView {
         });
 
         let active_view = views.first().copied().unwrap_or(ToolPanelView::WarpDrive);
-        let toolbelt_buttons = views
+        let toolbelt_buttons: Vec<ToolbeltButtonConfig> = views
             .iter()
             .map(|view| Self::create_toolbelt_button_config(view, ctx))
+            .collect();
+        let toolbelt_button_mouse_states = (0..toolbelt_buttons.len())
+            .map(|_| MouseStateHandle::default())
             .collect();
 
         ctx.subscribe_to_model(
@@ -327,10 +340,11 @@ impl LeftPanelView {
 
         let mut view = Self {
             resizable_state_handle,
-            mouse_state_handles: Default::default(),
+            toolbelt_button_mouse_states,
             close_button_mouse_state: Default::default(),
             warp_drive_view,
             conversation_list_view,
+            code_review_panel,
             active_view: active_view_state::new(active_view),
             toolbelt_buttons,
             active_pane_group: None,
@@ -378,6 +392,9 @@ impl LeftPanelView {
         self.toolbelt_buttons = views
             .iter()
             .map(|view| Self::create_toolbelt_button_config(view, ctx))
+            .collect();
+        self.toolbelt_button_mouse_states = (0..self.toolbelt_buttons.len())
+            .map(|_| MouseStateHandle::default())
             .collect();
 
         // If current view is no longer available, switch to the first available view
@@ -458,6 +475,19 @@ impl LeftPanelView {
                     active_icon: Some(Icon::Conversation),
                     tooltip_text: "Agent conversations".to_string(),
                     action: LeftPanelAction::ConversationListView,
+                    render_with_active_state: false,
+                    tooltip_keybinding: toolbelt_tooltip_keybinding(&tooltip_keybinding_names, ctx),
+                    tooltip_keybinding_names,
+                }
+            }
+            ToolPanelView::CodeReview => {
+                let tooltip_keybinding_names = vec![TOGGLE_RIGHT_PANEL_BINDING_NAME];
+
+                ToolbeltButtonConfig {
+                    icon: Icon::Diff,
+                    active_icon: None,
+                    tooltip_text: "Code review".to_string(),
+                    action: LeftPanelAction::CodeReview,
                     render_with_active_state: false,
                     tooltip_keybinding: toolbelt_tooltip_keybinding(&tooltip_keybinding_names, ctx),
                     tooltip_keybinding_names,
@@ -661,6 +691,13 @@ impl LeftPanelView {
             }
         });
 
+        let code_review_pane_group = pane_group.clone();
+        self.code_review_panel.update(ctx, |view, ctx| {
+            view.set_active_pane_group(code_review_pane_group, working_directories_model, ctx);
+        });
+
+        // `on_left_panel_visibility_changed` also refreshes the code review
+        // open state as its final step.
         self.on_left_panel_visibility_changed(left_panel_open, ctx);
 
         ctx.notify();
@@ -721,6 +758,11 @@ impl LeftPanelView {
             ToolPanelView::ConversationListView => {
                 self.conversation_list_view.update(ctx, |view, ctx| {
                     view.on_left_panel_focused(ctx);
+                });
+            }
+            ToolPanelView::CodeReview => {
+                self.code_review_panel.update(ctx, |view, ctx| {
+                    view.focus_active_code_review_view(ctx);
                 });
             }
         }
@@ -835,6 +877,65 @@ impl LeftPanelView {
     }
 }
 
+impl LeftPanelView {
+    pub fn is_code_review_active(&self) -> bool {
+        self.active_view.get() == ToolPanelView::CodeReview
+    }
+
+    pub fn code_review_selected_repo_path(&self, app: &AppContext) -> Option<LocalOrRemotePath> {
+        self.code_review_panel
+            .read(app, |view, _| view.selected_repo_path().cloned())
+    }
+
+    #[cfg(feature = "local_fs")]
+    pub fn update_code_review_selected_repo(
+        &mut self,
+        repo_path: LocalOrRemotePath,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        self.code_review_panel.update(ctx, |view, ctx| {
+            view.update_selected_repo(repo_path, ctx);
+        });
+    }
+
+    /// Activates the code review tab and opens the review for the given repo.
+    pub fn open_code_review(
+        &mut self,
+        repo_path: Option<LocalOrRemotePath>,
+        diff_state_model: ModelHandle<DiffStateModel>,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        active_view_state::set(self, ToolPanelView::CodeReview, ctx);
+        self.code_review_panel.update(ctx, |view, ctx| {
+            view.open_code_review(repo_path, diff_state_model, ctx);
+        });
+    }
+
+    pub fn close_code_review(&mut self, ctx: &mut ViewContext<Self>) {
+        self.code_review_panel.update(ctx, |view, ctx| {
+            view.close_code_review(ctx);
+        });
+    }
+
+    #[cfg(feature = "local_fs")]
+    pub fn update_code_review_session_env(
+        &mut self,
+        is_remote: bool,
+        is_wsl: bool,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        self.code_review_panel.update(ctx, |view, ctx| {
+            view.update_session_env(is_remote, is_wsl, ctx);
+        });
+    }
+
+    pub fn log_review_comment_send_status_for_active_tab(&self, app: &AppContext) {
+        self.code_review_panel.read(app, |view, ctx| {
+            view.log_review_comment_send_status_for_active_tab(ctx);
+        });
+    }
+}
+
 impl Entity for LeftPanelView {
     type Event = LeftPanelEvent;
 }
@@ -889,6 +990,7 @@ impl LeftPanelView {
                 LeftPanelAction::ConversationListView => {
                     self.active_view.get() == ToolPanelView::ConversationListView
                 }
+                LeftPanelAction::CodeReview => self.active_view.get() == ToolPanelView::CodeReview,
             };
         }
     }
@@ -1030,15 +1132,53 @@ impl LeftPanelView {
                 active_view_state::set(self, ToolPanelView::ConversationListView, ctx);
                 send_telemetry_from_ctx!(TelemetryEvent::ConversationListViewOpened, ctx);
             }
+            LeftPanelAction::CodeReview => {
+                active_view_state::set(self, ToolPanelView::CodeReview, ctx);
+            }
         }
     }
 
-    pub fn on_left_panel_visibility_changed(&self, is_now_open: bool, ctx: &mut ViewContext<Self>) {
+    pub fn on_left_panel_visibility_changed(
+        &mut self,
+        is_now_open: bool,
+        ctx: &mut ViewContext<Self>,
+    ) {
         if ToolPanelView::ConversationListView == self.active_view.get() {
             self.on_conversation_list_view_visibility_changed(is_now_open, ctx);
         }
 
         self.update_active_file_tree_subscription_state(ctx);
+        self.update_code_review_open_state(ctx);
+    }
+
+    /// Recomputes whether the embedded code review panel should be treated as
+    /// open (the code review tab is active and the tools panel is visible) and
+    /// drives its diff-loading lifecycle accordingly.
+    fn update_code_review_open_state(&mut self, ctx: &mut ViewContext<Self>) {
+        let active_pane_group = self
+            .active_pane_group
+            .as_ref()
+            .and_then(|pane_group| pane_group.upgrade(ctx));
+        let is_left_panel_open = active_pane_group
+            .as_ref()
+            .map(|pane_group| pane_group.as_ref(ctx).left_panel_open)
+            .unwrap_or(false);
+        let is_open = is_left_panel_open && self.active_view.get() == ToolPanelView::CodeReview;
+
+        // Every open/close transition (tools-tab switches, panel visibility
+        // changes, pane group changes) funnels through here, so this is the
+        // single writer that keeps the per-tab `right_panel_open` flag in sync.
+        // Tab drags/transfers read that flag to decide whether code review
+        // should reopen in the tab's new home.
+        if let Some(pane_group) = &active_pane_group {
+            pane_group.update(ctx, |pane_group, _| {
+                pane_group.right_panel_open = is_open;
+            });
+        }
+
+        self.code_review_panel.update(ctx, |view, ctx| {
+            view.set_open(is_open, ctx);
+        });
     }
 
     fn deactivate_file_tree_view_for_pane_group(
@@ -1129,21 +1269,13 @@ impl View for LeftPanelView {
                 }
                 ToolPanelView::WarpDrive => ctx.focus(&self.warp_drive_view),
                 ToolPanelView::ConversationListView => ctx.focus(&self.conversation_list_view),
+                ToolPanelView::CodeReview => ctx.focus(&self.code_review_panel),
             }
         }
     }
 
     fn render(&self, app: &AppContext) -> Box<dyn Element> {
         let appearance = Appearance::as_ref(app);
-
-        let mouse_state_handles = vec![
-            self.mouse_state_handles.project_explorer_button.clone(),
-            self.mouse_state_handles
-                .conversation_list_view_button
-                .clone(),
-            self.mouse_state_handles.global_search_button.clone(),
-            self.mouse_state_handles.warp_drive_button.clone(),
-        ];
 
         // If there is only one button in the toolbelt row,
         // there is no need to show it as it's a bit redundant.
@@ -1152,11 +1284,14 @@ impl View for LeftPanelView {
                 Flex::row()
                     .with_cross_axis_alignment(CrossAxisAlignment::Center)
                     .with_spacing(4.0)
-                    .with_children(self.toolbelt_buttons.iter().zip(&mouse_state_handles).map(
-                        |(button_config, mouse_state)| {
-                            Self::render_button(button_config, mouse_state.clone(), appearance)
-                        },
-                    ))
+                    .with_children(
+                        self.toolbelt_buttons
+                            .iter()
+                            .zip(&self.toolbelt_button_mouse_states)
+                            .map(|(button_config, mouse_state)| {
+                                Self::render_button(button_config, mouse_state.clone(), appearance)
+                            }),
+                    )
                     .with_main_axis_size(MainAxisSize::Min)
                     .finish(),
             )
@@ -1200,6 +1335,9 @@ impl View for LeftPanelView {
             .finish(),
             ToolPanelView::ConversationListView => {
                 Shrinkable::new(1.0, ChildView::new(&self.conversation_list_view).finish()).finish()
+            }
+            ToolPanelView::CodeReview => {
+                Shrinkable::new(1.0, ChildView::new(&self.code_review_panel).finish()).finish()
             }
         };
 
