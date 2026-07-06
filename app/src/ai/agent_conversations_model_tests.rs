@@ -76,6 +76,7 @@ fn create_test_task(
         is_sandbox_running: false,
         last_event_sequence: None,
         children: vec![],
+        trigger_metadata: None,
     }
 }
 

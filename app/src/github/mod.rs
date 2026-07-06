@@ -270,6 +270,8 @@ fn parse_expiry(raw: &str) -> Option<DateTime<Utc>> {
         .map(|dt| dt.with_timezone(&Utc))
 }
 
+#[cfg(feature = "github_automations")]
+pub mod automations;
 pub mod pr_review_comments;
 
 #[cfg(test)]

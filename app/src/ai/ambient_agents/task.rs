@@ -155,6 +155,11 @@ pub struct AmbientAgentTask {
     pub status_message: Option<TaskStatusMessage>,
     #[serde(default, deserialize_with = "deserialize_ambient_agent_source")]
     pub source: Option<AgentSource>,
+    /// Optional trigger metadata for automated runs (currently
+    /// `GITHUB_ACTION`-sourced automation/bugbot runs). Absent on older servers
+    /// and for non-automated sources; deserialization tolerates its absence.
+    #[serde(default)]
+    pub trigger_metadata: Option<TriggerMetadata>,
     pub session_id: Option<String>,
     pub session_link: Option<String>,
     pub creator: Option<TaskPrincipalInfo>,
@@ -485,6 +490,52 @@ pub struct TaskPrincipalInfo {
     pub creator_type: String,
     pub uid: String,
     pub display_name: Option<String>,
+}
+
+/// Trigger metadata attached to automated runs (e.g. GitHub automations and
+/// bugbot). All fields are optional so the client tolerates partial payloads.
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq, Default)]
+pub struct TriggerMetadata {
+    /// The GitHub event that triggered the run (e.g. `pull_request.opened`).
+    #[serde(default)]
+    pub event: Option<String>,
+    /// The `owner/repo` the event fired on.
+    #[serde(default)]
+    pub repo: Option<String>,
+    /// Link to the PR or issue that triggered the run, when applicable.
+    #[serde(default, alias = "prLink", alias = "pr_url", alias = "issue_link")]
+    pub link: Option<String>,
+    /// The automation that produced the run, when known.
+    #[serde(default)]
+    pub automation_name: Option<String>,
+}
+
+impl TriggerMetadata {
+    /// A single-line human-readable summary of the trigger context, e.g.
+    /// `"pull_request.opened · octo/hello"`. Returns `None` when there is
+    /// nothing meaningful to show.
+    pub fn context_line(&self) -> Option<String> {
+        let mut parts: Vec<String> = Vec::new();
+        if let Some(event) = self.event.as_deref().filter(|s| !s.is_empty()) {
+            parts.push(event.to_string());
+        }
+        if let Some(repo) = self.repo.as_deref().filter(|s| !s.is_empty()) {
+            parts.push(repo.to_string());
+        }
+        if parts.is_empty() {
+            self.automation_name
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+        } else {
+            Some(parts.join(" · "))
+        }
+    }
+
+    /// The PR/issue link, if present and non-empty.
+    pub fn link(&self) -> Option<&str> {
+        self.link.as_deref().filter(|s| !s.is_empty())
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]

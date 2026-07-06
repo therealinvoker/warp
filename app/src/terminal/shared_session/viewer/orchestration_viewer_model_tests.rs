@@ -156,6 +156,7 @@ fn make_task_with_name(
         artifacts: vec![],
         last_event_sequence: None,
         children: vec![],
+        trigger_metadata: None,
     }
 }
 

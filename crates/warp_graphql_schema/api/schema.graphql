@@ -1730,6 +1730,145 @@ type GithubConnectedOutput implements Response {
   username: String
 }
 
+"""The kind of event that triggers a GitHub automation."""
+enum GithubAutomationTriggerType {
+  PR_OPENED
+  PR_PUSHED
+  PR_MERGED
+  ISSUE_COMMENT
+  PR_REVIEW_SUBMITTED
+  WORKFLOW_RUN_COMPLETED
+  CUSTOM
+}
+
+"""The kind of action a GitHub automation performs when triggered."""
+enum GithubAutomationActionType {
+  PROMPT
+  SKILL
+}
+
+"""Trigger configuration for a GitHub automation."""
+type GithubAutomationTrigger {
+  eventType: GithubAutomationTriggerType!
+  repoFilter: String
+  branchPattern: String
+  commentPhrase: String
+}
+
+"""Action configuration for a GitHub automation."""
+type GithubAutomationAction {
+  actionType: GithubAutomationActionType!
+  prompt: String
+  skill: String
+  harness: String
+  modelId: String
+}
+
+"""A single GitHub automation record."""
+type GithubAutomation {
+  id: ID!
+  name: String!
+  enabled: Boolean!
+  trigger: GithubAutomationTrigger!
+  action: GithubAutomationAction!
+  createdAt: Time
+  updatedAt: Time
+}
+
+input ListGithubAutomationsInput {
+  workspaceUid: ID!
+}
+
+type ListGithubAutomationsOutput implements Response {
+  automations: [GithubAutomation!]!
+  """Masked provider keys configured for this workspace."""
+  providerKeys: [GithubProviderKey!]!
+  responseContext: ResponseContext!
+}
+
+union ListGithubAutomationsResult = ListGithubAutomationsOutput | UserFacingError
+
+input GithubAutomationTriggerInput {
+  eventType: GithubAutomationTriggerType!
+  repoFilter: String
+  branchPattern: String
+  commentPhrase: String
+}
+
+input GithubAutomationActionInput {
+  actionType: GithubAutomationActionType!
+  prompt: String
+  skill: String
+  harness: String
+  modelId: String
+}
+
+input UpsertGithubAutomationInput {
+  """Present when updating an existing automation; omit to create."""
+  id: ID
+  workspaceUid: ID!
+  name: String!
+  enabled: Boolean!
+  trigger: GithubAutomationTriggerInput!
+  action: GithubAutomationActionInput!
+}
+
+"""
+Result of creating or updating a GitHub automation. `hookKey` is the plaintext
+custom-webhook signing key, returned exactly once on CUSTOM-trigger creation.
+"""
+type UpsertGithubAutomationOutput implements Response {
+  automation: GithubAutomation!
+  hookKey: String
+  responseContext: ResponseContext!
+}
+
+union UpsertGithubAutomationResult = UpsertGithubAutomationOutput | UserFacingError
+
+input RemoveGithubAutomationInput {
+  workspaceUid: ID!
+  id: ID!
+}
+
+type RemoveGithubAutomationOutput implements Response {
+  success: Boolean!
+  responseContext: ResponseContext!
+}
+
+union RemoveGithubAutomationResult = RemoveGithubAutomationOutput | UserFacingError
+
+"""A workspace GitHub provider key, serialized to clients with only its masked suffix."""
+type GithubProviderKey {
+  provider: String!
+  last4: String!
+  addedAt: Time
+}
+
+input SetGithubProviderKeyInput {
+  workspaceUid: ID!
+  provider: String!
+  key: String!
+}
+
+type SetGithubProviderKeyOutput implements Response {
+  providerKey: GithubProviderKey!
+  responseContext: ResponseContext!
+}
+
+union SetGithubProviderKeyResult = SetGithubProviderKeyOutput | UserFacingError
+
+input RemoveGithubProviderKeyInput {
+  workspaceUid: ID!
+  provider: String!
+}
+
+type RemoveGithubProviderKeyOutput implements Response {
+  success: Boolean!
+  responseContext: ResponseContext!
+}
+
+union RemoveGithubProviderKeyResult = RemoveGithubProviderKeyOutput | UserFacingError
+
 type GithubInstallation {
   accountLogin: String!
   accountType: GithubAccountType
@@ -2960,6 +3099,10 @@ type RootMutation {
   createNotebook(input: CreateNotebookInput!, requestContext: RequestContext!): CreateNotebookResult!
   createSimpleIntegration(input: CreateSimpleIntegrationInput!, requestContext: RequestContext!): CreateSimpleIntegrationResult!
   createTeam(input: CreateTeamInput!, requestContext: RequestContext!): CreateTeamResult!
+  upsertGithubAutomation(input: UpsertGithubAutomationInput!, requestContext: RequestContext!): UpsertGithubAutomationResult!
+  removeGithubAutomation(input: RemoveGithubAutomationInput!, requestContext: RequestContext!): RemoveGithubAutomationResult!
+  setGithubProviderKey(input: SetGithubProviderKeyInput!, requestContext: RequestContext!): SetGithubProviderKeyResult!
+  removeGithubProviderKey(input: RemoveGithubProviderKeyInput!, requestContext: RequestContext!): RemoveGithubProviderKeyResult!
   createWorkflow(input: CreateWorkflowInput!, requestContext: RequestContext!): CreateWorkflowResult!
   deleteConversation(input: DeleteConversationInput!, requestContext: RequestContext!): DeleteConversationResult!
   deleteInviteLinkDomainRestriction(input: DeleteInviteLinkDomainRestrictionInput!, requestContext: RequestContext!): DeleteInviteLinkDomainRestrictionResult!
@@ -3096,6 +3239,7 @@ type RootQuery {
   updatedCloudObjects(input: UpdatedCloudObjectsInput!, requestContext: RequestContext!): UpdatedCloudObjectsResult!
   user(requestContext: RequestContext!): UserResult!
   userGithubInfo(requestContext: RequestContext!): UserGithubInfoResult!
+  listGithubAutomations(input: ListGithubAutomationsInput!, requestContext: RequestContext!): ListGithubAutomationsResult!
   userRepoAuthStatus(input: UserRepoAuthStatusInput!, requestContext: RequestContext!): UserRepoAuthStatusResult!
 }
 

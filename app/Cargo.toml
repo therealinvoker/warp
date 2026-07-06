@@ -982,6 +982,10 @@ file_based_mcp = []
 cursor_mcp_import = []
 mcp_governance = []
 github_integration = ["dep:github_client"]
+# GitHub automations UI + provider keys + run visibility. Layered on top of
+# github_integration. Not in `default` (matching github_integration); enable
+# with `--features github_automations`.
+github_automations = ["github_integration"]
 skill_arguments = []
 active_conversation_requires_interaction = []
 incremental_auto_reload = []

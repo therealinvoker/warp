@@ -915,6 +915,15 @@ pub enum FeatureFlag {
     /// comments, and a read-only PR review-comment overlay. Agent GitHub
     /// actions are gated separately and land after the proto fork.
     GithubIntegration,
+
+    /// Enables GitHub automations (event-driven agent runs): the automations
+    /// settings UI (list/create/edit/remove), workspace provider-key admin
+    /// management, and run visibility for `GITHUB_ACTION`-sourced runs
+    /// (trigger-context line, source badge, source filter chip). Layered on
+    /// top of `GithubIntegration`; also gated at runtime on the tier's
+    /// `githubPolicy.automationsEnabled` (visibility) and
+    /// `Team::has_admin_permissions` (writes).
+    GithubAutomations,
 }
 
 static FLAG_STATES: [AtomicBool; cardinality::<FeatureFlag>()] =

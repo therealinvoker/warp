@@ -41,6 +41,7 @@ fn task_with(
         is_sandbox_running: true,
         last_event_sequence: None,
         children: vec![],
+        trigger_metadata: None,
     }
 }
 

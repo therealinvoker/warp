@@ -12,6 +12,7 @@ use super::{
 use crate::ai::active_agent_views_model::{ActiveAgentViewsModel, ConversationOrTaskId};
 use crate::ai::agent::api::ServerConversationToken;
 use crate::ai::agent::conversation::AIConversationId;
+use crate::ai::ambient_agents::task::TriggerMetadata;
 use crate::ai::ambient_agents::{AgentSource, AmbientAgentTask, AmbientAgentTaskId};
 use crate::ai::artifacts::Artifact;
 use crate::ai::blocklist::history_model::{AIConversationMetadata, BlocklistAIHistoryModel};
@@ -103,6 +104,12 @@ pub struct AgentConversationDisplayData {
     pub environment_id: Option<String>,
     pub harness: Option<Harness>,
     pub artifacts: Vec<Artifact>,
+    /// Trigger context for automated runs (GitHub automations / bugbot). `None`
+    /// for user-initiated runs and local conversations.
+    pub trigger_metadata: Option<TriggerMetadata>,
+    /// Human-readable status message from the server, surfaced for failure-like
+    /// runs (e.g. "no provider key configured").
+    pub status_message: Option<String>,
 }
 
 /// Type of principal that created or executed a run.
@@ -521,6 +528,8 @@ pub(super) fn entry_for_task(
                 .and_then(|snapshot| snapshot.environment_id.clone()),
             harness: task_harness(task),
             artifacts: task.artifacts.clone(),
+            trigger_metadata: task.trigger_metadata.clone(),
+            status_message: task.status_message.as_ref().map(|m| m.message.clone()),
         },
         backing: AgentConversationBackingData {
             has_loaded_conversation: local_conversation_id
@@ -631,6 +640,8 @@ fn entry_for_conversation_parts(
                 .map(|metadata| Harness::from(metadata.harness))
                 .or(Some(Harness::Oz)),
             artifacts: conversation_artifacts(&metadata, history_model),
+            trigger_metadata: None,
+            status_message: None,
         },
         backing: AgentConversationBackingData {
             has_loaded_conversation,

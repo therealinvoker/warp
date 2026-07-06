@@ -637,6 +637,10 @@ impl From<GqlTier> for Tier {
             ambient_agents_policy: gql_tier.ambient_agents_policy.map(From::from),
             usage_visibility_policy: gql_tier.usage_visibility_policy.map(From::from),
             marketplace_policy: gql_tier.marketplace_policy.map(From::from),
+            // `githubPolicy` is not yet part of the workspace-metadata GraphQL
+            // fragment (it lands with the G4 SDL wiring). Until the backend
+            // serves it, this is `None`, which gates GitHub automations closed.
+            github_policy: None,
         }
     }
 }

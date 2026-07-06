@@ -92,6 +92,8 @@ mod features;
 mod features_page;
 #[cfg(feature = "github_integration")]
 pub mod github_page;
+#[cfg(feature = "github_automations")]
+pub mod github_automations;
 pub(crate) mod handoff_environment_creation_modal;
 pub mod keybindings;
 mod main_page;
@@ -252,6 +254,10 @@ pub enum SettingsSection {
     /// GitHub integration settings (connect / manage installation / disconnect).
     /// Gated on `FeatureFlag::GithubIntegration`.
     Github,
+    /// GitHub automations settings (list/create/edit/remove automations +
+    /// workspace provider keys). Gated on `FeatureFlag::GithubAutomations`,
+    /// tier `githubPolicy.automationsEnabled`, and admin permissions for writes.
+    GithubAutomations,
     BillingAndUsage,
     Appearance,
     Features,
@@ -299,6 +305,7 @@ impl Display for SettingsSection {
             SettingsSection::SharedBlocks => write!(f, "Shared blocks"),
             SettingsSection::MCPServers => write!(f, "MCP Servers"),
             SettingsSection::Github => write!(f, "GitHub"),
+            SettingsSection::GithubAutomations => write!(f, "GitHub Automations"),
             SettingsSection::Scripting => write!(f, "Scripting"),
             SettingsSection::WarpDrive => write!(f, "Warp Drive"),
             SettingsSection::WarpAgent => write!(f, "Warp Agent"),
@@ -391,6 +398,7 @@ impl FromStr for SettingsSection {
             "AI" => Ok(Self::AI),
             "MCP Servers" => Ok(Self::MCPServers),
             "GitHub" | "Github" => Ok(Self::Github),
+            "GitHub Automations" | "GithubAutomations" => Ok(Self::GithubAutomations),
             "Billing and usage" => Ok(Self::BillingAndUsage),
             "Appearance" => Ok(Self::Appearance),
             "Code" => Ok(Self::Code),
@@ -1093,6 +1101,8 @@ macro_rules! update_page {
             SettingsPageViewHandle::WarpDrive(handle) => $ctx.update_view(handle, $update),
             #[cfg(feature = "github_integration")]
             SettingsPageViewHandle::Github(handle) => $ctx.update_view(handle, $update),
+            #[cfg(feature = "github_automations")]
+            SettingsPageViewHandle::GithubAutomations(handle) => $ctx.update_view(handle, $update),
         }
     };
 }
@@ -1264,6 +1274,16 @@ impl SettingsView {
             .is_enabled()
             .then(|| ctx.add_typed_action_view(github_page::GithubSettingsPageView::new));
 
+        // GitHub automations page (gated on GithubAutomations).
+        #[cfg(feature = "github_automations")]
+        let github_automations_page_handle = FeatureFlag::GithubAutomations
+            .is_enabled()
+            .then(|| {
+                ctx.add_typed_action_view(
+                    github_automations::list_page::GithubAutomationsListPageView::new,
+                )
+            });
+
         let font_family = Appearance::as_ref(ctx).ui_font_family();
         let search_editor = ctx.add_typed_action_view(|ctx| {
             let options = SingleLineEditorOptions {
@@ -1324,6 +1344,11 @@ impl SettingsView {
             settings_pages.push(SettingsPage::new(github_page_handle));
         }
 
+        #[cfg(feature = "github_automations")]
+        if let Some(github_automations_page_handle) = github_automations_page_handle {
+            settings_pages.push(SettingsPage::new(github_automations_page_handle));
+        }
+
         // Build sidebar nav items. AI page is presented as an "Agents" umbrella
         // with subpages; the actual AI SettingsPage is hidden from direct sidebar listing.
         let mut nav_items = vec![
@@ -1380,6 +1405,20 @@ impl SettingsView {
                 .position(|item| matches!(item, SettingsNavItem::Page(SettingsSection::Teams)))
                 .unwrap_or(nav_items.len());
             nav_items.insert(teams_index, SettingsNavItem::Page(SettingsSection::Github));
+        }
+
+        // GitHub automations nav entry, placed just after GitHub (before Teams).
+        // Visibility is finalized by `should_render` on the page, which also
+        // checks the tier's `githubPolicy.automationsEnabled`.
+        if FeatureFlag::GithubAutomations.is_enabled() {
+            let insert_index = nav_items
+                .iter()
+                .position(|item| matches!(item, SettingsNavItem::Page(SettingsSection::Teams)))
+                .unwrap_or(nav_items.len());
+            nav_items.insert(
+                insert_index,
+                SettingsNavItem::Page(SettingsSection::GithubAutomations),
+            );
         }
 
         // Resolve the initial page: map internal backing-page sections to their default subpage.
@@ -2147,6 +2186,8 @@ impl SettingsView {
             SettingsPageViewHandle::WarpDrive(v) => v.as_ref(app).should_render(app),
             #[cfg(feature = "github_integration")]
             SettingsPageViewHandle::Github(v) => v.as_ref(app).should_render(app),
+            #[cfg(feature = "github_automations")]
+            SettingsPageViewHandle::GithubAutomations(v) => v.as_ref(app).should_render(app),
         }
     }
 
