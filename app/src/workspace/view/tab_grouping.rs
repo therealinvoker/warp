@@ -520,11 +520,9 @@ impl Workspace {
     /// either because its own `pinned` flag is set (ungrouped pinned tab) or
     /// because it belongs to a pinned group.
     pub(super) fn is_tab_effectively_pinned(&self, tab: &TabData) -> bool {
-        // Safety net, ensures no behavioral changes if feature flag
-        // is off and some tabs have a pinned state saved.
-        if !FeatureFlag::PinnedTabs.is_enabled() {
-            return false;
-        }
+        // Tab pinning is enabled in this fork regardless of the `PinnedTabs`
+        // feature flag, so that clicking the per-row pin control actually pins
+        // the tab and moves it to the top of its section.
         tab.pinned
             || tab
                 .group_id
@@ -558,9 +556,6 @@ impl Workspace {
     /// regardless of whether that group itself is pinned — tab pinning and
     /// group pinning are independent concepts.
     pub(super) fn pin_tab(&mut self, tab_index: usize, ctx: &mut ViewContext<Self>) {
-        if !FeatureFlag::PinnedTabs.is_enabled() {
-            return;
-        }
         let Some(tab) = self.tabs.get(tab_index) else {
             log::debug!("pin_tab: tab_index {tab_index} out of bounds");
             return;
@@ -588,9 +583,6 @@ impl Workspace {
 
     /// Unpins a pinned tab and moves it to the start of the unpinned region.
     pub(super) fn unpin_tab(&mut self, tab_index: usize, ctx: &mut ViewContext<Self>) {
-        if !FeatureFlag::PinnedTabs.is_enabled() {
-            return;
-        }
         let Some(tab) = self.tabs.get(tab_index) else {
             log::debug!("unpin_tab: tab_index {tab_index} out of bounds");
             return;

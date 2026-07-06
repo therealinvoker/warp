@@ -122,6 +122,10 @@ pub struct AIExecutionProfilesModel {
     profile_id_to_sync_id: HashMap<ClientProfileId, SyncId>,
     /// Only contains entries for non-default profiles.
     active_profiles_per_session: HashMap<EntityId, ClientProfileId>,
+    /// The most recently activated profile (the "agent" the user last used).
+    /// Tracked so a freshly created agent tab can restore the last-used agent
+    /// even when no prior agent conversation is still open. In-memory only.
+    last_active_profile_id: Option<ClientProfileId>,
 }
 
 impl AIExecutionProfilesModel {
@@ -244,6 +248,7 @@ impl AIExecutionProfilesModel {
             default_profile_state,
             profile_id_to_sync_id,
             active_profiles_per_session,
+            last_active_profile_id: None,
         };
 
         model.maybe_inherit_from_legacy_settings(ctx);
@@ -427,7 +432,17 @@ impl AIExecutionProfilesModel {
     ) {
         self.active_profiles_per_session
             .insert(terminal_view_id, profile_id);
+        // Remember the last-used profile so new agent tabs can restore it.
+        self.last_active_profile_id = Some(profile_id);
         ctx.emit(AIExecutionProfilesModelEvent::UpdatedActiveProfile { terminal_view_id });
+    }
+
+    /// The most recently activated profile (the "agent" the user last used),
+    /// if any profile has been explicitly activated this session. Used to
+    /// restore the last-used agent when creating a new agent tab with no open
+    /// agent conversation to copy from.
+    pub fn last_active_profile_id(&self) -> Option<ClientProfileId> {
+        self.last_active_profile_id
     }
 
     /// Returns a profile by its client ID.

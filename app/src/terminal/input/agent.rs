@@ -1,11 +1,10 @@
 use warp_cli::agent::Harness;
 use warp_core::settings::Setting;
-use warp_core::ui::theme::color::internal_colors;
 use warpui::elements::{
-    Align, AnchorPair, Border, ConstrainedBox, Container, CornerRadius, CrossAxisAlignment,
-    DispatchEventResult, DropTarget, Element, Empty, EventHandler, Expanded, Flex, Hoverable,
-    MainAxisSize, OffsetPositioning, OffsetType, ParentElement, PositionedElementOffsetBounds,
-    PositioningAxis, Radius, SavePosition, Stack, XAxisAnchor, YAxisAnchor,
+    AnchorPair, Border, ConstrainedBox, Container, CrossAxisAlignment, DispatchEventResult,
+    DropTarget, Element, Empty, EventHandler, Expanded, Flex, Hoverable, MainAxisSize,
+    OffsetPositioning, OffsetType, ParentElement, PositionedElementOffsetBounds, PositioningAxis,
+    SavePosition, Stack, XAxisAnchor, YAxisAnchor,
 };
 use warpui::presenter::ChildView;
 use warpui::{AppContext, SingletonEntity as _};
@@ -28,31 +27,14 @@ use crate::editor::position_id_for_cursor;
 use crate::features::FeatureFlag;
 use crate::settings::InputModeSettings;
 use crate::terminal::settings::TerminalSettings;
-use crate::terminal::view::TerminalAction;
+use crate::terminal::view::{TerminalAction, PADDING_LEFT};
 use crate::BlocklistAIHistoryModel;
 
 pub(super) const CLOUD_MODE_V2_MAX_WIDTH: f32 = 720.;
 
-const CLOUD_MODE_V2_INPUT_RADIUS: f32 = 8.;
-
 const CLOUD_MODE_V2_TOP_ROW_GAP: f32 = 10.;
 
-const CLOUD_MODE_V2_INPUT_HORIZONTAL_PADDING: f32 = 16.;
-
-const CLOUD_MODE_V2_INPUT_TOP_PADDING: f32 = 16.;
-
-const CLOUD_MODE_V2_INPUT_EDITOR_BOTTOM_PADDING: f32 = 8.;
-
-const CLOUD_MODE_V2_INPUT_BOTTOM_PADDING: f32 = 16.;
-
 const CLOUD_MODE_V2_TOP_ROW_INNER_GAP: f32 = 4.;
-
-const CLOUD_MODE_V2_INPUT_MIN_EDITOR_HEIGHT: f32 = 80.;
-
-/// Horizontal gutter applied symmetrically on both sides of the V2 cloud-mode
-/// composing UI so the floating input has matching breathing room on the left
-/// and right at narrow widths.
-const CLOUD_MODE_V2_HORIZONTAL_GUTTER: f32 = 16.;
 
 // Top padding above the attachment chips row inside the V2 input container.
 const CLOUD_MODE_V2_CHIPS_ROW_TOP_PADDING: f32 = 4.;
@@ -349,25 +331,20 @@ impl Input {
 
         let mut stack = Stack::new();
 
-        // Apply the V2 gutter symmetrically (left + right) so the floating
-        // input keeps equal breathing room on both sides as the pane shrinks.
-        // The shared `wrap_input_with_terminal_padding_and_focus_handler`
-        // helper only pads the left, so V2 inlines its own padding + focus
-        // handler instead of routing through it.
-        let centered_content = Container::new(
-            Flex::column()
-                .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
-                .with_child(
-                    Expanded::new(1., self.render_cloud_mode_v2_content(appearance, app)).finish(),
-                )
-                .finish(),
-        )
-        .with_padding_left(CLOUD_MODE_V2_HORIZONTAL_GUTTER)
-        .with_padding_right(CLOUD_MODE_V2_HORIZONTAL_GUTTER)
-        .finish();
+        // Mirror the local agent input: the compose UI spans the full pane width
+        // and docks to the bottom. An `Expanded` spacer pushes the natural-height
+        // content column to the bottom, and no horizontal gutter / max-width is
+        // applied so the input fills the width like the agent input. The left
+        // inset (terminal `PADDING_LEFT`) is applied inside the content instead.
+        let input_content = Flex::column()
+            .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
+            .with_main_axis_size(MainAxisSize::Max)
+            .with_child(Expanded::new(1., Empty::new().finish()).finish())
+            .with_child(self.render_cloud_mode_v2_content(appearance, app))
+            .finish();
 
-        let centered_content = if self.is_active_session(app) {
-            EventHandler::new(centered_content)
+        let input_content = if self.is_active_session(app) {
+            EventHandler::new(input_content)
                 .on_left_mouse_down(|ctx, _, _| {
                     ctx.dispatch_typed_action(TerminalAction::ClearSelectionsWhenShellMode);
                     ctx.dispatch_typed_action(InputAction::FocusInputBox);
@@ -376,10 +353,10 @@ impl Input {
                 })
                 .finish()
         } else {
-            centered_content
+            input_content
         };
 
-        stack.add_child(centered_content);
+        stack.add_child(input_content);
 
         if let Some(history_menu) = self.render_cloud_mode_v2_history_menu(app) {
             let prompt_position = self.prompt_save_position_id();
@@ -539,11 +516,24 @@ impl Input {
             .with_main_axis_size(MainAxisSize::Min)
             .with_spacing(CLOUD_MODE_V2_TOP_ROW_GAP);
 
-        column.add_child(self.render_cloud_mode_v2_top_row(app));
+        // Left-inset the top row so it lines up with the editor and the agent
+        // input's left inset (terminal `PADDING_LEFT`). Skip it entirely when it
+        // has no content so the column's inter-child spacing collapses.
+        if let Some(top_row) = self.render_cloud_mode_v2_top_row(app) {
+            column.add_child(
+                Container::new(top_row)
+                    .with_padding_left(*PADDING_LEFT)
+                    .finish(),
+            );
+        }
 
         if let Some(panel) = self.queued_prompts_panel.as_ref() {
             if panel.as_ref(app).should_render(app) {
-                column.add_child(ChildView::new(panel).finish());
+                column.add_child(
+                    Container::new(ChildView::new(panel).finish())
+                        .with_padding_left(*PADDING_LEFT)
+                        .finish(),
+                );
             }
         }
 
@@ -553,13 +543,7 @@ impl Input {
             column.add_child(self.render_cloud_mode_v2_input_container(appearance, app));
         }
 
-        Align::new(
-            ConstrainedBox::new(column.finish())
-                .with_max_width(CLOUD_MODE_V2_MAX_WIDTH)
-                .finish(),
-        )
-        .left()
-        .finish()
+        column.finish()
     }
 
     fn render_auth_secret_ftux_content(&self) -> Box<dyn Element> {
@@ -581,20 +565,20 @@ impl Input {
         Some(ChildView::new(view).finish())
     }
 
-    fn render_cloud_mode_v2_top_row(&self, app: &AppContext) -> Box<dyn Element> {
+    fn render_cloud_mode_v2_top_row(&self, app: &AppContext) -> Option<Box<dyn Element>> {
         let mut row = Flex::row()
             .with_main_axis_size(MainAxisSize::Min)
             .with_cross_axis_alignment(CrossAxisAlignment::Center)
             .with_spacing(CLOUD_MODE_V2_TOP_ROW_INNER_GAP);
 
+        let mut has_content = false;
+
         // Only show the host selector when a default host is configured.
         if let Some(host) = self.host_selector() {
             if host.as_ref(app).has_default_host() {
                 row.add_child(ChildView::new(host).finish());
+                has_content = true;
             }
-        }
-        if let Some(harness_selector) = self.harness_selector() {
-            row.add_child(ChildView::new(harness_selector).finish());
         }
 
         if let Some(auth_secret_selector) = self.auth_secret_selector() {
@@ -604,10 +588,17 @@ impl Input {
                 .unwrap_or(warp_cli::agent::Harness::Oz);
             if harness != warp_cli::agent::Harness::Oz && !self.should_show_auth_secret_ftux(app) {
                 row.add_child(ChildView::new(auth_secret_selector).finish());
+                has_content = true;
             }
         }
 
-        row.finish()
+        // The harness selector is now rendered in the footer's left cluster (see
+        // `render_cloud_mode_v2_footer`), so it is intentionally not added here.
+        // When neither the host nor auth-secret selectors are present the top row
+        // has no content; return `None` so the parent column drops the child (and
+        // its inter-child spacing), matching the local agent input's vertical
+        // padding.
+        has_content.then(|| row.finish())
     }
 
     fn render_cloud_mode_v2_input_container(
@@ -615,14 +606,8 @@ impl Input {
         appearance: &Appearance,
         app: &AppContext,
     ) -> Box<dyn Element> {
-        let theme = appearance.theme();
-        let background = internal_colors::fg_overlay_1(theme);
-        let border_color = internal_colors::neutral_2(theme);
-
-        let editor_with_min_height =
-            ConstrainedBox::new(self.render_input_box(/*show_vim_status=*/ false, appearance, app))
-                .with_min_height(CLOUD_MODE_V2_INPUT_MIN_EDITOR_HEIGHT)
-                .finish();
+        let terminal_spacing = TerminalSettings::as_ref(app)
+            .terminal_input_spacing(appearance.line_height_ratio(), app);
 
         let mut editor_column = Flex::column()
             .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
@@ -636,28 +621,28 @@ impl Input {
                 editor_column.add_child(
                     Container::new(chips)
                         .with_padding_top(CLOUD_MODE_V2_CHIPS_ROW_TOP_PADDING)
-                        .with_padding_left(CLOUD_MODE_V2_INPUT_HORIZONTAL_PADDING)
-                        .with_padding_right(CLOUD_MODE_V2_INPUT_HORIZONTAL_PADDING)
+                        .with_padding_left(*PADDING_LEFT)
                         .finish(),
                 );
             }
         }
 
+        // Natural (content-driven) height editor with the same top spacing as the
+        // agent input, left-inset by terminal `PADDING_LEFT`.
         editor_column.add_child(
-            Container::new(editor_with_min_height)
-                .with_padding_top(CLOUD_MODE_V2_INPUT_TOP_PADDING)
-                .with_padding_bottom(CLOUD_MODE_V2_INPUT_EDITOR_BOTTOM_PADDING)
-                .with_padding_left(CLOUD_MODE_V2_INPUT_HORIZONTAL_PADDING)
-                .with_padding_right(CLOUD_MODE_V2_INPUT_HORIZONTAL_PADDING)
+            Container::new(self.render_input_box(/*show_vim_status=*/ false, appearance, app))
+                .with_margin_top(
+                    terminal_spacing.prompt_to_editor_padding
+                        * spacing::UDI_PROMPT_BOTTOM_PADDING_FACTOR,
+                )
+                .with_padding_left(*PADDING_LEFT)
                 .finish(),
         );
 
         let editor = editor_column.finish();
 
         let footer = Container::new(ChildView::new(&self.agent_input_footer).finish())
-            .with_padding_bottom(CLOUD_MODE_V2_INPUT_BOTTOM_PADDING)
-            .with_padding_left(CLOUD_MODE_V2_INPUT_HORIZONTAL_PADDING)
-            .with_padding_right(CLOUD_MODE_V2_INPUT_HORIZONTAL_PADDING)
+            .with_padding_left(*PADDING_LEFT)
             .finish();
 
         let stacked = Flex::column()
@@ -667,13 +652,35 @@ impl Input {
             .with_child(footer)
             .finish();
 
-        Container::new(SavePosition::new(stacked, &self.prompt_save_position_id()).finish())
-            .with_background(background)
-            .with_border(Border::all(1.).with_border_color(border_color))
-            .with_corner_radius(CornerRadius::with_all(Radius::Pixels(
-                CLOUD_MODE_V2_INPUT_RADIUS,
-            )))
-            .finish()
+        // Mirror the local agent input's border/background treatment: a top
+        // border only (no card border/corner radius), transparent background
+        // unless the agent view is inline.
+        let border_color = if self.handoff_compose_state.as_ref(app).is_active() {
+            appearance.theme().ansi_fg_magenta()
+        } else if !self.ai_input_model.as_ref(app).is_ai_input_enabled()
+            && !self.suggestions_mode_model.as_ref(app).is_slash_commands()
+            && !self.slash_command_model.as_ref(app).state().is_detected_command()
+            // If NLD, don't color the border if the input is empty, because the current
+            // classification is necessarily stale (intentionally inherited from the last
+            // classification prior to clearing the input)
+            && (!self.editor.as_ref(app).is_empty(app)
+                || self.ai_input_model.as_ref(app).is_input_type_locked())
+        {
+            appearance.theme().ansi_fg_blue()
+        } else {
+            styles::default_border_color(appearance.theme())
+        };
+
+        let mut input =
+            Container::new(SavePosition::new(stacked, &self.prompt_save_position_id()).finish())
+                .with_border(Border::top(1.).with_border_color(border_color))
+                .with_padding_bottom(4.);
+
+        if self.agent_view_controller.as_ref(app).is_inline() {
+            input = input.with_background(agent_view_bg_fill(app));
+        }
+
+        input.finish()
     }
 
     pub(super) fn render_ambient_agent_status_footer(&self, app: &AppContext) -> Box<dyn Element> {

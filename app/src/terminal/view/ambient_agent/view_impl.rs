@@ -37,6 +37,7 @@ use crate::terminal::view::{
 };
 use crate::terminal::CLIAgent;
 use crate::workspace::view::cloud_agent_capacity_modal::CloudAgentCapacityModalVariant;
+use crate::workspace::WorkspaceAction;
 use crate::workspaces::user_workspaces::UserWorkspaces;
 
 const CHILD_AGENT_GITHUB_AUTH_REQUIRED_BLOCKED_ACTION: &str =
@@ -714,7 +715,24 @@ impl TerminalView {
         }
 
         // (3) Enter cloud mode from this terminal session.
-        self.enter_cloud_mode_from_session(initial_prompt, ctx);
+        //
+        // In-place cloud entry pushes a nested cloud pane onto this pane's stack (see
+        // `start_cloud_mode`). If this pane has no usable pane stack, `start_cloud_mode` would
+        // bail after logging "Pane stack not available/deallocated" and the "Cloud Agent" click
+        // would silently do nothing. Guard against that: only take the in-place path when a pane
+        // stack is actually available, and otherwise fall back to opening a dedicated cloud-agent
+        // tab (the same entry point as the "+ New" cloud agent action) so clicking "Cloud Agent"
+        // always visibly switches into the cloud-agent compose experience.
+        let can_nest_in_place = self
+            .pane_stack
+            .as_ref()
+            .and_then(|handle| handle.upgrade(ctx))
+            .is_some();
+        if can_nest_in_place {
+            self.enter_cloud_mode_from_session(initial_prompt, ctx);
+        } else {
+            ctx.dispatch_typed_action_deferred(WorkspaceAction::AddAmbientAgentTab);
+        }
     }
 
     /// Enter cloud mode from this existing session with the given initial prompt.

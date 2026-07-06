@@ -2528,6 +2528,17 @@ impl Input {
                 state.auth_secret_ftux_view = Some(ftux_view);
             }
         }
+        // Share the Input-owned harness selector handle with the footer so the V2
+        // cloud footer renders it in its left cluster. Cloning the handle keeps
+        // the `/harness` slash command (`open_v2_harness_selector`) and the
+        // open-detection (`is_v2_harness_selector_open`) in sync with the footer's
+        // rendered control.
+        if let Some(state) = ambient_agent_view_state.as_ref() {
+            let harness_selector = state.harness_selector.clone();
+            agent_input_footer.update(ctx, |footer, ctx| {
+                footer.set_harness_selector(Some(harness_selector), ctx);
+            });
+        }
         ctx.subscribe_to_view(&agent_input_footer, |me, _, event, ctx| {
             match event {
                 #[cfg(feature = "voice_input")]

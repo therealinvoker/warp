@@ -259,7 +259,6 @@ impl TabData {
             self.copy_metadata_menu_items(pane_name_target, ctx),
             self.modify_tab_menu_items(index, can_move_left, can_move_right, pane_name_target, ctx),
             self.close_tab_menu_items(index, tabs_len, ctx),
-            Self::save_config_menu_items(index),
             self.color_option_menu_items(index, terminal_colors),
         ] {
             // Skip empty sections so we don't emit a trailing separator (e.g.
@@ -357,7 +356,7 @@ impl TabData {
         let Some(conversation_id) = view.as_ref(ctx).forkable_active_conversation_id(ctx) else {
             return vec![];
         };
-        vec![MenuItemFields::new("Fork chat")
+        vec![MenuItemFields::new("Fork tab")
             .with_on_select_action(WorkspaceAction::ForkAIConversation {
                 conversation_id,
                 fork_from_exchange: None,
@@ -494,6 +493,11 @@ impl TabData {
         menu_items.append(&mut vec![MenuItemFields::new("Rename tab")
             .with_on_select_action(WorkspaceAction::RenameTab(index))
             .into_item()]);
+        menu_items.push(
+            MenuItemFields::new("Archive tab")
+                .with_on_select_action(WorkspaceAction::ArchiveTab(index))
+                .into_item(),
+        );
         if let Some(pane_name_target) = pane_name_target {
             menu_items.extend(self.pane_name_menu_items(pane_name_target, ctx));
         }
@@ -539,15 +543,6 @@ impl TabData {
     ) -> Vec<MenuItem<WorkspaceAction>> {
         // Personal fork: close-tab options removed from the tab context menu.
         vec![]
-    }
-
-    fn save_config_menu_items(index: usize) -> Vec<MenuItem<WorkspaceAction>> {
-        if !FeatureFlag::TabConfigs.is_enabled() {
-            return vec![];
-        }
-        vec![MenuItemFields::new("Save as new config")
-            .with_on_select_action(WorkspaceAction::SaveCurrentTabAsNewConfig(index))
-            .into_item()]
     }
 
     /// Pin/unpin entry for the per-tab right-click menu.

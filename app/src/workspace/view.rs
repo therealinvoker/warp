@@ -4731,18 +4731,76 @@ impl Workspace {
             Some(terminal_view.as_ref(ctx).id())
         });
 
-        // Default the new agent tab to the model of the most recently active agent conversation.
-        // Only the model is copied here (not the execution profile).
-        if let (Some(source_terminal_view_id), Some(new_terminal_view_id)) =
-            (source_terminal_view_id, new_terminal_view_id)
-        {
-            if source_terminal_view_id != new_terminal_view_id {
-                Self::copy_agent_model_to_terminal_view(
+        // Load the last-used agent into the new tab. "Agent" here means the AI
+        // execution profile (the persona-like bundle of permissions + default
+        // model) plus its selected model. When a prior agent conversation is
+        // still open we copy both from it (this also captures the effective
+        // model even if it was never explicitly re-selected). When nothing is
+        // open, we fall back to the persisted last-used profile + model so the
+        // new tab still opens on the last-used agent instead of the default.
+        if let Some(new_terminal_view_id) = new_terminal_view_id {
+            Self::apply_last_used_or_copy_agent_to_terminal_view(
+                source_terminal_view_id,
+                new_terminal_view_id,
+                ctx,
+            );
+        }
+    }
+
+    /// Load the last-used agent (execution profile + model) into a newly created
+    /// agent tab: copy from a still-open agent conversation when one exists,
+    /// otherwise fall back to the persisted last-used profile + model.
+    ///
+    /// `source_terminal_view_id` must be captured *before* the new tab is
+    /// created/activated, since activating it overwrites recency state in
+    /// `ActiveAgentViewsModel`.
+    fn apply_last_used_or_copy_agent_to_terminal_view(
+        source_terminal_view_id: Option<EntityId>,
+        new_terminal_view_id: EntityId,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        match source_terminal_view_id {
+            Some(source_terminal_view_id) if source_terminal_view_id != new_terminal_view_id => {
+                Self::copy_model_and_profile_to_terminal_view(
                     source_terminal_view_id,
                     new_terminal_view_id,
                     ctx,
                 );
             }
+            _ => {
+                Self::apply_last_used_agent_to_terminal_view(new_terminal_view_id, ctx);
+            }
+        }
+    }
+
+    /// Apply the persisted "last used agent" (execution profile + model) to a
+    /// newly created agent tab. Used when there is no still-open agent
+    /// conversation to copy the effective agent from.
+    fn apply_last_used_agent_to_terminal_view(
+        new_terminal_view_id: EntityId,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        // Restore the last-used execution profile first, so the model default
+        // derives from it before we optionally override with the last-used model.
+        let last_profile_id = AIExecutionProfilesModel::as_ref(ctx).last_active_profile_id();
+        if let Some(profile_id) = last_profile_id {
+            let profile_exists = AIExecutionProfilesModel::as_ref(ctx)
+                .get_profile_by_id(profile_id, ctx)
+                .is_some();
+            if profile_exists {
+                AIExecutionProfilesModel::handle(ctx).update(ctx, |profiles, ctx| {
+                    profiles.set_active_profile(new_terminal_view_id, profile_id, ctx);
+                });
+            }
+        }
+
+        let last_model_id = LLMPreferences::as_ref(ctx)
+            .last_used_agent_base_model()
+            .cloned();
+        if let Some(llm_id) = last_model_id {
+            LLMPreferences::handle(ctx).update(ctx, |prefs, ctx| {
+                prefs.update_preferred_agent_mode_llm(&llm_id, new_terminal_view_id, ctx);
+            });
         }
     }
 
@@ -12362,6 +12420,13 @@ impl Workspace {
             DefaultSessionModeBehavior::Apply
         ) && conversation_restoration.is_none()
             && AISettings::as_ref(ctx).default_session_mode(ctx) == DefaultSessionMode::Agent;
+        // Capture the most-recently-active agent tab before creating the new tab,
+        // since activating the new tab overwrites recency state in
+        // ActiveAgentViewsModel. Used below to default the new tab to the
+        // last-used agent.
+        let source_agent_terminal_view_id = should_enter_agent_view
+            .then(|| self.most_recently_active_agent_terminal_view_id(ctx))
+            .flatten();
         #[cfg(feature = "local_tty")]
         let is_docker_sandbox = chosen_shell
             .as_ref()
@@ -12417,25 +12482,35 @@ impl Workspace {
         let _ = is_docker_sandbox;
         // If the default session mode is Agent and AI is enabled, enter agent view
         if should_enter_agent_view {
-            self.enter_agent_view_on_active_tab(ctx);
+            // Default new tabs to the last-used agent (execution profile + model)
+            // instead of the profile/model defaults, matching the explicit
+            // "new agent tab" behavior.
+            if let Some(new_terminal_view_id) = self.enter_agent_view_on_active_tab(ctx) {
+                Self::apply_last_used_or_copy_agent_to_terminal_view(
+                    source_agent_terminal_view_id,
+                    new_terminal_view_id,
+                    ctx,
+                );
+            }
         }
     }
 
     /// Enters agent view with a new conversation on the active tab's terminal.
     ///
     /// Used after adding a new tab when the session mode should default to agent view.
-    fn enter_agent_view_on_active_tab(&self, ctx: &mut ViewContext<Self>) {
+    /// Returns the terminal view id that entered agent view, if any.
+    fn enter_agent_view_on_active_tab(&self, ctx: &mut ViewContext<Self>) -> Option<EntityId> {
         self.active_tab_pane_group().update(ctx, |pane_group, ctx| {
-            if let Some(terminal_view) = pane_group.active_session_view(ctx) {
-                terminal_view.update(ctx, |view, ctx| {
-                    view.enter_agent_view_for_new_conversation(
-                        None,
-                        AgentViewEntryOrigin::DefaultSessionMode,
-                        ctx,
-                    );
-                });
-            }
-        });
+            let terminal_view = pane_group.active_session_view(ctx)?;
+            terminal_view.update(ctx, |view, ctx| {
+                view.enter_agent_view_for_new_conversation(
+                    None,
+                    AgentViewEntryOrigin::DefaultSessionMode,
+                    ctx,
+                );
+            });
+            Some(terminal_view.as_ref(ctx).id())
+        })
     }
 
     /// Returns where a newly-opened tab should be inserted and the group it

@@ -590,6 +590,10 @@ pub struct LLMPreferences {
     custom_llms: Vec<LLMInfo>,
     /// All custom model routers, including both local and cloud-backed.
     custom_model_routers: Vec<CustomModelRouter>,
+    /// The most recently selected Agent Mode base model. Tracked so a freshly
+    /// created agent tab can restore the "last used agent" model even when no
+    /// prior agent conversation is still open to copy from. In-memory only.
+    last_used_agent_base_model: Option<LLMId>,
 }
 
 impl LLMPreferences {
@@ -655,6 +659,7 @@ impl LLMPreferences {
             base_llm_for_terminal_view,
             custom_llms,
             custom_model_routers: Vec::new(),
+            last_used_agent_base_model: None,
         };
 
         // Seed from any already-loaded local config (the async load emits
@@ -1191,6 +1196,14 @@ impl LLMPreferences {
         self.models_by_feature.agent_mode.default_llm_info()
     }
 
+    /// The most recently selected Agent Mode base model, if any has been
+    /// explicitly chosen this session. Used to restore the "last used agent"
+    /// model when creating a new agent tab with no open agent conversation to
+    /// copy from.
+    pub fn last_used_agent_base_model(&self) -> Option<&LLMId> {
+        self.last_used_agent_base_model.as_ref()
+    }
+
     /// Returns the default coding model as a fallback.
     pub fn get_default_coding_model(&self) -> &LLMInfo {
         self.models_by_feature.coding.default_llm_info()
@@ -1217,6 +1230,10 @@ impl LLMPreferences {
         terminal_view_id: EntityId,
         ctx: &mut ModelContext<Self>,
     ) {
+        // Remember the most recently chosen Agent Mode model so new agent tabs can
+        // restore the last-used agent even when no prior agent conversation is open.
+        self.last_used_agent_base_model = Some(preferred_llm_id.clone());
+
         let profile =
             AIExecutionProfilesModel::as_ref(ctx).active_profile(Some(terminal_view_id), ctx);
 

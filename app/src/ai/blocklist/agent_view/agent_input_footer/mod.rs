@@ -96,7 +96,7 @@ use crate::terminal::session_settings::{
 };
 use crate::terminal::shared_session::SharedSessionStatus;
 use crate::terminal::view::ambient_agent::{
-    AmbientAgentViewModel, ModelSelector, ModelSelectorEvent,
+    AmbientAgentViewModel, HarnessSelector, ModelSelector, ModelSelectorEvent,
 };
 use crate::terminal::view::init::OPEN_CLI_AGENT_RICH_INPUT_KEYBINDING;
 use crate::terminal::view::TerminalAction;
@@ -247,6 +247,13 @@ pub struct AgentInputFooter {
     #[cfg(feature = "voice_input")]
     cli_transcription_handle: Option<SpawnedFutureHandle>,
     v2_model_selector: Option<ViewHandle<ModelSelector>>,
+
+    /// Harness selector ("Warp ⌄") rendered in the V2 cloud footer's left
+    /// cluster. Owned by `Input`; this holds a clone of the same handle so the
+    /// `/harness` slash command and open-detection stay in sync with the footer's
+    /// rendered control. `None` until `Input` populates it via
+    /// `set_harness_selector`.
+    harness_selector: Option<ViewHandle<HarnessSelector>>,
 
     /// Pending one-shot timer that refreshes the context-window button at the
     /// prompt-cache expiry instant so the notification dot appears while idle.
@@ -871,6 +878,7 @@ impl AgentInputFooter {
             #[cfg(feature = "voice_input")]
             cli_transcription_handle: None,
             v2_model_selector,
+            harness_selector: None,
             prompt_cache_expiry_timer_handle: None,
             prompt_cache_expired: false,
             session_mode_mouse_states: Default::default(),
@@ -917,6 +925,19 @@ impl AgentInputFooter {
         }
     }
 
+    /// Populates the harness selector handle rendered in the V2 cloud footer's
+    /// left cluster. `Input` calls this with a clone of its own
+    /// `HarnessSelector` handle so the footer renders the same view that the
+    /// `/harness` slash command and open-detection operate on.
+    pub fn set_harness_selector(
+        &mut self,
+        harness_selector: Option<ViewHandle<HarnessSelector>>,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        self.harness_selector = harness_selector;
+        ctx.notify();
+    }
+
     fn should_render_cloud_mode_v2(&self, app: &AppContext) -> bool {
         FeatureFlag::CloudModeInputV2.is_enabled()
             && FeatureFlag::CloudMode.is_enabled()
@@ -943,6 +964,11 @@ impl AgentInputFooter {
             &self.session_mode_mouse_states,
             appearance,
         ));
+        // Harness selector ("Warp ⌄") sits immediately to the left of the
+        // environment selector. It shares the same handle owned by `Input`.
+        if let Some(harness_selector) = self.harness_selector.as_ref() {
+            left = left.with_child(ChildView::new(harness_selector).finish());
+        }
         if let Some(environment_selector) = self.environment_selector.as_ref() {
             left = left.with_child(ChildView::new(environment_selector).finish());
         }
@@ -951,15 +977,6 @@ impl AgentInputFooter {
             .with_main_axis_size(MainAxisSize::Min)
             .with_cross_axis_alignment(CrossAxisAlignment::Center)
             .with_spacing(CLOUD_MODE_V2_FOOTER_GAP);
-
-        // Only show the mic button when voice input is compiled in *and* the
-        // user has voice input enabled in settings, matching V1's behavior.
-        #[cfg(feature = "voice_input")]
-        if AISettings::as_ref(app).is_voice_input_enabled(app) {
-            right = right.with_child(ChildView::new(&self.mic_button).finish());
-        }
-
-        right = right.with_child(ChildView::new(&self.file_button).finish());
 
         if let Some(model_selector) = self.v2_model_selector.as_ref() {
             // Only show the model selector when the active harness has available models.
@@ -979,6 +996,15 @@ impl AgentInputFooter {
             }
         }
 
+        // Only show the mic button when voice input is compiled in *and* the
+        // user has voice input enabled in settings, matching V1's behavior.
+        #[cfg(feature = "voice_input")]
+        if AISettings::as_ref(app).is_voice_input_enabled(app) {
+            right = right.with_child(ChildView::new(&self.mic_button).finish());
+        }
+
+        right = right.with_child(ChildView::new(&self.file_button).finish());
+
         let content = Flex::row()
             .with_main_axis_size(MainAxisSize::Max)
             .with_main_axis_alignment(MainAxisAlignment::SpaceBetween)
@@ -988,7 +1014,11 @@ impl AgentInputFooter {
             .with_child(right.finish())
             .finish();
 
-        Clipped::new(content).finish()
+        // Match the local agent footer's bottom padding so the cloud compose
+        // input has identical whitespace below the footer controls.
+        Container::new(Clipped::new(content).finish())
+            .with_padding_bottom(8.0)
+            .finish()
     }
 
     fn all_display_chips(&self) -> impl Iterator<Item = &ViewHandle<DisplayChip>> {

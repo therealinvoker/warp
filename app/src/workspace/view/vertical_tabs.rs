@@ -3,8 +3,10 @@ pub mod telemetry;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
+use std::time::Duration;
 
+use instant::Instant;
 use languages::language_by_local_filename;
 use pathfinder_color::ColorU;
 use pathfinder_geometry::rect::RectF;
@@ -22,8 +24,9 @@ use warpui::elements::{
     resizable_state_handle, Border, ChildAnchor, Clipped, ClippedScrollStateHandle,
     ClippedScrollable, ConstrainedBox, Container, CornerRadius, CrossAxisAlignment,
     DispatchEventResult, DragAxis, DragBarSide, Draggable, DropShadow, DropTarget, Element, Empty,
-    EventHandler, Expanded, Fill as ElementFill, Flex, Hoverable, MainAxisAlignment, MainAxisSize,
-    MouseStateHandle, OffsetPositioning, Padding, ParentAnchor, ParentElement, ParentOffsetBounds,
+    EventHandler, Expanded, Fill as ElementFill, Flex, Hoverable, LiveElement, MainAxisAlignment,
+    MainAxisSize, MouseStateHandle, OffsetPositioning, Padding, ParentAnchor, ParentElement,
+    ParentOffsetBounds,
     PositionedElementAnchor, PositionedElementOffsetBounds, Radius, Resizable,
     ResizableStateHandle, SavePosition, ScrollTarget, ScrollToPositionMode, ScrollbarWidth,
     Shrinkable, Stack, Text,
@@ -431,7 +434,7 @@ fn render_pane_row_element(
         container_is_hovered,
     } = props;
     let is_selected = is_active_tab && is_focused;
-    let show_pin = FeatureFlag::PinnedTabs.is_enabled() && is_pinned && !container_is_hovered;
+    let show_pin = is_pinned && !container_is_hovered;
     let mut row = Hoverable::new(mouse_state, move |state| {
         // Hovered or selected rows always fully round; otherwise derive the
         // resting radius from the row's stack position.
@@ -1563,34 +1566,30 @@ fn render_new_session_button(
 }
 
 /// Quick-access row beneath the search/control bar exposing a single "+ New"
-/// action that launches a new terminal (mirroring the `+` new-session menu's
-/// new-terminal entry). The button expands to fill the full width.
+/// action that launches a new agent (mirroring the removed "New agent" entry).
+/// The button is left-justified and hugs its content at the panel's left gutter.
 fn render_new_session_buttons(
     state: &VerticalTabsPanelState,
     appearance: &Appearance,
 ) -> Box<dyn Element> {
     let theme = appearance.theme();
 
+    // Left-justified: the button hugs its content (icon + label) at the panel's left
+    // gutter instead of stretching full-width, matching the left alignment of the
+    // folder headers/rows. The outer row is `MainAxisAlignment::Start` by default, so
+    // a non-`Expanded` child sits flush left.
     let row = Flex::row()
         .with_main_axis_size(MainAxisSize::Max)
         .with_cross_axis_alignment(CrossAxisAlignment::Center)
         .with_spacing(CONTROL_BAR_SPACING)
-        .with_child(
-            Expanded::new(
-                1.,
-                render_new_session_button(
-                    "New",
-                    WarpIcon::Plus,
-                    state.new_terminal_button_mouse_state.clone(),
-                    WorkspaceAction::AddTerminalTab {
-                        hide_homepage: false,
-                    },
-                    appearance,
-                    theme,
-                ),
-            )
-            .finish(),
-        );
+        .with_child(render_new_session_button(
+            "New tab",
+            WarpIcon::Plus,
+            state.new_terminal_button_mouse_state.clone(),
+            WorkspaceAction::AddAgentTab,
+            appearance,
+            theme,
+        ));
 
     Container::new(row.finish())
         .with_padding(
@@ -2267,7 +2266,7 @@ fn render_workspace_folder_sections(
             visible_tabs,
             &other,
             OTHER_FOLDER_KEY,
-            "Other",
+            "Cloud",
             is_any_pane_dragging,
             app,
         ));
@@ -3932,36 +3931,114 @@ const PANE_LEADING_DOT_SIZE: f32 = 6.;
 /// slot width stays `VERTICAL_TABS_ICON_SIZE` to keep row titles left-aligned.
 const COMPACT_PANE_LEADING_DOT_SLOT_HEIGHT: f32 = 16.;
 
+/// Repaint cadence (~30fps) for the pulsing leading dot of actively-working rows.
+const PANE_LEADING_DOT_PULSE_REPAINT_INTERVAL: Duration = Duration::from_millis(33);
+
+/// Full duration of one pulse cycle (bright → dim → bright) for working rows.
+const PANE_LEADING_DOT_PULSE_PERIOD: Duration = Duration::from_millis(1200);
+
+/// Lowest opacity the pulse dims the dot to; it pulses between this and fully opaque.
+const PANE_LEADING_DOT_PULSE_MIN_OPACITY: f32 = 0.3;
+
+/// Monotonic epoch used to phase the leading-dot pulse. Shared across all rows so the
+/// pulses stay in sync. `instant::Instant` keeps this correct on the WASM target too.
+static PANE_LEADING_DOT_PULSE_EPOCH: LazyLock<Instant> = LazyLock::new(Instant::now);
+
+/// Current pulse opacity, a smooth sine between [`PANE_LEADING_DOT_PULSE_MIN_OPACITY`]
+/// and `1.0`. Derived from wall-clock elapsed time so every re-render (driven by the
+/// wrapping [`LiveElement`]) advances the animation.
+fn pane_leading_dot_pulse_opacity() -> f32 {
+    let period = PANE_LEADING_DOT_PULSE_PERIOD.as_secs_f32();
+    let elapsed = PANE_LEADING_DOT_PULSE_EPOCH.elapsed().as_secs_f32();
+    let progress = (elapsed / period).fract();
+    // cos goes 1 → -1 → 1 over the period; normalize to 1 → 0 → 1.
+    let normalized = ((progress * std::f32::consts::TAU).cos() + 1.0) * 0.5;
+    PANE_LEADING_DOT_PULSE_MIN_OPACITY
+        + (1.0 - PANE_LEADING_DOT_PULSE_MIN_OPACITY) * normalized
+}
+
+/// Maps a row's run status to the fill used for its leading dot. The dot color now
+/// encodes STATUS (not tab type): red for errors, accent for actively running, amber for
+/// recovering / user-blocked, and a muted/idle color for quiescent or finished runs.
+fn status_dot_fill(status: &ConversationStatus, theme: &WarpTheme, muted: WarpThemeFill) -> WarpThemeFill {
+    match status {
+        ConversationStatus::Error => WarpThemeFill::Solid(theme.ansi_fg_red()),
+        ConversationStatus::InProgress => theme.accent(),
+        ConversationStatus::TransientError | ConversationStatus::Blocked { .. } => {
+            WarpThemeFill::Solid(theme.ansi_fg_yellow())
+        }
+        ConversationStatus::Success
+        | ConversationStatus::Cancelled
+        | ConversationStatus::WaitingForEvents => muted,
+    }
+}
+
+/// Whether a row's run status is "actively working" and should therefore pulse. Both a
+/// live run (`InProgress`) and an in-flight recovery (`TransientError`, i.e. reconnecting)
+/// read as active; every other (terminal/quiescent) status renders a static dot.
+fn status_is_working(status: &ConversationStatus) -> bool {
+    matches!(
+        status,
+        ConversationStatus::InProgress | ConversationStatus::TransientError
+    )
+}
+
 /// Renders a small filled dot in place of the row's icon-with-status widget for every
-/// variant (plain terminals AND agents). The dot reuses the color the variant would have
-/// used (the `Neutral` icon color, the Oz accent, or the CLI agent's brand color) so an
-/// active/running agent still reads as a colored dot while idle rows stay muted; variants
-/// without an obvious color fall back to muted sub-text. It is centered inside a
-/// `VERTICAL_TABS_ICON_SIZE`-wide slot so row titles stay left-aligned regardless of
-/// whether a dot or a full icon is drawn. `slot_height` sizes the slot's height:
-/// expanded rows pass `VERTICAL_TABS_ICON_SIZE`; compact rows pass a shorter value
-/// so the row can be denser while the dot stays vertically centered.
+/// variant (plain terminals AND agents). The dot color encodes the row's RUN STATUS (see
+/// [`status_dot_fill`]); rows with no status (terminals, code, drive objects, ...) keep the
+/// variant's own neutral color. Actively-working rows (in progress / reconnecting) pulse
+/// their dot's opacity via a [`LiveElement`] so they read as "alive". The dot is centered
+/// inside a `VERTICAL_TABS_ICON_SIZE`-wide slot so row titles stay left-aligned regardless
+/// of whether a dot or a full icon is drawn. `slot_height` sizes the slot's height:
+/// expanded rows pass `VERTICAL_TABS_ICON_SIZE`; compact rows pass a shorter value so the
+/// row can be denser while the dot stays vertically centered.
 fn render_pane_leading_dot(
     variant: &IconWithStatusVariant,
     theme: &WarpTheme,
     slot_height: f32,
 ) -> Box<dyn Element> {
     let muted = theme.sub_text_color(theme.background());
-    let dot_color: WarpThemeFill = match variant {
-        IconWithStatusVariant::Neutral { icon_color, .. } => *icon_color,
-        IconWithStatusVariant::OzAgent { .. } => theme.accent(),
-        IconWithStatusVariant::CLIAgent { agent, .. } => agent
-            .brand_color()
-            .map(WarpThemeFill::Solid)
-            .unwrap_or(muted),
-        IconWithStatusVariant::NeutralElement { .. }
-        | IconWithStatusVariant::CustomAvatar { .. } => muted,
+    // Status-driven dot color. Agent-bearing variants map their run status to a color and
+    // decide whether to pulse; rows with no status fall back to the variant's own neutral
+    // color and never pulse.
+    let (dot_color, is_working): (WarpThemeFill, bool) = match variant {
+        IconWithStatusVariant::OzAgent { status, .. }
+        | IconWithStatusVariant::CLIAgent { status, .. }
+        | IconWithStatusVariant::CustomAvatar { status, .. } => match status.as_ref() {
+            Some(status) => (
+                status_dot_fill(status, theme, muted),
+                status_is_working(status),
+            ),
+            None => (muted, false),
+        },
+        IconWithStatusVariant::Neutral { icon_color, .. } => (*icon_color, false),
+        IconWithStatusVariant::NeutralElement { .. } => (muted, false),
     };
 
-    let dot = ConstrainedBox::new(WarpIcon::CircleFilled.to_warpui_icon(dot_color).finish())
+    let dot_at_opacity = |opacity: f32| {
+        ConstrainedBox::new(
+            WarpIcon::CircleFilled
+                .to_warpui_icon(dot_color)
+                .with_opacity(opacity)
+                .finish(),
+        )
         .with_width(PANE_LEADING_DOT_SIZE)
         .with_height(PANE_LEADING_DOT_SIZE)
-        .finish();
+        .finish()
+    };
+
+    // Working rows pulse their opacity; the LiveElement re-renders on a timer so each
+    // frame recomputes `pane_leading_dot_pulse_opacity()`. Idle rows draw a static dot.
+    // Both keep the same footprint, so row height and title alignment are unchanged.
+    let dot: Box<dyn Element> = if is_working {
+        LiveElement::new(
+            dot_at_opacity(pane_leading_dot_pulse_opacity()),
+            PANE_LEADING_DOT_PULSE_REPAINT_INTERVAL,
+        )
+        .finish()
+    } else {
+        dot_at_opacity(1.0)
+    };
 
     // Center the dot in a full-size icon slot so titles align with icon rows.
     ConstrainedBox::new(

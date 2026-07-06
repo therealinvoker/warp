@@ -127,8 +127,14 @@ fn render_segment(
 
         Container::new(
             Align::new(
-                Text::new_inline(label.clone(), appearance.ui_font_family(), font_size)
-                    .with_color(if is_selected { main_text } else { sub_text }.into())
+                Flex::row()
+                    .with_main_axis_size(MainAxisSize::Min)
+                    .with_cross_axis_alignment(CrossAxisAlignment::Center)
+                    .with_child(
+                        Text::new_inline(label.clone(), appearance.ui_font_family(), font_size)
+                            .with_color(if is_selected { main_text } else { sub_text }.into())
+                            .finish(),
+                    )
                     .finish(),
             )
             .finish(),
