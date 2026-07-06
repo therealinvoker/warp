@@ -39,6 +39,7 @@ use warpui_core::elements::{
 use warpui_core::fonts::Weight;
 use warpui_core::keymap::macros::*;
 use warpui_core::keymap::{FixedBinding, Keystroke};
+use warpui_core::platform::SystemTheme;
 use warpui_core::presenter::ChildView;
 use warpui_core::ui_components::components::{UiComponent as _, UiComponentStyles};
 use warpui_core::{
@@ -82,10 +83,12 @@ pub struct AgentOnboardingView {
     ai_access_slide: ViewHandle<AiAccessSlide>,
     third_party_slide: ViewHandle<ThirdPartySlide>,
     project_slide: ViewHandle<ProjectSlide>,
-    /// The theme applied by default now that the "Choose a theme" slide is
-    /// skipped. Resolved from the picker themes as the "Dark" theme; applied
-    /// live during onboarding and persisted on completion.
-    default_theme: WarpTheme,
+    /// Light/dark themes used while the "Choose a theme" slide is skipped and
+    /// the welcome flow follows the system appearance. Resolved from the picker
+    /// themes ("Light"/"Dark"); the OS-appropriate one is applied live during
+    /// onboarding.
+    light_theme: WarpTheme,
+    dark_theme: WarpTheme,
     skippable: bool,
     close_button: button::Button,
     no_ai_confirm_button: button::Button,
@@ -148,13 +151,19 @@ impl AgentOnboardingView {
         auth_state: OnboardingAuthState,
         ctx: &mut ViewContext<Self>,
     ) -> Self {
-        // The "Choose a theme" slide is skipped for now, so default to the Dark
-        // theme: match by display name, falling back to index 1 (Dark) then 0.
-        let default_theme = theme_picker_themes
+        // The "Choose a theme" slide is skipped for now, so the welcome flow
+        // follows the system light/dark appearance. Resolve both themes from the
+        // picker set by display name, falling back to sensible defaults.
+        let dark_theme = theme_picker_themes
             .iter()
             .find(|theme| theme.name().as_deref() == Some("Dark"))
             .cloned()
             .unwrap_or_else(|| theme_picker_themes[1].clone());
+        let light_theme = theme_picker_themes
+            .iter()
+            .find(|theme| theme.name().as_deref() == Some("Light"))
+            .cloned()
+            .unwrap_or_else(|| dark_theme.clone());
 
         let onboarding_state = ctx.add_model(|_| {
             OnboardingStateModel::new(
@@ -286,7 +295,8 @@ impl AgentOnboardingView {
             ai_access_slide,
             third_party_slide,
             project_slide,
-            default_theme,
+            light_theme,
+            dark_theme,
             skippable,
             close_button: button::Button::default(),
             no_ai_confirm_button: button::Button::default(),
@@ -337,17 +347,31 @@ impl AgentOnboardingView {
             .use_vertical_tabs
     }
 
+    /// The picker theme matching the current system appearance, so the welcome
+    /// flow renders in light or dark to match the OS.
+    fn system_appropriate_theme(&self, system_theme: SystemTheme) -> WarpTheme {
+        match system_theme {
+            SystemTheme::Light => self.light_theme.clone(),
+            SystemTheme::Dark => self.dark_theme.clone(),
+        }
+    }
+
     pub fn start_onboarding(&self, ctx: &mut ViewContext<Self>) {
         // Focus the onboarding view so key bindings (Enter, arrow keys, etc.) are routed here
         // instead of to other views (e.g. the editor).
         ctx.focus_self();
 
-        // The "Choose a theme" slide is skipped, so apply the default Dark theme
-        // live up front so every onboarding slide renders in it.
-        let default_theme = self.default_theme.clone();
+        // The "Choose a theme" slide is skipped, so the welcome flow follows the
+        // system light/dark appearance. Apply the OS-appropriate theme up front
+        // for an immediate correct render, and enable "sync with OS" so the flow
+        // keeps tracking the system appearance, including live OS changes (the
+        // app's on_os_appearance_changed handler re-derives the theme from this
+        // setting).
+        let theme = self.system_appropriate_theme(ctx.system_theme());
         Appearance::handle(ctx).update(ctx, |appearance, ctx| {
-            appearance.set_theme(default_theme, ctx);
+            appearance.set_theme(theme, ctx);
         });
+        ctx.emit(AgentOnboardingEvent::SyncWithOsToggled { enabled: true });
 
         // Preload customize-slide images so they're ready when the user reaches that slide.
         if FeatureFlag::OpenWarpNewSettingsModes.is_enabled() {
@@ -455,13 +479,10 @@ impl AgentOnboardingView {
     }
 
     fn handle_onboarding_completed(&mut self, ctx: &mut ViewContext<Self>) {
-        // The "Choose a theme" slide is skipped, so persist the default Dark
-        // theme before completing (root_view handles `ThemeSelected`).
-        let theme_name = self
-            .default_theme
-            .name()
-            .unwrap_or_else(|| "Dark".to_string());
-        ctx.emit(AgentOnboardingEvent::ThemeSelected { theme_name });
+        // The "Choose a theme" slide is skipped and the welcome flow follows the
+        // system appearance, so persist "sync with OS" (rather than a fixed
+        // theme) before completing (root_view handles `SyncWithOsToggled`).
+        ctx.emit(AgentOnboardingEvent::SyncWithOsToggled { enabled: true });
 
         let settings = self.onboarding_state.as_ref(ctx).settings();
         ctx.emit(AgentOnboardingEvent::OnboardingCompleted(settings));
