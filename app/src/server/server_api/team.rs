@@ -31,6 +31,10 @@ use warp_graphql::mutations::rename_team::{
 use warp_graphql::mutations::reset_invite_links::{
     ResetInviteLinks, ResetInviteLinksInput, ResetInviteLinksResult, ResetInviteLinksVariables,
 };
+use warp_graphql::mutations::remove_mcp_allowlist_entry::{
+    RemoveMCPAllowlistEntry, RemoveMCPAllowlistEntryInput, RemoveMCPAllowlistEntryResult,
+    RemoveMCPAllowlistEntryVariables,
+};
 use warp_graphql::mutations::send_team_invite_email::{
     SendTeamInviteEmail, SendTeamInviteEmailInput, SendTeamInviteEmailResult,
     SendTeamInviteEmailVariables,
@@ -50,6 +54,14 @@ use warp_graphql::mutations::transfer_team_ownership::{
     TransferTeamOwnership, TransferTeamOwnershipInput, TransferTeamOwnershipResult,
     TransferTeamOwnershipVariables,
 };
+use warp_graphql::mutations::update_mcp_governance_settings::{
+    UpdateMCPGovernanceSettings, UpdateMCPGovernanceSettingsInput,
+    UpdateMCPGovernanceSettingsResult, UpdateMCPGovernanceSettingsVariables,
+};
+use warp_graphql::mutations::upsert_mcp_allowlist_entry::{
+    McpAllowlistEntryInput, UpsertMCPAllowlistEntry, UpsertMCPAllowlistEntryInput,
+    UpsertMCPAllowlistEntryResult, UpsertMCPAllowlistEntryVariables,
+};
 use warp_graphql::queries::get_discoverable_teams::{
     GetDiscoverableTeams, GetDiscoverableTeamsVariables,
 };
@@ -64,7 +76,47 @@ use crate::server::graphql::{get_request_context, get_user_facing_error_message}
 use crate::server::ids::ServerId;
 use crate::workspaces::team::{DiscoverableTeam, MembershipRole};
 use crate::workspaces::user_workspaces::{CreateTeamResponse, WorkspacesMetadataWithPricing};
-use crate::workspaces::workspace::Workspace;
+use crate::workspaces::workspace::{
+    McpAllowlistEntryKind, McpGovernanceMode, Workspace, WorkspaceUid,
+};
+
+/// Marker substring for op-not-implemented failures; see
+/// [`map_unsupported_op_error`]. UIs match on this to render an inline
+/// "server does not support this yet" state instead of a generic error.
+pub const SERVER_OP_NOT_SUPPORTED: &str = "not supported by the server yet";
+
+/// The backend replies `{"data": {}}` for GraphQL ops it doesn't implement,
+/// which surfaces client-side as a decode error for the op's missing root
+/// field ("missing field ..."), or as "missing response data" when `data` is
+/// null. Map those shapes to a stable, user-facing message tagged with
+/// [`SERVER_OP_NOT_SUPPORTED`]; all other errors pass through unchanged.
+fn map_unsupported_op_error(err: anyhow::Error, op_display_name: &str) -> anyhow::Error {
+    let rendered = format!("{err:#}");
+    if rendered.contains("missing field") || rendered.contains("missing response data") {
+        anyhow!("{op_display_name} is {SERVER_OP_NOT_SUPPORTED}")
+    } else {
+        err
+    }
+}
+
+/// Partial update of a workspace's MCP governance settings. `None` fields are
+/// left unchanged by the server.
+#[derive(Clone, Debug, Default)]
+pub struct McpGovernanceSettingsUpdate {
+    pub mode: Option<McpGovernanceMode>,
+    pub allow_file_based_servers: Option<bool>,
+    pub allow_plugin_import: Option<bool>,
+}
+
+/// One allowlist entry to insert or update. The entry id is server-assigned;
+/// the server dedupes on (kind, value).
+#[derive(Clone, Debug)]
+pub struct McpAllowlistEntryUpsert {
+    pub kind: McpAllowlistEntryKind,
+    pub value: String,
+    pub pinned_version: Option<String>,
+    pub display_name: Option<String>,
+}
 
 #[cfg_attr(test, automock)]
 #[cfg_attr(not(target_family = "wasm"), async_trait)]
@@ -160,6 +212,29 @@ pub trait TeamClient: 'static + Send + Sync {
         user_uid: UserUid,
         team_uid: ServerId,
         role: MembershipRole,
+    ) -> Result<WorkspacesMetadataWithPricing>;
+
+    /// Admin-only: partially updates a workspace's MCP governance settings
+    /// (mode / file-based / plugin-import). Keyed by the WORKSPACE uid, not
+    /// the mirrored team uid.
+    async fn update_mcp_governance_settings(
+        &self,
+        workspace_uid: WorkspaceUid,
+        update: McpGovernanceSettingsUpdate,
+    ) -> Result<WorkspacesMetadataWithPricing>;
+
+    /// Admin-only: inserts or updates one MCP allowlist entry.
+    async fn upsert_mcp_allowlist_entry(
+        &self,
+        workspace_uid: WorkspaceUid,
+        entry: McpAllowlistEntryUpsert,
+    ) -> Result<WorkspacesMetadataWithPricing>;
+
+    /// Admin-only: removes one MCP allowlist entry by its server id.
+    async fn remove_mcp_allowlist_entry(
+        &self,
+        workspace_uid: WorkspaceUid,
+        entry_id: String,
     ) -> Result<WorkspacesMetadataWithPricing>;
 }
 
@@ -722,6 +797,114 @@ impl TeamClient for ServerApi {
             }
             SetTeamMemberRoleResult::Unknown => {
                 Err(anyhow!("unknown error while setting team member role"))
+            }
+        }
+    }
+
+    async fn update_mcp_governance_settings(
+        &self,
+        workspace_uid: WorkspaceUid,
+        update: McpGovernanceSettingsUpdate,
+    ) -> Result<WorkspacesMetadataWithPricing> {
+        let variables = UpdateMCPGovernanceSettingsVariables {
+            input: UpdateMCPGovernanceSettingsInput {
+                workspace_uid: String::from(workspace_uid).into(),
+                mode: update.mode.map(Into::into),
+                allow_file_based_servers: update.allow_file_based_servers,
+                allow_plugin_import: update.allow_plugin_import,
+            },
+            request_context: get_request_context(),
+        };
+
+        let operation = UpdateMCPGovernanceSettings::build(variables);
+        let result = self
+            .send_graphql_request(operation, None)
+            .await
+            .map_err(|err| map_unsupported_op_error(err, "MCP governance management"))?
+            .update_mcp_governance_settings;
+
+        match result {
+            UpdateMCPGovernanceSettingsResult::UpdateMCPGovernanceSettingsOutput(_) => {
+                // Refetch so the new settings flow through the regular
+                // workspace-metadata pipeline (policy recompute, snapshot).
+                self.workspaces_metadata().await
+            }
+            UpdateMCPGovernanceSettingsResult::UserFacingError(user_facing_error) => {
+                Err(anyhow!(get_user_facing_error_message(user_facing_error)))
+            }
+            UpdateMCPGovernanceSettingsResult::Unknown => Err(anyhow!(
+                "unknown error while updating MCP governance settings"
+            )),
+        }
+    }
+
+    async fn upsert_mcp_allowlist_entry(
+        &self,
+        workspace_uid: WorkspaceUid,
+        entry: McpAllowlistEntryUpsert,
+    ) -> Result<WorkspacesMetadataWithPricing> {
+        let variables = UpsertMCPAllowlistEntryVariables {
+            input: UpsertMCPAllowlistEntryInput {
+                workspace_uid: String::from(workspace_uid).into(),
+                entry: McpAllowlistEntryInput {
+                    kind: entry.kind.into(),
+                    value: entry.value,
+                    pinned_version: entry.pinned_version,
+                    display_name: entry.display_name,
+                },
+            },
+            request_context: get_request_context(),
+        };
+
+        let operation = UpsertMCPAllowlistEntry::build(variables);
+        let result = self
+            .send_graphql_request(operation, None)
+            .await
+            .map_err(|err| map_unsupported_op_error(err, "Allowlist entry management"))?
+            .upsert_mcp_allowlist_entry;
+
+        match result {
+            UpsertMCPAllowlistEntryResult::UpsertMCPAllowlistEntryOutput(_) => {
+                self.workspaces_metadata().await
+            }
+            UpsertMCPAllowlistEntryResult::UserFacingError(user_facing_error) => {
+                Err(anyhow!(get_user_facing_error_message(user_facing_error)))
+            }
+            UpsertMCPAllowlistEntryResult::Unknown => {
+                Err(anyhow!("unknown error while adding MCP allowlist entry"))
+            }
+        }
+    }
+
+    async fn remove_mcp_allowlist_entry(
+        &self,
+        workspace_uid: WorkspaceUid,
+        entry_id: String,
+    ) -> Result<WorkspacesMetadataWithPricing> {
+        let variables = RemoveMCPAllowlistEntryVariables {
+            input: RemoveMCPAllowlistEntryInput {
+                workspace_uid: String::from(workspace_uid).into(),
+                entry_id: entry_id.into(),
+            },
+            request_context: get_request_context(),
+        };
+
+        let operation = RemoveMCPAllowlistEntry::build(variables);
+        let result = self
+            .send_graphql_request(operation, None)
+            .await
+            .map_err(|err| map_unsupported_op_error(err, "Allowlist entry management"))?
+            .remove_mcp_allowlist_entry;
+
+        match result {
+            RemoveMCPAllowlistEntryResult::RemoveMCPAllowlistEntryOutput(_) => {
+                self.workspaces_metadata().await
+            }
+            RemoveMCPAllowlistEntryResult::UserFacingError(user_facing_error) => {
+                Err(anyhow!(get_user_facing_error_message(user_facing_error)))
+            }
+            RemoveMCPAllowlistEntryResult::Unknown => {
+                Err(anyhow!("unknown error while removing MCP allowlist entry"))
             }
         }
     }

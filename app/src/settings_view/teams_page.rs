@@ -74,10 +74,12 @@ use crate::view_components::{
 use crate::word_block_editor::{ChipEditorState, WordBlockEditorView, WordBlockEditorViewEvent};
 use crate::workspace::WorkspaceAction;
 use crate::workspaces::team::{DiscoverableTeam, MembershipRole, Team, TeamDeleteDisabledReason};
+use crate::server::server_api::team::{McpAllowlistEntryUpsert, McpGovernanceSettingsUpdate};
 use crate::workspaces::update_manager::{TeamUpdateManager, TeamUpdateManagerEvent};
 use crate::workspaces::user_workspaces::{UserWorkspaces, UserWorkspacesEvent};
 use crate::workspaces::workspace::{
-    BillingMetadata, CustomerType, DelinquencyStatus, WorkspaceSizePolicy,
+    BillingMetadata, CustomerType, DelinquencyStatus, McpAllowlistEntryKind, McpGovernanceMode,
+    McpGovernanceSettings, WorkspaceSizePolicy, WorkspaceUid,
 };
 
 const TEAM_MEMBERS_HEADER_POSITION_ID: &str = "team_settings:team_members_header";
@@ -131,6 +133,26 @@ lazy_static! {
     static ref PAST_DUE_BADGE_COLOR: ColorU = ColorU::new(254, 253, 194, 255);
     static ref UNPAID_BADGE_COLOR: ColorU = ColorU::new(255, 130, 114, 255);
     static ref DELINQUENCY_BADGE_TEXT_COLOR: ColorU = ColorU::new(0, 0, 0, 190);
+}
+
+const MCP_ALLOWLIST_ENTRY_KINDS: [McpAllowlistEntryKind; 6] = [
+    McpAllowlistEntryKind::RegistryName,
+    McpAllowlistEntryKind::GalleryTemplate,
+    McpAllowlistEntryKind::OrgMarketplaceEntry,
+    McpAllowlistEntryKind::UrlPattern,
+    McpAllowlistEntryKind::CommandPattern,
+    McpAllowlistEntryKind::CanonicalHash,
+];
+
+fn mcp_allowlist_kind_label(kind: McpAllowlistEntryKind) -> &'static str {
+    match kind {
+        McpAllowlistEntryKind::RegistryName => "Registry name",
+        McpAllowlistEntryKind::GalleryTemplate => "Gallery template",
+        McpAllowlistEntryKind::OrgMarketplaceEntry => "Org marketplace entry",
+        McpAllowlistEntryKind::UrlPattern => "URL pattern",
+        McpAllowlistEntryKind::CommandPattern => "Command pattern",
+        McpAllowlistEntryKind::CanonicalHash => "Canonical hash",
+    }
 }
 
 fn owner_state_chip_text_color(theme: &themes::theme::WarpTheme) -> ColorU {
@@ -209,6 +231,30 @@ pub enum TeamsPageAction {
         user_uid: UserUid,
         role: MembershipRole,
     },
+    SetMcpGovernanceMode {
+        workspace_uid: WorkspaceUid,
+        mode: McpGovernanceMode,
+    },
+    ToggleMcpAllowFileBasedServers {
+        workspace_uid: WorkspaceUid,
+        current_state: bool,
+    },
+    ToggleMcpAllowPluginImport {
+        workspace_uid: WorkspaceUid,
+        current_state: bool,
+    },
+    OpenMcpAllowlistKindMenu,
+    CloseMcpAllowlistKindMenu,
+    SelectMcpAllowlistKind {
+        kind: McpAllowlistEntryKind,
+    },
+    AddMcpAllowlistEntry {
+        workspace_uid: WorkspaceUid,
+    },
+    RemoveMcpAllowlistEntry {
+        workspace_uid: WorkspaceUid,
+        entry_id: String,
+    },
 }
 
 impl TeamsPageAction {
@@ -233,6 +279,11 @@ impl TeamsPageAction {
                 | ToggleTeamDiscoverabilityBeforeCreation
                 | ToggleTeamDiscoverability { .. }
                 | JoinTeamWithTeamDiscovery { .. }
+                | SetMcpGovernanceMode { .. }
+                | ToggleMcpAllowFileBasedServers { .. }
+                | ToggleMcpAllowPluginImport { .. }
+                | AddMcpAllowlistEntry { .. }
+                | RemoveMcpAllowlistEntry { .. }
         )
     }
 }
@@ -258,6 +309,11 @@ impl From<&TeamsPageAction> for LoginGatedFeature {
                 "Toggle Team Discoverability"
             }
             JoinTeamWithTeamDiscovery { .. } => "Join Team With Team Discovery",
+            SetMcpGovernanceMode { .. }
+            | ToggleMcpAllowFileBasedServers { .. }
+            | ToggleMcpAllowPluginImport { .. }
+            | AddMcpAllowlistEntry { .. }
+            | RemoveMcpAllowlistEntry { .. } => "Manage MCP Governance",
             _ => "Unknown reason",
         }
     }
@@ -306,6 +362,13 @@ struct TeamsWidgetMouseHandles {
     manage_plan_link: MouseStateHandle,
     enterprise_contact_us_link: MouseStateHandle,
     discoverable_team_toggle_state: SwitchStateHandle,
+    mcp_mode_disable_button: MouseStateHandle,
+    mcp_mode_enable_all_button: MouseStateHandle,
+    mcp_mode_allowlist_button: MouseStateHandle,
+    mcp_allow_file_based_toggle_state: SwitchStateHandle,
+    mcp_allow_plugin_import_toggle_state: SwitchStateHandle,
+    mcp_allowlist_kind_button: MouseStateHandle,
+    mcp_add_allowlist_entry_button: MouseStateHandle,
     checkbox_mouse_state: MouseStateHandle,
     admin_panel_button: MouseStateHandle,
     grow_team_warning_cta_button: MouseStateHandle,
@@ -480,6 +543,17 @@ pub struct TeamsPageView {
     checkbox_value: bool,
     member_actions_menu: ViewHandle<Menu<TeamsPageAction>>,
     open_member_actions_menu_index: Option<usize>,
+    // "MCP & marketplace policy" admin section state.
+    mcp_allowlist_value_editor: ViewHandle<EditorView>,
+    mcp_allowlist_display_name_editor: ViewHandle<EditorView>,
+    mcp_allowlist_pinned_version_editor: ViewHandle<EditorView>,
+    mcp_allowlist_entry_kind: McpAllowlistEntryKind,
+    mcp_allowlist_kind_menu: ViewHandle<Menu<TeamsPageAction>>,
+    mcp_allowlist_kind_menu_open: bool,
+    /// Inline error under the governance section. Also carries the "server
+    /// does not support this yet" degradation message.
+    mcp_governance_error: Option<String>,
+    mcp_allowlist_entry_mouse_state_handles: Vec<MouseStateHandle>,
 }
 
 impl Entity for TeamsPageView {
@@ -632,6 +706,66 @@ impl TypedActionView for TeamsPageView {
             } => {
                 self.set_team_member_role(*user_uid, *team_uid, *role, ctx);
             }
+            TeamsPageAction::SetMcpGovernanceMode {
+                workspace_uid,
+                mode,
+            } => {
+                self.update_mcp_governance_settings(
+                    *workspace_uid,
+                    McpGovernanceSettingsUpdate {
+                        mode: Some(*mode),
+                        ..Default::default()
+                    },
+                    ctx,
+                );
+            }
+            TeamsPageAction::ToggleMcpAllowFileBasedServers {
+                workspace_uid,
+                current_state,
+            } => {
+                self.update_mcp_governance_settings(
+                    *workspace_uid,
+                    McpGovernanceSettingsUpdate {
+                        allow_file_based_servers: Some(!current_state),
+                        ..Default::default()
+                    },
+                    ctx,
+                );
+            }
+            TeamsPageAction::ToggleMcpAllowPluginImport {
+                workspace_uid,
+                current_state,
+            } => {
+                self.update_mcp_governance_settings(
+                    *workspace_uid,
+                    McpGovernanceSettingsUpdate {
+                        allow_plugin_import: Some(!current_state),
+                        ..Default::default()
+                    },
+                    ctx,
+                );
+            }
+            TeamsPageAction::OpenMcpAllowlistKindMenu => {
+                self.open_mcp_allowlist_kind_menu(ctx);
+            }
+            TeamsPageAction::CloseMcpAllowlistKindMenu => {
+                self.mcp_allowlist_kind_menu_open = false;
+                ctx.notify();
+            }
+            TeamsPageAction::SelectMcpAllowlistKind { kind } => {
+                self.mcp_allowlist_entry_kind = *kind;
+                self.mcp_allowlist_kind_menu_open = false;
+                ctx.notify();
+            }
+            TeamsPageAction::AddMcpAllowlistEntry { workspace_uid } => {
+                self.add_mcp_allowlist_entry(*workspace_uid, ctx);
+            }
+            TeamsPageAction::RemoveMcpAllowlistEntry {
+                workspace_uid,
+                entry_id,
+            } => {
+                self.remove_mcp_allowlist_entry(*workspace_uid, entry_id.clone(), ctx);
+            }
         };
 
         if let Ok(event) = TelemetryEvent::try_from(action) {
@@ -695,6 +829,7 @@ impl TeamsPageView {
         ctx.observe(&user_workspaces, |me, _, ctx| {
             me.update_team_members_state(ctx);
             me.update_approved_domains_state(ctx);
+            me.update_mcp_allowlist_mouse_state_handles(ctx);
         });
         ctx.subscribe_to_model(&user_workspaces, |me, _handle, event, ctx| {
             me.handle_model_event(event, ctx);
@@ -831,6 +966,32 @@ impl TeamsPageView {
             }
         });
 
+        let mcp_allowlist_value_editor = Self::editor(
+            |me, event, ctx| me.handle_editor_event(event, ctx),
+            "Value (name, UUID, pattern, or hash)",
+            font_size,
+            ctx,
+        );
+        let mcp_allowlist_display_name_editor = Self::editor(
+            |me, event, ctx| me.handle_editor_event(event, ctx),
+            "Display name (optional)",
+            font_size,
+            ctx,
+        );
+        let mcp_allowlist_pinned_version_editor = Self::editor(
+            |me, event, ctx| me.handle_editor_event(event, ctx),
+            "Pinned version (optional)",
+            font_size,
+            ctx,
+        );
+        let mcp_allowlist_kind_menu = ctx.add_typed_action_view(|_| Menu::new().with_drop_shadow());
+        ctx.subscribe_to_view(&mcp_allowlist_kind_menu, |me, _, event, ctx| {
+            if let menu::Event::Close { .. } = event {
+                me.mcp_allowlist_kind_menu_open = false;
+                ctx.notify();
+            }
+        });
+
         let page = PageType::new_monolith(TeamsWidget::default(), None, true);
         TeamsPageView {
             page,
@@ -865,6 +1026,14 @@ impl TeamsPageView {
             checkbox_value: true,
             member_actions_menu,
             open_member_actions_menu_index: None,
+            mcp_allowlist_value_editor,
+            mcp_allowlist_display_name_editor,
+            mcp_allowlist_pinned_version_editor,
+            mcp_allowlist_entry_kind: McpAllowlistEntryKind::RegistryName,
+            mcp_allowlist_kind_menu,
+            mcp_allowlist_kind_menu_open: false,
+            mcp_governance_error: None,
+            mcp_allowlist_entry_mouse_state_handles: Vec::new(),
         }
     }
 
@@ -924,6 +1093,7 @@ impl TeamsPageView {
             UserWorkspacesEvent::TeamsChanged => {
                 self.update_team_members_state(ctx);
                 self.update_approved_domains_state(ctx);
+                self.update_mcp_allowlist_mouse_state_handles(ctx);
 
                 AIRequestUsageModel::handle(ctx).update(ctx, |usage_model, ctx| {
                     usage_model.refresh_request_usage_async(ctx);
@@ -1040,6 +1210,28 @@ impl TeamsPageView {
             }
             UserWorkspacesEvent::UpdateWorkspaceSettingsRejected(_) => {
                 // as of right now, this is only emitted on the billing & usage page
+            }
+            UserWorkspacesEvent::McpGovernanceSettingsUpdated => {
+                self.mcp_governance_error = None;
+                for editor in [
+                    &self.mcp_allowlist_value_editor,
+                    &self.mcp_allowlist_display_name_editor,
+                    &self.mcp_allowlist_pinned_version_editor,
+                ] {
+                    editor.update(ctx, |editor, ctx| {
+                        editor.clear_buffer_and_reset_undo_stack(ctx);
+                    });
+                }
+                self.update_mcp_allowlist_mouse_state_handles(ctx);
+                ctx.notify();
+            }
+            UserWorkspacesEvent::McpGovernanceSettingsUpdateRejected(err) => {
+                // Inline error rather than a toast: the message may be the
+                // "not supported by the server yet" degradation state, which
+                // should stay visible next to the controls.
+                log::error!("MCP governance update failed: {err:#}");
+                self.mcp_governance_error = Some(format!("{err:#}"));
+                ctx.notify();
             }
             UserWorkspacesEvent::AiOveragesUpdated => {
                 // AI overages update doesn't affect teams page display
@@ -1502,6 +1694,103 @@ impl TeamsPageView {
 
     fn is_valid_domain(domain: &str) -> bool {
         DOMAIN_NAME_REGEX.is_match(domain)
+    }
+
+    fn update_mcp_governance_settings(
+        &mut self,
+        workspace_uid: WorkspaceUid,
+        update: McpGovernanceSettingsUpdate,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        self.mcp_governance_error = None;
+        self.user_workspaces
+            .update(ctx, move |user_workspaces, ctx| {
+                user_workspaces.update_mcp_governance_settings(workspace_uid, update, ctx);
+            });
+        ctx.notify();
+    }
+
+    fn open_mcp_allowlist_kind_menu(&mut self, ctx: &mut ViewContext<Self>) {
+        let menu_items: Vec<MenuItem<TeamsPageAction>> = MCP_ALLOWLIST_ENTRY_KINDS
+            .iter()
+            .map(|&kind| {
+                MenuItem::Item(
+                    MenuItemFields::new(mcp_allowlist_kind_label(kind).to_string())
+                        .with_on_select_action(TeamsPageAction::SelectMcpAllowlistKind { kind }),
+                )
+            })
+            .collect();
+        self.mcp_allowlist_kind_menu.update(ctx, |menu, ctx| {
+            menu.set_items(menu_items, ctx);
+        });
+        self.mcp_allowlist_kind_menu_open = true;
+        ctx.notify();
+    }
+
+    fn add_mcp_allowlist_entry(&mut self, workspace_uid: WorkspaceUid, ctx: &mut ViewContext<Self>) {
+        let value = self
+            .mcp_allowlist_value_editor
+            .as_ref(ctx)
+            .buffer_text(ctx)
+            .trim()
+            .to_string();
+        if value.is_empty() {
+            self.mcp_governance_error = Some("Enter a value for the allowlist entry".to_string());
+            ctx.notify();
+            return;
+        }
+        let non_empty = |text: String| {
+            let trimmed = text.trim().to_string();
+            (!trimmed.is_empty()).then_some(trimmed)
+        };
+        let display_name = non_empty(
+            self.mcp_allowlist_display_name_editor
+                .as_ref(ctx)
+                .buffer_text(ctx),
+        );
+        let pinned_version = non_empty(
+            self.mcp_allowlist_pinned_version_editor
+                .as_ref(ctx)
+                .buffer_text(ctx),
+        );
+        let entry = McpAllowlistEntryUpsert {
+            kind: self.mcp_allowlist_entry_kind,
+            value,
+            pinned_version,
+            display_name,
+        };
+        self.mcp_governance_error = None;
+        self.user_workspaces
+            .update(ctx, move |user_workspaces, ctx| {
+                user_workspaces.upsert_mcp_allowlist_entry(workspace_uid, entry, ctx);
+            });
+        ctx.notify();
+    }
+
+    fn remove_mcp_allowlist_entry(
+        &mut self,
+        workspace_uid: WorkspaceUid,
+        entry_id: String,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        self.mcp_governance_error = None;
+        self.user_workspaces
+            .update(ctx, move |user_workspaces, ctx| {
+                user_workspaces.remove_mcp_allowlist_entry(workspace_uid, entry_id, ctx);
+            });
+        ctx.notify();
+    }
+
+    fn update_mcp_allowlist_mouse_state_handles(&mut self, ctx: &mut ViewContext<Self>) {
+        let entry_count = self
+            .user_workspaces
+            .as_ref(ctx)
+            .current_workspace()
+            .and_then(|workspace| workspace.settings.mcp_governance_settings.as_ref())
+            .map(|settings| settings.allowlist.len())
+            .unwrap_or(0);
+        self.mcp_allowlist_entry_mouse_state_handles =
+            (0..entry_count).map(|_| Default::default()).collect();
     }
 
     fn add_domain_restrictions(&mut self, team_uid: ServerId, ctx: &mut ViewContext<Self>) {
@@ -2293,6 +2582,23 @@ impl TeamsWidget {
             view,
             appearance,
         ));
+
+        // 5b) MCP & marketplace policy (admins on entitled tiers only)
+        if let Some(section) = self.render_mcp_governance_section(
+            team_metadata,
+            has_admin_permissions,
+            view,
+            appearance,
+            app,
+        ) {
+            main_content.add_child(
+                Container::new(render_separator(appearance))
+                    .with_padding_top(32.)
+                    .with_padding_bottom(32.)
+                    .finish(),
+            );
+            main_content.add_child(section);
+        }
 
         // 6) Optional outgrow CTA
         let pricing_info_model = view.pricing_info_model.as_ref(app);
@@ -3290,6 +3596,463 @@ impl TeamsWidget {
         Container::new(row)
             .with_padding_top(CONTENT_SEPARATION_PADDING)
             .finish()
+    }
+
+    /// The "MCP & marketplace policy" admin section: governance mode picker,
+    /// file-based / plugin-import toggles, and allowlist entry management.
+    /// `None` when the section should not render (feature flag off, tier not
+    /// entitled to governance controls, or the viewer isn't an admin).
+    fn render_mcp_governance_section(
+        &self,
+        team: &Team,
+        has_admin_permissions: bool,
+        view: &TeamsPageView,
+        appearance: &Appearance,
+        app: &AppContext,
+    ) -> Option<Box<dyn Element>> {
+        if !FeatureFlag::McpGovernance.is_enabled() {
+            return None;
+        }
+        let entitled = team
+            .billing_metadata
+            .tier
+            .marketplace_policy
+            .is_some_and(|policy| policy.governance_controls_enabled);
+        if !entitled || !has_admin_permissions {
+            return None;
+        }
+        let workspace = view.user_workspaces.as_ref(app).current_workspace()?;
+        let workspace_uid = workspace.uid;
+        // Absent settings mean the workspace is self-managed; render the
+        // matching permissive defaults.
+        let settings = workspace
+            .settings
+            .mcp_governance_settings
+            .clone()
+            .unwrap_or(McpGovernanceSettings {
+                mode: McpGovernanceMode::EnableAll,
+                allowlist: vec![],
+                allow_file_based_servers: true,
+                allow_plugin_import: true,
+            });
+
+        let mut section = Flex::column();
+        section.add_child(
+            self.render_subsection_header("MCP & marketplace policy".to_owned(), appearance),
+        );
+        section.add_child(
+            Container::new(self.render_sub_text(
+                "Control which MCP servers members of this team may install and run. \
+                 The most restrictive policy across a member's teams wins."
+                    .to_string(),
+                appearance,
+                Some(Coords::uniform(0.).right(48.)),
+            ))
+            .with_padding_top(8.)
+            .finish(),
+        );
+
+        section.add_child(
+            Container::new(self.render_mcp_mode_picker(workspace_uid, settings.mode, appearance))
+                .with_padding_top(16.)
+                .finish(),
+        );
+
+        section.add_child(self.render_mcp_governance_toggle_row(
+            "Allow file-based servers",
+            "Permit MCP servers detected from project or global config files (e.g. .mcp.json).",
+            settings.allow_file_based_servers,
+            self.mouse_state_handles
+                .mcp_allow_file_based_toggle_state
+                .clone(),
+            TeamsPageAction::ToggleMcpAllowFileBasedServers {
+                workspace_uid,
+                current_state: settings.allow_file_based_servers,
+            },
+            appearance,
+        ));
+        section.add_child(self.render_mcp_governance_toggle_row(
+            "Allow plugin import",
+            "Permit members to import MCP plugin bundles.",
+            settings.allow_plugin_import,
+            self.mouse_state_handles
+                .mcp_allow_plugin_import_toggle_state
+                .clone(),
+            TeamsPageAction::ToggleMcpAllowPluginImport {
+                workspace_uid,
+                current_state: settings.allow_plugin_import,
+            },
+            appearance,
+        ));
+
+        if settings.mode == McpGovernanceMode::Allowlist {
+            section.add_child(self.render_mcp_allowlist_editor(
+                workspace_uid,
+                &settings,
+                view,
+                appearance,
+            ));
+        }
+
+        if let Some(error) = &view.mcp_governance_error {
+            section.add_child(
+                Container::new(self.render_error_sub_text(error.clone(), appearance))
+                    .with_padding_top(12.)
+                    .finish(),
+            );
+        }
+
+        Some(section.finish())
+    }
+
+    /// Three-way DISABLE / ENABLE_ALL / ALLOWLIST picker. The selected mode
+    /// renders as an accent button; the others are outlined.
+    fn render_mcp_mode_picker(
+        &self,
+        workspace_uid: WorkspaceUid,
+        current_mode: McpGovernanceMode,
+        appearance: &Appearance,
+    ) -> Box<dyn Element> {
+        let mut row = Flex::row().with_cross_axis_alignment(CrossAxisAlignment::Center);
+        let modes = [
+            (
+                McpGovernanceMode::EnableAll,
+                "Enable all",
+                self.mouse_state_handles.mcp_mode_enable_all_button.clone(),
+            ),
+            (
+                McpGovernanceMode::Allowlist,
+                "Allowlist",
+                self.mouse_state_handles.mcp_mode_allowlist_button.clone(),
+            ),
+            (
+                McpGovernanceMode::Disable,
+                "Disable",
+                self.mouse_state_handles.mcp_mode_disable_button.clone(),
+            ),
+        ];
+        for (mode, label, handle) in modes {
+            let selected = mode == current_mode;
+            let variant = if selected {
+                ButtonVariant::Accent
+            } else {
+                ButtonVariant::Outlined
+            };
+            let mut button = appearance
+                .ui_builder()
+                .button(variant, handle)
+                .with_centered_text_label(label.to_owned())
+                .with_style(UiComponentStyles {
+                    height: Some(32.),
+                    ..Default::default()
+                });
+            if selected {
+                button = button.with_style(UiComponentStyles {
+                    font_color: Some(
+                        appearance
+                            .theme()
+                            .main_text_color(appearance.theme().accent())
+                            .into_solid(),
+                    ),
+                    ..Default::default()
+                });
+            }
+            let built = button.build();
+            let element = if selected {
+                built.finish()
+            } else {
+                built
+                    .with_cursor(Cursor::PointingHand)
+                    .on_click(move |ctx, _, _| {
+                        ctx.dispatch_typed_action(TeamsPageAction::SetMcpGovernanceMode {
+                            workspace_uid,
+                            mode,
+                        })
+                    })
+                    .finish()
+            };
+            row.add_child(Container::new(element).with_padding_right(8.).finish());
+        }
+        row.finish()
+    }
+
+    fn render_mcp_governance_toggle_row(
+        &self,
+        title: &str,
+        description: &str,
+        current_state: bool,
+        switch_handle: SwitchStateHandle,
+        action: TeamsPageAction,
+        appearance: &Appearance,
+    ) -> Box<dyn Element> {
+        let header = self.render_subsubsection_header(title.to_owned(), appearance);
+        let subtext = self.render_sub_text(
+            description.to_string(),
+            appearance,
+            Some(Coords::uniform(0.).right(48.)),
+        );
+        let text_column = Flex::column()
+            .with_child(header)
+            .with_child(Container::new(subtext).with_padding_top(8.).finish())
+            .finish();
+
+        let toggle = appearance
+            .ui_builder()
+            .switch(switch_handle)
+            .check(current_state)
+            .build()
+            .on_click(move |ctx, _, _| ctx.dispatch_typed_action(action.clone()));
+
+        let row = Flex::row()
+            .with_cross_axis_alignment(CrossAxisAlignment::Center)
+            .with_main_axis_size(MainAxisSize::Max)
+            .with_main_axis_alignment(MainAxisAlignment::SpaceBetween)
+            .with_child(Shrinkable::new(1., text_column).finish())
+            .with_child(toggle.finish())
+            .finish();
+
+        Container::new(row)
+            .with_padding_top(CONTENT_SEPARATION_PADDING)
+            .finish()
+    }
+
+    /// Allowlist entry list + add-entry form, shown while the mode is
+    /// ALLOWLIST.
+    fn render_mcp_allowlist_editor(
+        &self,
+        workspace_uid: WorkspaceUid,
+        settings: &McpGovernanceSettings,
+        view: &TeamsPageView,
+        appearance: &Appearance,
+    ) -> Box<dyn Element> {
+        let mut column = Flex::column().with_main_axis_size(MainAxisSize::Min);
+
+        column.add_child(
+            Container::new(self.render_subsubsection_header("Allowlist".to_owned(), appearance))
+                .with_padding_top(CONTENT_SEPARATION_PADDING)
+                .finish(),
+        );
+        let description = if settings.allowlist.is_empty() {
+            "No servers are allowlisted yet, so members cannot run any MCP servers. \
+             Add entries to allow specific servers."
+        } else {
+            "Members may only install and run MCP servers matching these entries."
+        };
+        column.add_child(
+            Container::new(self.render_sub_text(
+                description.to_string(),
+                appearance,
+                Some(Coords::uniform(0.).right(48.)),
+            ))
+            .with_padding_top(8.)
+            .finish(),
+        );
+
+        // Existing entries.
+        for (idx, entry) in settings.allowlist.iter().enumerate() {
+            let title = entry
+                .display_name
+                .clone()
+                .unwrap_or_else(|| entry.value.clone());
+            let mut detail = format!(
+                "{}: {}",
+                mcp_allowlist_kind_label(entry.kind),
+                entry.value
+            );
+            if let Some(pinned_version) = &entry.pinned_version {
+                detail.push_str(&format!(" (pinned to {pinned_version})"));
+            }
+            let handle = view
+                .mcp_allowlist_entry_mouse_state_handles
+                .get(idx)
+                .cloned()
+                .unwrap_or_default();
+            let entry_id = entry.id.clone();
+            let remove_action = TeamsPageAction::RemoveMcpAllowlistEntry {
+                workspace_uid,
+                entry_id,
+            };
+
+            let text_column = Flex::column()
+                .with_child(
+                    Text::new_inline(title, appearance.ui_font_family(), 13.)
+                        .with_color(appearance.theme().active_ui_text_color().into())
+                        .finish(),
+                )
+                .with_child(
+                    Text::new_inline(detail, appearance.ui_font_family(), 12.)
+                        .with_color(
+                            appearance
+                                .theme()
+                                .active_ui_text_color()
+                                .with_opacity(60)
+                                .into(),
+                        )
+                        .finish(),
+                )
+                .finish();
+
+            let theme_icon_color = appearance.theme().active_ui_text_color().with_opacity(70);
+            let remove_button = Hoverable::new(handle, move |_mouse_state| {
+                Container::new(
+                    ConstrainedBox::new(Icon::X.to_warpui_icon(theme_icon_color).finish())
+                        .with_max_height(CLOSE_BUTTON_ICON_SIZE)
+                        .with_max_width(CLOSE_BUTTON_ICON_SIZE)
+                        .finish(),
+                )
+                .with_uniform_padding(2.)
+                .finish()
+            })
+            .with_cursor(Cursor::PointingHand)
+            .on_click(move |ctx, _, _| ctx.dispatch_typed_action(remove_action.clone()))
+            .finish();
+
+            let row = Flex::row()
+                .with_cross_axis_alignment(CrossAxisAlignment::Center)
+                .with_main_axis_size(MainAxisSize::Max)
+                .with_main_axis_alignment(MainAxisAlignment::SpaceBetween)
+                .with_child(Shrinkable::new(1., text_column).finish())
+                .with_child(remove_button)
+                .finish();
+
+            let list_element =
+                Container::new(row).with_uniform_padding(SCROLLABLE_LIST_ITEM_PADDING);
+            column.add_child(if idx % 2 == 0 {
+                list_element
+                    .with_background(internal_colors::fg_overlay_1(appearance.theme()))
+                    .finish()
+            } else {
+                list_element.finish()
+            });
+        }
+
+        // Add-entry form: kind picker + value on the first row, optional
+        // metadata + Add button on the second.
+        let kind_label =
+            mcp_allowlist_kind_label(view.mcp_allowlist_entry_kind).to_string();
+        let kind_menu_open = view.mcp_allowlist_kind_menu_open;
+        let kind_button = appearance
+            .ui_builder()
+            .button(
+                ButtonVariant::Outlined,
+                self.mouse_state_handles.mcp_allowlist_kind_button.clone(),
+            )
+            .with_centered_text_label(format!("{kind_label} ▾"))
+            .with_style(UiComponentStyles {
+                height: Some(32.),
+                ..Default::default()
+            })
+            .build()
+            .with_cursor(Cursor::PointingHand)
+            .on_click(move |ctx, _, _| {
+                if kind_menu_open {
+                    ctx.dispatch_typed_action(TeamsPageAction::CloseMcpAllowlistKindMenu);
+                } else {
+                    ctx.dispatch_typed_action(TeamsPageAction::OpenMcpAllowlistKindMenu);
+                }
+            })
+            .finish();
+        let mut kind_stack = Stack::new();
+        kind_stack.add_child(kind_button);
+        if kind_menu_open {
+            kind_stack.add_positioned_overlay_child(
+                ChildView::new(&view.mcp_allowlist_kind_menu).finish(),
+                OffsetPositioning::offset_from_parent(
+                    vec2f(0., 0.),
+                    ParentOffsetBounds::WindowByPosition,
+                    ParentAnchor::BottomLeft,
+                    ChildAnchor::TopLeft,
+                ),
+            );
+        }
+
+        column.add_child(
+            Container::new(
+                Flex::row()
+                    .with_cross_axis_alignment(CrossAxisAlignment::Center)
+                    .with_main_axis_size(MainAxisSize::Max)
+                    .with_child(
+                        Container::new(kind_stack.finish())
+                            .with_padding_right(8.)
+                            .finish(),
+                    )
+                    .with_child(
+                        Shrinkable::new(
+                            1.,
+                            self.render_editor(
+                                appearance,
+                                view.mcp_allowlist_value_editor.clone(),
+                                None,
+                            ),
+                        )
+                        .finish(),
+                    )
+                    .finish(),
+            )
+            .with_padding_top(TEXT_FIELD_TOP_PADDING)
+            .finish(),
+        );
+
+        let add_button = appearance
+            .ui_builder()
+            .button(
+                ButtonVariant::Accent,
+                self.mouse_state_handles
+                    .mcp_add_allowlist_entry_button
+                    .clone(),
+            )
+            .with_centered_text_label("Add".to_owned())
+            .with_style(UiComponentStyles {
+                font_color: Some(
+                    appearance
+                        .theme()
+                        .main_text_color(appearance.theme().accent())
+                        .into_solid(),
+                ),
+                width: Some(70.),
+                height: Some(32.),
+                ..Default::default()
+            })
+            .build()
+            .with_cursor(Cursor::PointingHand)
+            .on_click(move |ctx, _, _| {
+                ctx.dispatch_typed_action(TeamsPageAction::AddMcpAllowlistEntry { workspace_uid })
+            })
+            .finish();
+
+        column.add_child(
+            Container::new(
+                Flex::row()
+                    .with_cross_axis_alignment(CrossAxisAlignment::Center)
+                    .with_main_axis_size(MainAxisSize::Max)
+                    .with_child(
+                        Shrinkable::new(
+                            1.,
+                            self.render_editor(
+                                appearance,
+                                view.mcp_allowlist_display_name_editor.clone(),
+                                None,
+                            ),
+                        )
+                        .finish(),
+                    )
+                    .with_child(
+                        Container::new(self.render_editor(
+                            appearance,
+                            view.mcp_allowlist_pinned_version_editor.clone(),
+                            Some(180.),
+                        ))
+                        .with_padding_left(8.)
+                        .finish(),
+                    )
+                    .with_child(Container::new(add_button).with_padding_left(8.).finish())
+                    .finish(),
+            )
+            .with_padding_top(TEXT_FIELD_TOP_PADDING)
+            .finish(),
+        );
+
+        column.finish()
     }
 
     fn render_leave_or_delete_team_button(

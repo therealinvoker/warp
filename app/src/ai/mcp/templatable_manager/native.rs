@@ -33,8 +33,8 @@ use crate::ai::mcp::templatable_manager::FigmaMcpStatus;
 use crate::ai::mcp::{
     logs, Author, CloudMCPServer, FileBasedMCPManager, JsonTemplate, MCPGalleryManager, MCPServer,
     MCPServerExt, MCPServerUpdate, McpGovernance, McpGovernanceEvent,
-    ParsedTemplatableMCPServerResult, ServerOrigin, StaticEnvVar, TemplatableMCPServer,
-    TemplatableMCPServerInstallation, TransportType,
+    ParsedTemplatableMCPServerResult, ServerCandidate, ServerOrigin, StaticEnvVar,
+    TemplatableMCPServer, TemplatableMCPServerInstallation, TransportType,
 };
 use crate::auth::AuthStateProvider;
 use crate::cloud_object::model::persistence::{CloudModel, CloudModelEvent};
@@ -713,14 +713,21 @@ impl TemplatableMCPServerManager {
 
     /// Whether org governance policy forbids running the server with the
     /// given installation UUID. Cheap and re-entrancy-safe: only consults
-    /// this manager's own state plus the resolved policy.
+    /// this manager's own state plus the resolved policy. Unknown UUIDs have
+    /// no fingerprint, so only the coarse mode gates apply to them.
     fn governance_blocks_installation_uuid(
         &self,
         installation_uuid: Uuid,
         app: &AppContext,
     ) -> bool {
-        !McpGovernance::current_policy(app)
-            .allows_spawn(self.governance_origin_for_uuid(installation_uuid))
+        let candidate = self
+            .locally_installed_servers
+            .get(&installation_uuid)
+            .map(ServerCandidate::from_installation);
+        !McpGovernance::current_policy(app).allows_spawn(
+            self.governance_origin_for_uuid(installation_uuid),
+            candidate.as_ref(),
+        )
     }
 
     /// Single spawn-time governance gate consulted by every spawn choke
@@ -731,7 +738,9 @@ impl TemplatableMCPServerManager {
         installation: &TemplatableMCPServerInstallation,
         ctx: &mut ModelContext<Self>,
     ) -> bool {
-        if McpGovernance::current_policy(ctx).allows_spawn(installation.origin()) {
+        let candidate = ServerCandidate::from_installation(installation);
+        if McpGovernance::current_policy(ctx).allows_spawn(installation.origin(), Some(&candidate))
+        {
             return false;
         }
         log::info!(
@@ -1196,19 +1205,30 @@ impl TemplatableMCPServerManager {
     ) -> Option<TemplatableMCPServerInstallation> {
         // All install paths (gallery installs, Cursor import, manual adds)
         // funnel through here, so this is the single install-time governance
-        // gate.
-        if !McpGovernance::current_policy(ctx).allows_new_installs() {
+        // gate. The candidate is fingerprinted with its variable values
+        // resolved, so hash/URL/command allowlist entries see the concrete
+        // config that would actually run.
+        let policy = McpGovernance::current_policy(ctx);
+        let candidate = ServerCandidate::from_installation(&TemplatableMCPServerInstallation::new(
+            Uuid::new_v4(),
+            templatable_mcp_server.clone(),
+            variable_values.clone(),
+        ));
+        if !policy.allows_install(&candidate) {
+            let toast_message = if policy.allows_new_installs() {
+                "This MCP server is not on your organization's allowlist"
+            } else {
+                "MCP server installs are managed by your organization"
+            };
             log::info!(
-                "Blocked install of MCP server '{}': disabled by organization governance policy",
+                "Blocked install of MCP server '{}': disallowed by organization governance policy",
                 templatable_mcp_server.name
             );
             send_telemetry_from_ctx!(McpGovernanceTelemetryEvent::BlockedInstall, ctx);
             if let Some(window_id) = WindowManager::as_ref(ctx).active_window() {
                 ToastStack::handle(ctx).update(ctx, |toast_stack, ctx| {
                     toast_stack.add_ephemeral_toast(
-                        DismissibleToast::error(
-                            "MCP server installs are managed by your organization".to_string(),
-                        ),
+                        DismissibleToast::error(toast_message.to_string()),
                         window_id,
                         ctx,
                     );
@@ -1856,15 +1876,19 @@ impl TemplatableMCPServerManager {
             .copied()
             .collect();
         let file_based_manager = FileBasedMCPManager::as_ref(ctx);
-        let running_servers: Vec<(Uuid, ServerOrigin)> = running_uuids
+        let running_servers: Vec<(Uuid, ServerOrigin, Option<ServerCandidate>)> = running_uuids
             .into_iter()
             .map(|uuid| {
-                let origin = if file_based_manager.get_installation_by_uuid(uuid).is_some() {
-                    ServerOrigin::FileBased
+                if let Some(installation) = file_based_manager.get_installation_by_uuid(uuid) {
+                    let candidate = ServerCandidate::from_installation(installation);
+                    (uuid, ServerOrigin::FileBased, Some(candidate))
                 } else {
-                    self.governance_origin_for_uuid(uuid)
-                };
-                (uuid, origin)
+                    let candidate = self
+                        .locally_installed_servers
+                        .get(&uuid)
+                        .map(ServerCandidate::from_installation);
+                    (uuid, self.governance_origin_for_uuid(uuid), candidate)
+                }
             })
             .collect();
 

@@ -11,10 +11,8 @@ use warpui::{App, Entity, ModelHandle, SingletonEntity as _};
 use watcher::HomeDirectoryWatcher;
 
 use super::{CloudEnvMcpScanServer, FileBasedMCPManager, FileBasedMCPManagerEvent, MCPProvider};
-use crate::ai::mcp::{
-    EffectiveMcpMode, EffectiveMcpPolicy, FileMCPWatcher, McpGovernance,
-    ParsedTemplatableMCPServerResult,
-};
+use crate::ai::mcp::governance::{EffectiveMcpMode, EffectiveMcpPolicy};
+use crate::ai::mcp::{FileMCPWatcher, McpGovernance, ParsedTemplatableMCPServerResult};
 use crate::auth::AuthStateProvider;
 use crate::settings::{AISettings, FocusedTerminalInfo};
 use crate::warp_managed_paths_watcher::{warp_managed_mcp_config_path, WarpManagedPathsWatcher};

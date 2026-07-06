@@ -294,7 +294,10 @@ impl FileBasedMCPManager {
     /// model is registered, so the first auto-start decision after startup
     /// already honors it.
     fn governance_allows_file_based_servers(app: &AppContext) -> bool {
-        McpGovernance::current_policy(app).allows_spawn(ServerOrigin::FileBased)
+        // Coarse gate only (no per-server fingerprint): the per-candidate
+        // allowlist check happens at the spawn choke point in the
+        // templatable manager.
+        McpGovernance::current_policy(app).allows_spawn(ServerOrigin::FileBased, None)
     }
 
     fn auto_start_decision(

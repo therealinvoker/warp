@@ -23,7 +23,9 @@ use crate::pricing::PricingInfoModel;
 use crate::report_error;
 use crate::server::experiments::{ServerExperiment, ServerExperiments, ServerExperimentsEvent};
 use crate::server::ids::ServerId;
-use crate::server::server_api::team::TeamClient;
+use crate::server::server_api::team::{
+    McpAllowlistEntryUpsert, McpGovernanceSettingsUpdate, TeamClient,
+};
 use crate::server::server_api::workspace::WorkspaceClient;
 #[cfg(test)]
 use crate::server::server_api::{team::MockTeamClient, workspace::MockWorkspaceClient};
@@ -70,6 +72,10 @@ pub enum UserWorkspacesEvent {
     SetTeamMemberRoleRejected(anyhow::Error),
     UpdateWorkspaceSettingsSuccess,
     UpdateWorkspaceSettingsRejected(anyhow::Error),
+    /// Any of the MCP governance admin mutations (settings update, allowlist
+    /// entry upsert/remove) succeeded; workspace metadata has been refreshed.
+    McpGovernanceSettingsUpdated,
+    McpGovernanceSettingsUpdateRejected(anyhow::Error),
     AiOveragesUpdated,
     PurchaseAddonCreditsSuccess,
     PurchaseAddonCreditsRejected(anyhow::Error),
@@ -1123,6 +1129,80 @@ impl UserWorkspaces {
         let _ = ctx.spawn(
             async move { team_client.join_team_with_team_discovery(team_uid).await },
             Self::on_join_team_with_team_discovery,
+        );
+    }
+
+    fn on_mcp_governance_mutation(
+        &mut self,
+        result: Result<WorkspacesMetadataWithPricing>,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        match result {
+            Err(err) => ctx.emit(UserWorkspacesEvent::McpGovernanceSettingsUpdateRejected(
+                err,
+            )),
+            Ok(result) => {
+                // The refreshed metadata flows through the regular pipeline,
+                // which also triggers `TeamsChanged` and thereby the
+                // effective-MCP-policy recompute + SQLite snapshot.
+                self.on_workspaces_updated(Ok(result), ctx);
+                ctx.emit(UserWorkspacesEvent::McpGovernanceSettingsUpdated);
+            }
+        };
+        ctx.notify();
+    }
+
+    /// Admin-only partial update of the workspace's MCP governance settings.
+    pub fn update_mcp_governance_settings(
+        &mut self,
+        workspace_uid: WorkspaceUid,
+        update: McpGovernanceSettingsUpdate,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        let team_client = self.team_client.clone();
+        let _ = ctx.spawn(
+            async move {
+                team_client
+                    .update_mcp_governance_settings(workspace_uid, update)
+                    .await
+            },
+            Self::on_mcp_governance_mutation,
+        );
+    }
+
+    /// Admin-only insert-or-update of one MCP allowlist entry.
+    pub fn upsert_mcp_allowlist_entry(
+        &mut self,
+        workspace_uid: WorkspaceUid,
+        entry: McpAllowlistEntryUpsert,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        let team_client = self.team_client.clone();
+        let _ = ctx.spawn(
+            async move {
+                team_client
+                    .upsert_mcp_allowlist_entry(workspace_uid, entry)
+                    .await
+            },
+            Self::on_mcp_governance_mutation,
+        );
+    }
+
+    /// Admin-only removal of one MCP allowlist entry.
+    pub fn remove_mcp_allowlist_entry(
+        &mut self,
+        workspace_uid: WorkspaceUid,
+        entry_id: String,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        let team_client = self.team_client.clone();
+        let _ = ctx.spawn(
+            async move {
+                team_client
+                    .remove_mcp_allowlist_entry(workspace_uid, entry_id)
+                    .await
+            },
+            Self::on_mcp_governance_mutation,
         );
     }
 

@@ -37,7 +37,7 @@ use crate::ai::mcp::{
 };
 use crate::ai::mcp::{
     logs, FileBasedMCPManager, MCPGalleryManager, MCPProvider, MCPServerUpdate, McpGovernance,
-    McpGovernanceEvent, ServerOrigin, TemplatableMCPServerInstallation,
+    McpGovernanceEvent, ServerCandidate, ServerOrigin, TemplatableMCPServerInstallation,
 };
 use crate::appearance::Appearance;
 use crate::cloud_object::model::persistence::{CloudModel, CloudModelEvent};
@@ -398,8 +398,11 @@ impl MCPServersListPageView {
         let item_id = ServerCardItemId::TemplatableMCP(template_uuid);
         let title_chip_text = Self::get_title_chip_text(item_id, template_uuid, ctx);
         // Uninstalled templates are install affordances, so lock them when
-        // org governance forbids new installs.
-        let server_card_status = if McpGovernance::current_policy(ctx).allows_new_installs() {
+        // org governance forbids installing this candidate (kill switch, or
+        // not on the allowlist).
+        let server_card_status = if McpGovernance::current_policy(ctx)
+            .allows_install(&ServerCandidate::from_template(template))
+        {
             ServerCardStatus::AvailableToSave
         } else {
             ServerCardStatus::Locked
@@ -432,7 +435,9 @@ impl MCPServersListPageView {
         let installation_uuid = installation.uuid();
         let item_id = ServerCardItemId::TemplatableMCPInstallation(installation_uuid);
         let uses_oauth = Self::should_show_oauth_components(item_id, ctx);
-        let locked = !McpGovernance::current_policy(ctx).allows_spawn(installation.origin());
+        let candidate = ServerCandidate::from_installation(installation);
+        let locked = !McpGovernance::current_policy(ctx)
+            .allows_spawn(installation.origin(), Some(&candidate));
         let server_card_status = if locked {
             ServerCardStatus::Locked
         } else {
@@ -523,17 +528,22 @@ impl MCPServersListPageView {
         let gallery_items = gallery_manager.as_ref(ctx).get_gallery();
 
         // Gallery cards are install affordances, so lock them when org
-        // governance forbids new installs.
-        let gallery_card_status = if McpGovernance::current_policy(ctx).allows_new_installs() {
-            ServerCardStatus::AvailableToSave
-        } else {
-            ServerCardStatus::Locked
-        };
+        // governance forbids installing that particular item (kill switch,
+        // or not on the allowlist).
+        let policy = McpGovernance::current_policy(ctx);
 
         gallery_items
             .into_iter()
             .map(|gallery_item| {
                 let item_id = ServerCardItemId::GalleryMCP(gallery_item.uuid());
+                let allowed = TemplatableMCPServer::try_from(gallery_item.clone())
+                    .map(|template| policy.allows_install(&ServerCandidate::from_template(&template)))
+                    .unwrap_or_else(|_| policy.allows_new_installs());
+                let gallery_card_status = if allowed {
+                    ServerCardStatus::AvailableToSave
+                } else {
+                    ServerCardStatus::Locked
+                };
                 (
                     item_id,
                     ctx.add_typed_action_view(move |_ctx| {
@@ -1691,13 +1701,16 @@ impl MCPServersListPageView {
         let uuid = installation.uuid();
 
         // File-based servers stay listed for visibility but are locked (no
-        // start affordance) when org governance disallows them.
-        let file_based_card_status =
-            if McpGovernance::current_policy(ctx).allows_spawn(ServerOrigin::FileBased) {
-                ServerCardStatus::AvailableToSave
-            } else {
-                ServerCardStatus::Locked
-            };
+        // start affordance) when org governance disallows them, either
+        // wholesale or because they're not on the allowlist.
+        let candidate = ServerCandidate::from_installation(installation);
+        let file_based_card_status = if McpGovernance::current_policy(ctx)
+            .allows_spawn(ServerOrigin::FileBased, Some(&candidate))
+        {
+            ServerCardStatus::AvailableToSave
+        } else {
+            ServerCardStatus::Locked
+        };
 
         // Creates a template card for each (provider, uninstalled server) pair.
         for provider in MCPProvider::iter() {
@@ -1736,7 +1749,9 @@ impl MCPServersListPageView {
         let uuid = installation.uuid();
         let item_id = ServerCardItemId::FileBasedMCP(uuid);
         let uses_oauth = Self::should_show_oauth_components(item_id, ctx);
-        let locked = !McpGovernance::current_policy(ctx).allows_spawn(ServerOrigin::FileBased);
+        let candidate = ServerCandidate::from_installation(installation);
+        let locked = !McpGovernance::current_policy(ctx)
+            .allows_spawn(ServerOrigin::FileBased, Some(&candidate));
         let server_card_status = if locked {
             ServerCardStatus::Locked
         } else {

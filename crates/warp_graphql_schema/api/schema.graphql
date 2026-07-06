@@ -2340,6 +2340,17 @@ enum McpAllowlistEntryKind {
   URL_PATTERN
 }
 
+"""
+Input mirror of McpAllowlistEntry for UpsertMCPAllowlistEntry. The entry id
+is server-assigned; upserts dedupe on (kind, value).
+"""
+input McpAllowlistEntryInput {
+  displayName: String
+  kind: McpAllowlistEntryKind!
+  pinnedVersion: String
+  value: String!
+}
+
 enum McpGovernanceMode {
   ALLOWLIST
   DISABLE
@@ -2356,6 +2367,50 @@ type McpGovernanceSettings {
   allowlist: [McpAllowlistEntry!]!
   mode: McpGovernanceMode!
 }
+
+"""
+Admin/owner-only update of a workspace's MCP governance override. Omitted
+(null) fields are left unchanged.
+"""
+input UpdateMCPGovernanceSettingsInput {
+  allowFileBasedServers: Boolean
+  allowPluginImport: Boolean
+  mode: McpGovernanceMode
+  workspaceUid: ID!
+}
+
+type UpdateMCPGovernanceSettingsOutput implements Response {
+  responseContext: ResponseContext!
+  settings: McpGovernanceSettings!
+}
+
+union UpdateMCPGovernanceSettingsResult = UpdateMCPGovernanceSettingsOutput | UserFacingError
+
+"""Admin/owner-only insert-or-update of one MCP allowlist entry."""
+input UpsertMCPAllowlistEntryInput {
+  entry: McpAllowlistEntryInput!
+  workspaceUid: ID!
+}
+
+type UpsertMCPAllowlistEntryOutput implements Response {
+  responseContext: ResponseContext!
+  settings: McpGovernanceSettings!
+}
+
+union UpsertMCPAllowlistEntryResult = UpsertMCPAllowlistEntryOutput | UserFacingError
+
+"""Admin/owner-only removal of one MCP allowlist entry by id."""
+input RemoveMCPAllowlistEntryInput {
+  entryId: ID!
+  workspaceUid: ID!
+}
+
+type RemoveMCPAllowlistEntryOutput implements Response {
+  responseContext: ResponseContext!
+  settings: McpGovernanceSettings!
+}
+
+union RemoveMCPAllowlistEntryResult = RemoveMCPAllowlistEntryOutput | UserFacingError
 
 type MemberSpendLimit {
   maxMonthlySpendCents: Int!
@@ -2993,6 +3048,7 @@ type RootMutation {
   The generic API for recording an action (EXECUTED, OPENED, etc.) on some object.
   """
   recordObjectAction(input: RecordObjectActionInput!, requestContext: RequestContext!): RecordObjectActionResult!
+  removeMCPAllowlistEntry(input: RemoveMCPAllowlistEntryInput!, requestContext: RequestContext!): RemoveMCPAllowlistEntryResult!
   removeObjectGuest(input: RemoveObjectGuestInput!, requestContext: RequestContext!): RemoveObjectGuestResult!
   removeObjectLinkPermissions(input: RemoveObjectLinkPermissionsInput!, requestContext: RequestContext!): RemoveObjectLinkPermissionsResult!
 
@@ -3026,6 +3082,7 @@ type RootMutation {
   updateFolder(input: UpdateFolderInput!, requestContext: RequestContext!): UpdateFolderResult!
   updateGenericStringObject(input: UpdateGenericStringObjectInput!, requestContext: RequestContext!): UpdateGenericStringObjectResult!
   updateManagedSecret(input: UpdateManagedSecretInput!, requestContext: RequestContext!): UpdateManagedSecretResult!
+  updateMCPGovernanceSettings(input: UpdateMCPGovernanceSettingsInput!, requestContext: RequestContext!): UpdateMCPGovernanceSettingsResult!
   updateMerkleTree(input: UpdateMerkleTreeInput!, requestContext: RequestContext!): UpdateMerkleTreeResult!
   updateNotebook(input: UpdateNotebookInput!, requestContext: RequestContext!): UpdateNotebookResult!
   updateObjectGuests(input: UpdateObjectGuestsInput!, requestContext: RequestContext!): UpdateObjectGuestsResult!
@@ -3035,6 +3092,7 @@ type RootMutation {
 
   """This is the public API for updating workspace settings."""
   updateWorkspaceSettings(input: UpdateWorkspaceSettingsInput!, requestContext: RequestContext!): UpdateWorkspaceSettingsResult!
+  upsertMCPAllowlistEntry(input: UpsertMCPAllowlistEntryInput!, requestContext: RequestContext!): UpsertMCPAllowlistEntryResult!
 }
 
 type RootQuery {

@@ -51,7 +51,7 @@ cfg_if::cfg_if! {
 pub mod gallery;
 pub use gallery::MCPGalleryManager;
 pub mod governance;
-pub use governance::{EffectiveMcpMode, EffectiveMcpPolicy, McpGovernance, McpGovernanceEvent};
+pub use governance::{McpGovernance, McpGovernanceEvent, ServerCandidate};
 pub mod telemetry;
 pub mod templatable;
 #[cfg(not(target_family = "wasm"))]

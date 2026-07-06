@@ -519,6 +519,34 @@ impl From<GqlMcpGovernanceMode> for McpGovernanceMode {
     }
 }
 
+/// Reverse conversion for mutation inputs (admin governance UI). Only the
+/// known modes exist app-side, so this is total.
+impl From<McpGovernanceMode> for GqlMcpGovernanceMode {
+    fn from(mode: McpGovernanceMode) -> GqlMcpGovernanceMode {
+        match mode {
+            McpGovernanceMode::Disable => GqlMcpGovernanceMode::Disable,
+            McpGovernanceMode::EnableAll => GqlMcpGovernanceMode::EnableAll,
+            McpGovernanceMode::Allowlist => GqlMcpGovernanceMode::Allowlist,
+        }
+    }
+}
+
+/// Reverse conversion for mutation inputs (admin allowlist management).
+impl From<McpAllowlistEntryKind> for GqlMcpAllowlistEntryKind {
+    fn from(kind: McpAllowlistEntryKind) -> GqlMcpAllowlistEntryKind {
+        match kind {
+            McpAllowlistEntryKind::RegistryName => GqlMcpAllowlistEntryKind::RegistryName,
+            McpAllowlistEntryKind::GalleryTemplate => GqlMcpAllowlistEntryKind::GalleryTemplate,
+            McpAllowlistEntryKind::OrgMarketplaceEntry => {
+                GqlMcpAllowlistEntryKind::OrgMarketplaceEntry
+            }
+            McpAllowlistEntryKind::UrlPattern => GqlMcpAllowlistEntryKind::UrlPattern,
+            McpAllowlistEntryKind::CommandPattern => GqlMcpAllowlistEntryKind::CommandPattern,
+            McpAllowlistEntryKind::CanonicalHash => GqlMcpAllowlistEntryKind::CanonicalHash,
+        }
+    }
+}
+
 /// Converts an allowlist entry kind; returns `None` (drop the entry) for
 /// kinds this client doesn't understand. An unknown kind can never match a
 /// local server candidate, so dropping it is equivalent and restrictive-safe.

@@ -13,8 +13,8 @@ use warpui::{
 use crate::ai::mcp::gallery::MCPGalleryManager;
 use crate::ai::mcp::templatable_installation::VariableValue;
 use crate::ai::mcp::{
-    home_config_file_path, FileBasedMCPManager, MCPProvider, McpGovernance, TemplatableMCPServer,
-    TemplatableMCPServerInstallation, TemplatableMCPServerManager,
+    home_config_file_path, FileBasedMCPManager, MCPProvider, McpGovernance, ServerCandidate,
+    TemplatableMCPServer, TemplatableMCPServerInstallation, TemplatableMCPServerManager,
 };
 use crate::appearance::Appearance;
 use crate::cloud_object::Space;
@@ -264,8 +264,16 @@ impl MCPServersSettingsPageView {
         TemplatableMCPServerManager::handle(ctx).update(ctx, |templatable_manager, ctx| {
             // Don't create the cloud template when org governance will block
             // the install anyway; `install_from_template` below surfaces the
-            // "managed by your organization" error and returns `None`.
-            let installs_allowed = McpGovernance::current_policy(ctx).allows_new_installs();
+            // "managed by your organization" error and returns `None`. The
+            // candidate is fingerprinted with its variable values resolved so
+            // allowlist entries see the concrete config.
+            let installs_allowed = McpGovernance::current_policy(ctx).allows_install(
+                &ServerCandidate::from_installation(&TemplatableMCPServerInstallation::new(
+                    Uuid::new_v4(),
+                    templatable_mcp_server.clone(),
+                    variable_values.clone(),
+                )),
+            );
             if installs_allowed
                 && templatable_manager
                     .get_cloud_server(templatable_mcp_server.uuid, ctx)
