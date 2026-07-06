@@ -24,10 +24,6 @@ use crate::ai::ambient_agents::github_auth_notifier::{GitHubAuthEvent, GitHubAut
 use crate::server::server_api::integrations::IntegrationsClient;
 use crate::server::server_api::ServerApiProvider;
 
-/// Secure-storage key under which the last-known token is optionally persisted.
-#[cfg_attr(target_family = "wasm", allow(dead_code))]
-const GITHUB_TOKEN_STORAGE_KEY: &str = "github_integration.token";
-
 /// A repo the connected installation can access.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstalledRepo {
@@ -65,9 +61,9 @@ pub struct GithubConnectionState {
 impl GithubConnectionState {
     /// Whether `owner/repo` (case-insensitive) is in the installed set.
     pub fn is_repo_installed(&self, owner: &str, repo: &str) -> bool {
-        self.installed_repos.iter().any(|r| {
-            r.owner.eq_ignore_ascii_case(owner) && r.repo.eq_ignore_ascii_case(repo)
-        })
+        self.installed_repos
+            .iter()
+            .any(|r| r.owner.eq_ignore_ascii_case(owner) && r.repo.eq_ignore_ascii_case(repo))
     }
 }
 
@@ -248,10 +244,7 @@ impl TokenProvider for GithubTokenProvider {
         }
 
         let response = self.integrations_client.get_github_token().await?;
-        let expires_at = response
-            .expires_at
-            .as_deref()
-            .and_then(parse_expiry);
+        let expires_at = response.expires_at.as_deref().and_then(parse_expiry);
         let token = GithubToken {
             token: response.token,
             expires_at,
@@ -276,6 +269,8 @@ fn parse_expiry(raw: &str) -> Option<DateTime<Utc>> {
         .ok()
         .map(|dt| dt.with_timezone(&Utc))
 }
+
+pub mod pr_review_comments;
 
 #[cfg(test)]
 #[path = "mod_tests.rs"]

@@ -210,6 +210,43 @@ impl GithubClient {
         .await
     }
 
+    /// Get a single PR review comment by its id.
+    ///
+    /// Used to resolve the owning pull request (via `pull_request_url`) when
+    /// replying to a comment identified only by id.
+    pub async fn get_pr_review_comment(
+        &self,
+        owner: &str,
+        repo: &str,
+        comment_id: u64,
+    ) -> Result<ReviewComment> {
+        self.get(&format!("repos/{owner}/{repo}/pulls/comments/{comment_id}"))
+            .await
+    }
+
+    /// Reply to a PR review comment, creating a threaded reply.
+    ///
+    /// This is the write endpoint backing the `ReplyToPrComment` agent action.
+    pub async fn reply_to_pr_review_comment(
+        &self,
+        owner: &str,
+        repo: &str,
+        pull_number: u64,
+        comment_id: u64,
+        body: &str,
+    ) -> Result<ReviewComment> {
+        #[derive(Serialize)]
+        struct ReplyBody<'a> {
+            body: &'a str,
+        }
+        self.request(
+            Method::POST,
+            &format!("repos/{owner}/{repo}/pulls/{pull_number}/comments/{comment_id}/replies"),
+            Some(&ReplyBody { body }),
+        )
+        .await
+    }
+
     // ── Checks & status ──────────────────────────────────────────────────
 
     /// List check runs for a git ref (branch, tag, or SHA).

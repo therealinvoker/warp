@@ -512,6 +512,174 @@ impl TryFrom<CallMCPToolResult> for api::request::input::tool_call_result::Resul
     }
 }
 
+impl TryFrom<ReadGithubPrResult> for api::request::input::tool_call_result::Result {
+    type Error = ConvertToAPITypeError;
+
+    fn try_from(result: ReadGithubPrResult) -> Result<Self, Self::Error> {
+        match result {
+            ReadGithubPrResult::Success { pr_json } => Ok(
+                api::request::input::tool_call_result::Result::ReadGithubPr(
+                    api::ReadGithubPrResult {
+                        result: Some(api::read_github_pr_result::Result::Success(
+                            api::read_github_pr_result::Success { pr_json },
+                        )),
+                    },
+                ),
+            ),
+            ReadGithubPrResult::Error(error) => Ok(
+                api::request::input::tool_call_result::Result::ReadGithubPr(
+                    api::ReadGithubPrResult {
+                        result: Some(api::read_github_pr_result::Result::Error(
+                            api::read_github_pr_result::Error { message: error },
+                        )),
+                    },
+                ),
+            ),
+            ReadGithubPrResult::Cancelled => Err(ConvertToAPITypeError::Ignore),
+        }
+    }
+}
+
+impl TryFrom<ListGithubPrCommentsResult> for api::request::input::tool_call_result::Result {
+    type Error = ConvertToAPITypeError;
+
+    fn try_from(result: ListGithubPrCommentsResult) -> Result<Self, Self::Error> {
+        match result {
+            ListGithubPrCommentsResult::Success { comments_json } => Ok(
+                api::request::input::tool_call_result::Result::ListGithubPrComments(
+                    api::ListGithubPrCommentsResult {
+                        result: Some(api::list_github_pr_comments_result::Result::Success(
+                            api::list_github_pr_comments_result::Success { comments_json },
+                        )),
+                    },
+                ),
+            ),
+            ListGithubPrCommentsResult::Error(error) => Ok(
+                api::request::input::tool_call_result::Result::ListGithubPrComments(
+                    api::ListGithubPrCommentsResult {
+                        result: Some(api::list_github_pr_comments_result::Result::Error(
+                            api::list_github_pr_comments_result::Error { message: error },
+                        )),
+                    },
+                ),
+            ),
+            ListGithubPrCommentsResult::Cancelled => Err(ConvertToAPITypeError::Ignore),
+        }
+    }
+}
+
+impl TryFrom<CreateGithubPrResult> for api::request::input::tool_call_result::Result {
+    type Error = ConvertToAPITypeError;
+
+    fn try_from(result: CreateGithubPrResult) -> Result<Self, Self::Error> {
+        match result {
+            CreateGithubPrResult::Success { url, number } => Ok(
+                api::request::input::tool_call_result::Result::CreateGithubPr(
+                    api::CreateGithubPrResult {
+                        result: Some(api::create_github_pr_result::Result::Success(
+                            api::create_github_pr_result::Success { url, number },
+                        )),
+                    },
+                ),
+            ),
+            CreateGithubPrResult::Error(error) => Ok(
+                api::request::input::tool_call_result::Result::CreateGithubPr(
+                    api::CreateGithubPrResult {
+                        result: Some(api::create_github_pr_result::Result::Error(
+                            api::create_github_pr_result::Error { message: error },
+                        )),
+                    },
+                ),
+            ),
+            CreateGithubPrResult::Cancelled => Err(ConvertToAPITypeError::Ignore),
+        }
+    }
+}
+
+impl TryFrom<ReadGithubIssueResult> for api::request::input::tool_call_result::Result {
+    type Error = ConvertToAPITypeError;
+
+    fn try_from(result: ReadGithubIssueResult) -> Result<Self, Self::Error> {
+        match result {
+            ReadGithubIssueResult::Success { issue_json } => Ok(
+                api::request::input::tool_call_result::Result::ReadGithubIssue(
+                    api::ReadGithubIssueResult {
+                        result: Some(api::read_github_issue_result::Result::Success(
+                            api::read_github_issue_result::Success { issue_json },
+                        )),
+                    },
+                ),
+            ),
+            ReadGithubIssueResult::Error(error) => Ok(
+                api::request::input::tool_call_result::Result::ReadGithubIssue(
+                    api::ReadGithubIssueResult {
+                        result: Some(api::read_github_issue_result::Result::Error(
+                            api::read_github_issue_result::Error { message: error },
+                        )),
+                    },
+                ),
+            ),
+            ReadGithubIssueResult::Cancelled => Err(ConvertToAPITypeError::Ignore),
+        }
+    }
+}
+
+impl TryFrom<ListGithubIssuesResult> for api::request::input::tool_call_result::Result {
+    type Error = ConvertToAPITypeError;
+
+    fn try_from(result: ListGithubIssuesResult) -> Result<Self, Self::Error> {
+        match result {
+            ListGithubIssuesResult::Success { issues_json } => Ok(
+                api::request::input::tool_call_result::Result::ListGithubIssues(
+                    api::ListGithubIssuesResult {
+                        result: Some(api::list_github_issues_result::Result::Success(
+                            api::list_github_issues_result::Success { issues_json },
+                        )),
+                    },
+                ),
+            ),
+            ListGithubIssuesResult::Error(error) => Ok(
+                api::request::input::tool_call_result::Result::ListGithubIssues(
+                    api::ListGithubIssuesResult {
+                        result: Some(api::list_github_issues_result::Result::Error(
+                            api::list_github_issues_result::Error { message: error },
+                        )),
+                    },
+                ),
+            ),
+            ListGithubIssuesResult::Cancelled => Err(ConvertToAPITypeError::Ignore),
+        }
+    }
+}
+
+impl TryFrom<ReplyToPrCommentResult> for api::request::input::tool_call_result::Result {
+    type Error = ConvertToAPITypeError;
+
+    fn try_from(result: ReplyToPrCommentResult) -> Result<Self, Self::Error> {
+        match result {
+            ReplyToPrCommentResult::Success { comment_id, url } => Ok(
+                api::request::input::tool_call_result::Result::ReplyToPrComment(
+                    api::ReplyToPrCommentResult {
+                        result: Some(api::reply_to_pr_comment_result::Result::Success(
+                            api::reply_to_pr_comment_result::Success { comment_id, url },
+                        )),
+                    },
+                ),
+            ),
+            ReplyToPrCommentResult::Error(error) => Ok(
+                api::request::input::tool_call_result::Result::ReplyToPrComment(
+                    api::ReplyToPrCommentResult {
+                        result: Some(api::reply_to_pr_comment_result::Result::Error(
+                            api::reply_to_pr_comment_result::Error { message: error },
+                        )),
+                    },
+                ),
+            ),
+            ReplyToPrCommentResult::Cancelled => Err(ConvertToAPITypeError::Ignore),
+        }
+    }
+}
+
 impl TryFrom<ReadSkillResult> for api::request::input::tool_call_result::Result {
     type Error = ConvertToAPITypeError;
 

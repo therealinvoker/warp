@@ -1,9 +1,8 @@
 //! Unit tests for GitHub connection state and token provisioning logic.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
-use async_trait::async_trait;
 use chrono::Utc;
 use futures::executor::block_on;
 use futures::lock::Mutex;

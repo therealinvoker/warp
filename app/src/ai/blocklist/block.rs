@@ -2090,6 +2090,20 @@ impl AIBlock {
                 }
                 AIAgentAction {
                     id: action_id,
+                    action:
+                        action_type @ (AIAgentActionType::ReadGithubPr { .. }
+                        | AIAgentActionType::ListGithubPrComments { .. }
+                        | AIAgentActionType::CreateGithubPr(_)
+                        | AIAgentActionType::ReadGithubIssue { .. }
+                        | AIAgentActionType::ListGithubIssues { .. }
+                        | AIAgentActionType::ReplyToPrComment { .. }),
+                    ..
+                } => {
+                    let command_text = action_type.user_friendly_name();
+                    self.handle_github_action_stream_update(action_id, &command_text, ctx);
+                }
+                AIAgentAction {
+                    id: action_id,
                     action: AIAgentActionType::AskUserQuestion { questions },
                     ..
                 } if FeatureFlag::AskUserQuestion.is_enabled() => {
@@ -3541,6 +3555,53 @@ impl AIBlock {
                         action_id.clone(),
                         self.client_ids.clone(),
                         RequestedActionViewType::McpTool,
+                        self.model.clone(),
+                        &self.action_model,
+                        self.terminal_model.clone(),
+                        self.autonomy_setting_speedbump.clone(),
+                        self.state_handles
+                            .manage_autonomy_settings_link_handle
+                            .clone(),
+                        self.view_id,
+                        ctx,
+                    );
+                    view.apply_streamed_update(command_text, ctx);
+                    view
+                });
+                let action_id_clone = action_id.clone();
+                ctx.subscribe_to_view(&view, move |me, view, event, ctx| {
+                    me.handle_mcp_tool_view_event(&action_id_clone, view, event, ctx);
+                });
+
+                self.requested_mcp_tools
+                    .insert(action_id.clone(), RequestedCommand { view });
+            }
+        }
+    }
+
+    /// Handle a new GitHub agent action received from the server. GitHub
+    /// actions reuse the MCP requested-action card machinery (same map, same
+    /// event handling) with GitHub-specific copy via
+    /// [`RequestedActionViewType::GithubAction`].
+    fn handle_github_action_stream_update(
+        &mut self,
+        action_id: &AIAgentActionId,
+        command_text: &str,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        match self.requested_mcp_tools.get_mut(action_id) {
+            Some(requested_action) => {
+                requested_action.view.update(ctx, |view, ctx| {
+                    view.apply_streamed_update(command_text, ctx);
+                    ctx.notify();
+                });
+            }
+            None => {
+                let view = ctx.add_typed_action_view(|ctx| {
+                    let mut view = RequestedCommandView::new(
+                        action_id.clone(),
+                        self.client_ids.clone(),
+                        RequestedActionViewType::GithubAction,
                         self.model.clone(),
                         &self.action_model,
                         self.terminal_model.clone(),

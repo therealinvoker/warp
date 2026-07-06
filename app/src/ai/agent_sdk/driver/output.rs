@@ -304,6 +304,73 @@ pub mod text {
                 AIAgentActionResultType::RunAgents(_) => Ok(()),
                 // No user-visible payload to emit.
                 AIAgentActionResultType::WaitForEvents(_) => Ok(()),
+                AIAgentActionResultType::ReadGithubPr(result) => match result {
+                    ai::agent::action_result::ReadGithubPrResult::Success { pr_json } => {
+                        writeln!(w, "{pr_json}")
+                    }
+                    ai::agent::action_result::ReadGithubPrResult::Error(error) => {
+                        writeln!(w, "Reading GitHub PR failed: {error}")
+                    }
+                    ai::agent::action_result::ReadGithubPrResult::Cancelled => {
+                        writeln!(w, "{CANCELLED_MESSAGE}")
+                    }
+                },
+                AIAgentActionResultType::ListGithubPrComments(result) => match result {
+                    ai::agent::action_result::ListGithubPrCommentsResult::Success {
+                        comments_json,
+                    } => writeln!(w, "{comments_json}"),
+                    ai::agent::action_result::ListGithubPrCommentsResult::Error(error) => {
+                        writeln!(w, "Listing GitHub PR comments failed: {error}")
+                    }
+                    ai::agent::action_result::ListGithubPrCommentsResult::Cancelled => {
+                        writeln!(w, "{CANCELLED_MESSAGE}")
+                    }
+                },
+                AIAgentActionResultType::CreateGithubPr(result) => match result {
+                    ai::agent::action_result::CreateGithubPrResult::Success { url, number } => {
+                        writeln!(w, "Created PR #{number}: {url}")
+                    }
+                    ai::agent::action_result::CreateGithubPrResult::Error(error) => {
+                        writeln!(w, "Creating GitHub PR failed: {error}")
+                    }
+                    ai::agent::action_result::CreateGithubPrResult::Cancelled => {
+                        writeln!(w, "{CANCELLED_MESSAGE}")
+                    }
+                },
+                AIAgentActionResultType::ReadGithubIssue(result) => match result {
+                    ai::agent::action_result::ReadGithubIssueResult::Success { issue_json } => {
+                        writeln!(w, "{issue_json}")
+                    }
+                    ai::agent::action_result::ReadGithubIssueResult::Error(error) => {
+                        writeln!(w, "Reading GitHub issue failed: {error}")
+                    }
+                    ai::agent::action_result::ReadGithubIssueResult::Cancelled => {
+                        writeln!(w, "{CANCELLED_MESSAGE}")
+                    }
+                },
+                AIAgentActionResultType::ListGithubIssues(result) => match result {
+                    ai::agent::action_result::ListGithubIssuesResult::Success { issues_json } => {
+                        writeln!(w, "{issues_json}")
+                    }
+                    ai::agent::action_result::ListGithubIssuesResult::Error(error) => {
+                        writeln!(w, "Listing GitHub issues failed: {error}")
+                    }
+                    ai::agent::action_result::ListGithubIssuesResult::Cancelled => {
+                        writeln!(w, "{CANCELLED_MESSAGE}")
+                    }
+                },
+                AIAgentActionResultType::ReplyToPrComment(result) => match result {
+                    ai::agent::action_result::ReplyToPrCommentResult::Success {
+                        comment_id,
+                        url,
+                    } => writeln!(w, "Posted reply comment {comment_id}: {url}"),
+                    ai::agent::action_result::ReplyToPrCommentResult::Error(error) => {
+                        writeln!(w, "Replying to PR comment failed: {error}")
+                    }
+                    ai::agent::action_result::ReplyToPrCommentResult::Cancelled => {
+                        writeln!(w, "{CANCELLED_MESSAGE}")
+                    }
+                },
             },
         }
     }
@@ -431,6 +498,45 @@ pub mod text {
                     // RunAgents is desktop-client-only; SDK driver renders nothing.
                     AIAgentActionType::RunAgents(_) => (),
                     AIAgentActionType::WaitForEvents { .. } => (),
+                    AIAgentActionType::ReadGithubPr {
+                        owner,
+                        repo,
+                        number,
+                    } => {
+                        writeln!(w, "Reading GitHub PR {owner}/{repo}#{number}")?;
+                    }
+                    AIAgentActionType::ListGithubPrComments {
+                        owner,
+                        repo,
+                        number,
+                    } => {
+                        writeln!(w, "Listing comments on GitHub PR {owner}/{repo}#{number}")?;
+                    }
+                    AIAgentActionType::CreateGithubPr(req) => {
+                        writeln!(
+                            w,
+                            "Creating GitHub PR in {}/{}: {}",
+                            req.owner, req.repo, req.title
+                        )?;
+                    }
+                    AIAgentActionType::ReadGithubIssue {
+                        owner,
+                        repo,
+                        number,
+                    } => {
+                        writeln!(w, "Reading GitHub issue {owner}/{repo}#{number}")?;
+                    }
+                    AIAgentActionType::ListGithubIssues { owner, repo, .. } => {
+                        writeln!(w, "Listing GitHub issues in {owner}/{repo}")?;
+                    }
+                    AIAgentActionType::ReplyToPrComment {
+                        owner,
+                        repo,
+                        comment_id,
+                        ..
+                    } => {
+                        writeln!(w, "Replying to PR comment {comment_id} in {owner}/{repo}")?;
+                    }
                 },
                 AIAgentOutputMessageType::TodoOperation(operation) => match operation {
                     TodoOperation::UpdateTodos { todos } => {
@@ -1113,6 +1219,14 @@ pub mod json {
                     // representation for it.
                     AIAgentActionType::RunAgents(_) => None,
                     AIAgentActionType::WaitForEvents { .. } => None,
+                    // GitHub actions are desktop-client-only; SDK has no JSON
+                    // representation for them.
+                    AIAgentActionType::ReadGithubPr { .. }
+                    | AIAgentActionType::ListGithubPrComments { .. }
+                    | AIAgentActionType::CreateGithubPr(_)
+                    | AIAgentActionType::ReadGithubIssue { .. }
+                    | AIAgentActionType::ListGithubIssues { .. }
+                    | AIAgentActionType::ReplyToPrComment { .. } => None,
                 },
                 AIAgentOutputMessageType::TodoOperation(operation) => match operation {
                     TodoOperation::UpdateTodos { todos } => Some(JsonMessage::UpdateTodos {

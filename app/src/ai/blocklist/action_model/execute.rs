@@ -4,6 +4,7 @@ pub(super) mod create_documents;
 pub(super) mod edit_documents;
 pub(super) mod fetch_conversation;
 pub(super) mod file_glob;
+pub(super) mod github;
 pub(super) mod grep;
 pub(super) mod read_documents;
 pub(super) mod read_files;
@@ -39,6 +40,7 @@ use futures::future::BoxFuture;
 #[cfg(feature = "local_fs")]
 use futures::AsyncReadExt;
 use futures::FutureExt;
+use github::GithubActionExecutor;
 use grep::GrepExecutor;
 #[cfg(feature = "local_fs")]
 use mime_guess::from_path;
@@ -267,6 +269,7 @@ pub struct BlocklistAIActionExecutor {
     send_message_executor: ModelHandle<SendMessageToAgentExecutor>,
     ask_user_question_executor: ModelHandle<AskUserQuestionExecutor>,
     wait_for_events_executor: ModelHandle<WaitForEventsExecutor>,
+    github_action_executor: ModelHandle<GithubActionExecutor>,
     /// The actions currently executing asynchronously, keyed by action ID.
     /// We track them per action rather than as a single slot so multiple actions from the same
     /// parallel phase can complete independently.
@@ -337,6 +340,8 @@ impl BlocklistAIActionExecutor {
             ctx.add_model(|_| AskUserQuestionExecutor::new(terminal_view_id));
         let wait_for_events_executor =
             ctx.add_model(|ctx| WaitForEventsExecutor::new(terminal_view_id, ctx));
+        let github_action_executor =
+            ctx.add_model(|_| GithubActionExecutor::new(terminal_view_id));
         Self {
             shell_command_executor,
             read_files_executor,
@@ -363,6 +368,7 @@ impl BlocklistAIActionExecutor {
             send_message_executor,
             ask_user_question_executor,
             wait_for_events_executor,
+            github_action_executor,
         }
     }
 
@@ -563,6 +569,14 @@ impl BlocklistAIActionExecutor {
             AIAgentActionType::WaitForEvents { .. } => self
                 .wait_for_events_executor
                 .update(ctx, |executor, ctx| executor.preprocess_action(input, ctx)),
+            AIAgentActionType::ReadGithubPr { .. }
+            | AIAgentActionType::ListGithubPrComments { .. }
+            | AIAgentActionType::CreateGithubPr(_)
+            | AIAgentActionType::ReadGithubIssue { .. }
+            | AIAgentActionType::ListGithubIssues { .. }
+            | AIAgentActionType::ReplyToPrComment { .. } => self
+                .github_action_executor
+                .update(ctx, |executor, ctx| executor.preprocess_action(input, ctx)),
         }
     }
 
@@ -754,6 +768,15 @@ impl BlocklistAIActionExecutor {
                 .into(),
             AIAgentActionType::WaitForEvents { .. } => self
                 .wait_for_events_executor
+                .update(ctx, |executor, ctx| executor.execute(input, ctx))
+                .into(),
+            AIAgentActionType::ReadGithubPr { .. }
+            | AIAgentActionType::ListGithubPrComments { .. }
+            | AIAgentActionType::CreateGithubPr(_)
+            | AIAgentActionType::ReadGithubIssue { .. }
+            | AIAgentActionType::ListGithubIssues { .. }
+            | AIAgentActionType::ReplyToPrComment { .. } => self
+                .github_action_executor
                 .update(ctx, |executor, ctx| executor.execute(input, ctx))
                 .into(),
         };
@@ -979,6 +1002,14 @@ impl BlocklistAIActionExecutor {
                 .update(ctx, |executor, ctx| executor.should_autoexecute(input, ctx)),
             AIAgentActionType::WaitForEvents { .. } => self
                 .wait_for_events_executor
+                .update(ctx, |executor, ctx| executor.should_autoexecute(input, ctx)),
+            AIAgentActionType::ReadGithubPr { .. }
+            | AIAgentActionType::ListGithubPrComments { .. }
+            | AIAgentActionType::CreateGithubPr(_)
+            | AIAgentActionType::ReadGithubIssue { .. }
+            | AIAgentActionType::ListGithubIssues { .. }
+            | AIAgentActionType::ReplyToPrComment { .. } => self
+                .github_action_executor
                 .update(ctx, |executor, ctx| executor.should_autoexecute(input, ctx)),
         }
     }

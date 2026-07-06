@@ -274,6 +274,18 @@ fn get_supported_tools(params: &RequestParams) -> Vec<api::ToolType> {
         supported_tools.push(api::ToolType::AskUserQuestion);
     }
 
+    #[cfg(feature = "github_integration")]
+    if FeatureFlag::GithubIntegration.is_enabled() {
+        supported_tools.extend(&[
+            api::ToolType::ReadGithubPr,
+            api::ToolType::ListGithubPrComments,
+            api::ToolType::CreateGithubPr,
+            api::ToolType::ReadGithubIssue,
+            api::ToolType::ListGithubIssues,
+            api::ToolType::ReplyToPrComment,
+        ]);
+    }
+
     supported_tools
 }
 

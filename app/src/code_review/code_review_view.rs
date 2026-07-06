@@ -168,6 +168,9 @@ pub struct CodeReviewHeaderFields {
     pub git_operations_chevron: ViewHandle<ActionButton>,
     pub git_operations_menu: ViewHandle<Menu<CodeReviewAction>>,
     pub git_operations_menu_open: bool,
+    /// PR info for the current branch, when available. Drives the PR chip in
+    /// the revamped header (number, state, checks).
+    pub pr_info: Option<PrInfo>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -4178,6 +4181,7 @@ impl CodeReviewView {
             git_operations_chevron: self.git_operations_chevron.clone(),
             git_operations_menu: self.git_operations_menu.clone(),
             git_operations_menu_open: self.git_operations_menu_open,
+            pr_info: self.pr_info(app),
         };
 
         let header = if FeatureFlag::GitOperationsInCodeReview.is_enabled() {
@@ -6356,11 +6360,85 @@ impl CodeReviewView {
         ctx.subscribe_to_model(&handle, |me, _, event, ctx| match event {
             GitHubRepoEvent::PrInfoChanged => {
                 me.update_git_operations_ui(ctx);
+                #[cfg(feature = "github_integration")]
+                me.fetch_and_apply_pr_review_comments(ctx);
             }
             // Repository name/owner doesn't affect the git-ops UI.
             GitHubRepoEvent::RepositoryInfoChanged => {}
         });
         self.github_repo_model = Some(handle);
+    }
+
+    /// When the current repo has a PR sourced from the GitHub API, fetch its
+    /// review comments and feed them into the comment batch as read-only
+    /// imported comments. No-op when GitHub isn't connected or the repo isn't
+    /// covered by the installation (there's no client to build).
+    ///
+    /// TODO(agent-actions, proto-blocked): replying to these imported comments
+    /// is deferred until the warp-proto-apis fork lands.
+    #[cfg(feature = "github_integration")]
+    fn fetch_and_apply_pr_review_comments(&mut self, ctx: &mut ViewContext<Self>) {
+        use crate::github::pr_review_comments::fetch_pr_review_comments;
+        use crate::github::GithubConnection;
+
+        let Some(github_repo_model) = self.github_repo_model.clone() else {
+            return;
+        };
+        // The review-comment overlay only applies to the API-backed path; the
+        // gh-CLI and remote paths don't have a client to fetch with.
+        if !github_repo_model.as_ref(ctx).is_api_backed() {
+            return;
+        }
+        let Some(pr_info) = github_repo_model.as_ref(ctx).pr_info(ctx).cloned() else {
+            return;
+        };
+        let Some(repo_info) = github_repo_model.as_ref(ctx).repository_info(ctx).cloned() else {
+            return;
+        };
+        let (Some(owner), repo) = (repo_info.owner.clone(), repo_info.name.clone()) else {
+            return;
+        };
+
+        let connection = GithubConnection::as_ref(ctx);
+        if !connection.state().connected {
+            return;
+        }
+        let token_provider = GithubConnection::handle(ctx)
+            .update(ctx, |connection, ctx| connection.token_provider(ctx));
+        let client = match github_client::GithubClient::new(token_provider) {
+            Ok(client) => std::sync::Arc::new(client),
+            Err(err) => {
+                log::warn!("Failed to build GithubClient for PR review comments: {err}");
+                return;
+            }
+        };
+
+        let diff_mode = self.diff_state_model.as_ref(ctx).diff_mode(ctx);
+        let pr_number = pr_info.number;
+        ctx.spawn(
+            async move {
+                // reqwest requires a Tokio reactor; the app executor is not
+                // Tokio, so bridge via async-compat.
+                use async_compat::CompatExt as _;
+                async { fetch_pr_review_comments(&client, &owner, &repo, pr_number).await }
+                    .compat()
+                    .await
+            },
+            move |me, result, ctx| match result {
+                Ok(comments) if !comments.is_empty() => {
+                    let Some(batch) = me.active_comment_model.clone() else {
+                        return;
+                    };
+                    batch.update(ctx, |batch, ctx| {
+                        batch.add_pending_imported_comments(comments, diff_mode.clone(), ctx);
+                    });
+                }
+                Ok(_) => {}
+                Err(err) => {
+                    log::debug!("Failed to fetch PR review comments: {err:#}");
+                }
+            },
+        );
     }
 
     fn unsubscribe_from_git_repo_status_model(&mut self, ctx: &mut ViewContext<Self>) {

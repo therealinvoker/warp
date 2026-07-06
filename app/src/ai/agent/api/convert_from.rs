@@ -890,6 +890,24 @@ impl ConvertAPIToolCallToAIAgentAction for api::message::ToolCall {
                     idle_timeout_seconds: payload.idle_timeout_seconds,
                 })
             }
+            api::message::tool_call::Tool::ReadGithubPr(read_github_pr) => {
+                create_standard_action(read_github_pr.into())
+            }
+            api::message::tool_call::Tool::ListGithubPrComments(list_github_pr_comments) => {
+                create_standard_action(list_github_pr_comments.into())
+            }
+            api::message::tool_call::Tool::CreateGithubPr(create_github_pr) => {
+                create_standard_action(create_github_pr.into())
+            }
+            api::message::tool_call::Tool::ReadGithubIssue(read_github_issue) => {
+                create_standard_action(read_github_issue.into())
+            }
+            api::message::tool_call::Tool::ListGithubIssues(list_github_issues) => {
+                create_standard_action(list_github_issues.into())
+            }
+            api::message::tool_call::Tool::ReplyToPrComment(reply_to_pr_comment) => {
+                create_standard_action(reply_to_pr_comment.into())
+            }
             _ => Err(ToolToAIAgentActionError::UnexpectedTool),
         }
     }

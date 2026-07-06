@@ -87,15 +87,18 @@ impl GithubSettingsPageView {
     /// generic connect endpoint.
     fn connect(&mut self, ctx: &mut ViewContext<Self>) {
         let auth_url = GithubConnection::as_ref(ctx).state().auth_url.clone();
-        let base = auth_url.unwrap_or_else(|| {
-            format!("{}/oauth/connect/github", ChannelState::server_root_url())
-        });
+        let base = auth_url
+            .unwrap_or_else(|| format!("{}/oauth/connect/github", ChannelState::server_root_url()));
         let url = settings_github_auth_url_with_next(&base);
         ctx.open_url(&url);
     }
 
     fn manage_installation(&mut self, ctx: &mut ViewContext<Self>) {
-        if let Some(link) = GithubConnection::as_ref(ctx).state().app_install_link.clone() {
+        if let Some(link) = GithubConnection::as_ref(ctx)
+            .state()
+            .app_install_link
+            .clone()
+        {
             ctx.open_url(&link);
         }
     }
@@ -230,10 +233,11 @@ impl SettingsWidget for GithubSettingsWidget {
         column.add_child(view.render_status_text(status_line, appearance));
 
         if let Some(error) = &state.load_error {
-            column.add_child(Container::new(view.render_status_text(
-                error.clone(),
-                appearance,
-            )).with_margin_top(4.).finish());
+            column.add_child(
+                Container::new(view.render_status_text(error.clone(), appearance))
+                    .with_margin_top(4.)
+                    .finish(),
+            );
         }
 
         // Installed repos (when connected).
@@ -264,7 +268,12 @@ impl SettingsWidget for GithubSettingsWidget {
             }
         }
 
-        column.add_child(Container::new(render_separator(appearance)).with_margin_top(16.).with_margin_bottom(16.).finish());
+        column.add_child(
+            Container::new(render_separator(appearance))
+                .with_margin_top(16.)
+                .with_margin_bottom(16.)
+                .finish(),
+        );
 
         // Action buttons.
         let mut buttons = Flex::row()

@@ -14,13 +14,15 @@ use warp_terminal::model::BlockId;
 
 use crate::agent::action_result::{
     AIAgentActionResultType, AskUserQuestionResult, CallMCPToolResult, CreateDocumentsResult,
-    EditDocumentsResult, FetchConversationResult, FileGlobResult, FileGlobV2Result, GrepResult,
-    InsertReviewCommentsResult, ReadDocumentsResult, ReadFilesResult, ReadMCPResourceResult,
-    ReadShellCommandOutputResult, ReadSkillResult, RequestCommandOutputResult,
-    RequestComputerUseResult, RequestFileEditsResult, RunAgentsResult, SearchCodebaseResult,
-    SendMessageToAgentResult, StartAgentResult, StartAgentVersion, SuggestNewConversationResult,
-    SuggestPromptResult, TransferShellCommandControlToUserResult, UploadArtifactResult,
-    UseComputerResult, WaitForEventsResult, WriteToLongRunningShellCommandResult,
+    CreateGithubPrResult, EditDocumentsResult, FetchConversationResult, FileGlobResult,
+    FileGlobV2Result, GrepResult, InsertReviewCommentsResult, ListGithubIssuesResult,
+    ListGithubPrCommentsResult, ReadDocumentsResult, ReadFilesResult, ReadGithubIssueResult,
+    ReadGithubPrResult, ReadMCPResourceResult, ReadShellCommandOutputResult, ReadSkillResult,
+    ReplyToPrCommentResult, RequestCommandOutputResult, RequestComputerUseResult,
+    RequestFileEditsResult, RunAgentsResult, SearchCodebaseResult, SendMessageToAgentResult,
+    StartAgentResult, StartAgentVersion, SuggestNewConversationResult, SuggestPromptResult,
+    TransferShellCommandControlToUserResult, UploadArtifactResult, UseComputerResult,
+    WaitForEventsResult, WriteToLongRunningShellCommandResult,
 };
 use crate::agent::{AIAgentCitation, FileLocations};
 use crate::diff_validation::ParsedDiff;
@@ -185,6 +187,62 @@ pub enum AIAgentActionType {
         /// falls back to a default.
         idle_timeout_seconds: i32,
     },
+
+    /// AI requested a GitHub pull request summary (read-only).
+    ReadGithubPr {
+        owner: String,
+        repo: String,
+        number: u64,
+    },
+
+    /// AI requested the review comments on a GitHub pull request (read-only).
+    ListGithubPrComments {
+        owner: String,
+        repo: String,
+        number: u64,
+    },
+
+    /// AI requested creating a GitHub pull request (write; requires user
+    /// approval).
+    CreateGithubPr(CreateGithubPrRequest),
+
+    /// AI requested a GitHub issue (read-only).
+    ReadGithubIssue {
+        owner: String,
+        repo: String,
+        number: u64,
+    },
+
+    /// AI requested a list of GitHub issues (read-only).
+    ListGithubIssues {
+        owner: String,
+        repo: String,
+        /// Optional filter in GitHub list-issues query-parameter syntax (e.g.
+        /// `state=open`). Empty means the default filter.
+        filter: String,
+    },
+
+    /// AI requested replying to a GitHub PR review comment (write; requires
+    /// user approval).
+    ReplyToPrComment {
+        owner: String,
+        repo: String,
+        comment_id: u64,
+        body: String,
+    },
+}
+
+/// The payload of a [`AIAgentActionType::CreateGithubPr`] action. Mirrors the
+/// proto `CreateGithubPr` tool call.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct CreateGithubPrRequest {
+    pub owner: String,
+    pub repo: String,
+    pub title: String,
+    pub body: String,
+    pub head: String,
+    pub base: String,
+    pub draft: bool,
 }
 
 /// Run-wide + per-agent configuration for a `RunAgents` tool call.
@@ -398,6 +456,24 @@ impl AIAgentActionType {
             Self::WaitForEvents { .. } => {
                 AIAgentActionResultType::WaitForEvents(WaitForEventsResult::Cancelled)
             }
+            Self::ReadGithubPr { .. } => {
+                AIAgentActionResultType::ReadGithubPr(ReadGithubPrResult::Cancelled)
+            }
+            Self::ListGithubPrComments { .. } => AIAgentActionResultType::ListGithubPrComments(
+                ListGithubPrCommentsResult::Cancelled,
+            ),
+            Self::CreateGithubPr(_) => {
+                AIAgentActionResultType::CreateGithubPr(CreateGithubPrResult::Cancelled)
+            }
+            Self::ReadGithubIssue { .. } => {
+                AIAgentActionResultType::ReadGithubIssue(ReadGithubIssueResult::Cancelled)
+            }
+            Self::ListGithubIssues { .. } => {
+                AIAgentActionResultType::ListGithubIssues(ListGithubIssuesResult::Cancelled)
+            }
+            Self::ReplyToPrComment { .. } => {
+                AIAgentActionResultType::ReplyToPrComment(ReplyToPrCommentResult::Cancelled)
+            }
         }
     }
 
@@ -447,6 +523,33 @@ impl AIAgentActionType {
                 format!("Orchestrate {} agent(s)", req.agent_run_configs.len())
             }
             Self::WaitForEvents { .. } => "Wait for events".to_string(),
+            Self::ReadGithubPr {
+                owner,
+                repo,
+                number,
+            } => format!("Read GitHub PR {owner}/{repo}#{number}"),
+            Self::ListGithubPrComments {
+                owner,
+                repo,
+                number,
+            } => format!("List GitHub PR comments on {owner}/{repo}#{number}"),
+            Self::CreateGithubPr(req) => {
+                format!("Create GitHub PR in {}/{}: {}", req.owner, req.repo, req.title)
+            }
+            Self::ReadGithubIssue {
+                owner,
+                repo,
+                number,
+            } => format!("Read GitHub issue {owner}/{repo}#{number}"),
+            Self::ListGithubIssues { owner, repo, .. } => {
+                format!("List GitHub issues in {owner}/{repo}")
+            }
+            Self::ReplyToPrComment {
+                owner,
+                repo,
+                comment_id,
+                ..
+            } => format!("Reply to PR comment {comment_id} in {owner}/{repo}"),
         }
     }
 }
@@ -636,6 +739,49 @@ impl Display for AIAgentActionType {
                     f,
                     "WaitForEvents: tool_call_id={tool_call_id} idle_timeout_seconds={idle_timeout_seconds}"
                 )
+            }
+            AIAgentActionType::ReadGithubPr {
+                owner,
+                repo,
+                number,
+            } => {
+                write!(f, "ReadGithubPr: {owner}/{repo}#{number}")
+            }
+            AIAgentActionType::ListGithubPrComments {
+                owner,
+                repo,
+                number,
+            } => {
+                write!(f, "ListGithubPrComments: {owner}/{repo}#{number}")
+            }
+            AIAgentActionType::CreateGithubPr(req) => {
+                write!(
+                    f,
+                    "CreateGithubPr: {}/{} '{}' ({} -> {}, draft: {})",
+                    req.owner, req.repo, req.title, req.head, req.base, req.draft
+                )
+            }
+            AIAgentActionType::ReadGithubIssue {
+                owner,
+                repo,
+                number,
+            } => {
+                write!(f, "ReadGithubIssue: {owner}/{repo}#{number}")
+            }
+            AIAgentActionType::ListGithubIssues {
+                owner,
+                repo,
+                filter,
+            } => {
+                write!(f, "ListGithubIssues: {owner}/{repo} (filter: '{filter}')")
+            }
+            AIAgentActionType::ReplyToPrComment {
+                owner,
+                repo,
+                comment_id,
+                ..
+            } => {
+                write!(f, "ReplyToPrComment: comment {comment_id} in {owner}/{repo}")
             }
         }
     }

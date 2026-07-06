@@ -60,6 +60,14 @@ impl GitHubRepoModel {
         }
     }
 
+    /// Whether this model sources GitHub metadata from the REST API (as
+    /// opposed to the `gh` CLI or a remote host). Used to decide whether the
+    /// API-only review-comment overlay can be fetched.
+    #[cfg(all(feature = "local_fs", feature = "github_integration"))]
+    pub fn is_api_backed(&self) -> bool {
+        matches!(self, Self::ApiBacked(_))
+    }
+
     /// PR info for the current branch.
     pub fn pr_info<'a>(&self, ctx: &'a AppContext) -> Option<&'a PrInfo> {
         match self {
@@ -136,6 +144,8 @@ impl GitHubRepoModel {
         match self {
             #[cfg(feature = "local_fs")]
             Self::Local(m) => m.update(ctx, |m, ctx| m.set_pr_info_for_test(pr_info, ctx)),
+            #[cfg(all(feature = "local_fs", feature = "github_integration"))]
+            Self::ApiBacked(_) => unreachable!("api-backed test models are not used"),
             Self::Remote(_) => unreachable!("remote test models are not used"),
         }
     }
@@ -150,6 +160,8 @@ impl GitHubRepoModel {
             Self::Local(m) => m.update(ctx, |m, ctx| {
                 m.set_repository_info_for_test(repository_info, ctx)
             }),
+            #[cfg(all(feature = "local_fs", feature = "github_integration"))]
+            Self::ApiBacked(_) => unreachable!("api-backed test models are not used"),
             Self::Remote(_) => unreachable!("remote test models are not used"),
         }
     }

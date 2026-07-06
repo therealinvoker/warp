@@ -143,6 +143,12 @@ impl ToolExt for api::message::tool_call::Tool {
             // Matches the legacy server-handled name so analytics don't
             // double-count the rollout.
             Tool::WaitForEvents(_) => "wait_for_events",
+            Tool::ReadGithubPr(_) => "read_github_pr",
+            Tool::ListGithubPrComments(_) => "list_github_pr_comments",
+            Tool::CreateGithubPr(_) => "create_github_pr",
+            Tool::ReadGithubIssue(_) => "read_github_issue",
+            Tool::ListGithubIssues(_) => "list_github_issues",
+            Tool::ReplyToPrComment(_) => "reply_to_pr_comment",
         }
     }
 }

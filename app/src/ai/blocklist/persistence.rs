@@ -324,6 +324,14 @@ impl From<&AIAgentActionType> for PersistedAIAgentActionType {
             // stays in the transcript as an orphan until the next
             // outbound request triggers the server's supersede.
             AIAgentActionType::WaitForEvents { .. } => Self::NotPersisted,
+            // GitHub actions are rendered from the in-history tool call
+            // message; there is no per-action state to persist locally.
+            AIAgentActionType::ReadGithubPr { .. }
+            | AIAgentActionType::ListGithubPrComments { .. }
+            | AIAgentActionType::CreateGithubPr(_)
+            | AIAgentActionType::ReadGithubIssue { .. }
+            | AIAgentActionType::ListGithubIssues { .. }
+            | AIAgentActionType::ReplyToPrComment { .. } => Self::NotPersisted,
         }
     }
 }

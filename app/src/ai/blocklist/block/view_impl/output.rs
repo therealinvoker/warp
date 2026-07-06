@@ -633,6 +633,41 @@ pub(super) fn render(props: Props, app: &AppContext) -> Box<dyn Element> {
                             }
                         }
                         AIAgentOutputMessageType::Action(AIAgentAction {
+                            action:
+                                AIAgentActionType::ReadGithubPr { .. }
+                                | AIAgentActionType::ListGithubPrComments { .. }
+                                | AIAgentActionType::CreateGithubPr(_)
+                                | AIAgentActionType::ReadGithubIssue { .. }
+                                | AIAgentActionType::ListGithubIssues { .. }
+                                | AIAgentActionType::ReplyToPrComment { .. },
+                            id,
+                            ..
+                        }) => {
+                            let is_action_done = props
+                                .action_model
+                                .as_ref(app)
+                                .get_action_status(id)
+                                .as_ref()
+                                .is_some_and(|status| status.is_done());
+                            if !is_action_done {
+                                // Ratings & suggestions should not be rendered for
+                                // GitHub actions that are not complete (this includes
+                                // the approval card for writes).
+                                should_render_footer = false;
+                                should_render_suggestions = false;
+                            }
+
+                            // GitHub actions reuse the requested-MCP-tool card
+                            // machinery (see handle_github_action_stream_update).
+                            if let Some(rendered_github_action) = props
+                                .requested_mcp_tools
+                                .get(id)
+                                .map(|requested_github_action| requested_github_action.render())
+                            {
+                                output_items.add_child(rendered_github_action);
+                            }
+                        }
+                        AIAgentOutputMessageType::Action(AIAgentAction {
                             action: AIAgentActionType::AskUserQuestion { .. },
                             id,
                             ..

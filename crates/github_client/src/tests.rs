@@ -288,3 +288,62 @@ async fn surfaces_non_success_status() {
     assert!(matches!(err, Error::Status { .. }));
     m.assert_async().await;
 }
+
+#[tokio::test]
+async fn get_pr_review_comment_deserializes_pull_request_url() {
+    let mut server = mockito::Server::new_async().await;
+    let m = server
+        .mock("GET", "/repos/o/r/pulls/comments/55")
+        .with_status(200)
+        .with_body(
+            r#"{"id":55,"path":"src/main.rs","body":"nit","user":{"login":"u","id":1},
+                "html_url":"https://github.com/o/r/pull/9#discussion_r55",
+                "pull_request_url":"https://api.github.com/repos/o/r/pulls/9",
+                "created_at":"2024-01-01T00:00:00Z","updated_at":"2024-01-01T00:00:00Z"}"#,
+        )
+        .create_async()
+        .await;
+
+    let client = client(&server, StubTokenProvider::new("tok"));
+    let comment = client.get_pr_review_comment("o", "r", 55).await.unwrap();
+    assert_eq!(comment.id, 55);
+    assert_eq!(
+        comment.pull_request_url.as_deref(),
+        Some("https://api.github.com/repos/o/r/pulls/9")
+    );
+    m.assert_async().await;
+}
+
+#[tokio::test]
+async fn reply_to_pr_review_comment_posts_body() {
+    let mut server = mockito::Server::new_async().await;
+    let m = server
+        .mock("POST", "/repos/o/r/pulls/9/comments/55/replies")
+        .match_header("authorization", "Bearer tok")
+        .match_body(mockito::Matcher::JsonString(
+            r#"{"body":"Thanks!"}"#.to_string(),
+        ))
+        .with_status(201)
+        .with_body(
+            r#"{"id":77,"in_reply_to_id":55,"path":"src/main.rs","body":"Thanks!",
+                "user":{"login":"me","id":2},
+                "html_url":"https://github.com/o/r/pull/9#discussion_r77",
+                "pull_request_url":"https://api.github.com/repos/o/r/pulls/9",
+                "created_at":"2024-01-02T00:00:00Z","updated_at":"2024-01-02T00:00:00Z"}"#,
+        )
+        .create_async()
+        .await;
+
+    let client = client(&server, StubTokenProvider::new("tok"));
+    let reply = client
+        .reply_to_pr_review_comment("o", "r", 9, 55, "Thanks!")
+        .await
+        .unwrap();
+    assert_eq!(reply.id, 77);
+    assert_eq!(reply.in_reply_to_id, Some(55));
+    assert_eq!(
+        reply.html_url,
+        "https://github.com/o/r/pull/9#discussion_r77"
+    );
+    m.assert_async().await;
+}

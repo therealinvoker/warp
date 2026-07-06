@@ -32,11 +32,13 @@ use crate::ai::agent::{
     AIAgentActionResult, AIAgentActionResultType, AIAgentContext, AIAgentExchange,
     AIAgentExchangeId, AIAgentInput, AIAgentOutput, AIAgentOutputMessage, AIAgentOutputStatus,
     CallMCPToolResult, CancellationReason, CloneRepositoryURL, CreateDocumentsResult,
-    DocumentContext, EditDocumentsResult, FileContext, FileGlobResult, FileGlobV2Match,
-    FileGlobV2Result, FinishedAIAgentOutput, GrepFileMatch, GrepLineMatch, GrepResult,
-    ImageContext, InsertReviewCommentsResult, OutputModelInfo, PassiveCodeDiffEntry,
+    CreateGithubPrResult, DocumentContext, EditDocumentsResult, FileContext, FileGlobResult,
+    FileGlobV2Match, FileGlobV2Result, FinishedAIAgentOutput, GrepFileMatch, GrepLineMatch,
+    GrepResult, ImageContext, InsertReviewCommentsResult, ListGithubIssuesResult,
+    ListGithubPrCommentsResult, OutputModelInfo, PassiveCodeDiffEntry,
     PassiveSuggestionResultType, PassiveSuggestionTrigger, ReadDocumentsResult, ReadFilesResult,
-    ReadMCPResourceResult, ReadShellCommandOutputResult, RequestCommandOutputResult,
+    ReadGithubIssueResult, ReadGithubPrResult, ReadMCPResourceResult,
+    ReadShellCommandOutputResult, ReplyToPrCommentResult, RequestCommandOutputResult,
     RequestFileEditsResult, SearchCodebaseFailureReason, SearchCodebaseResult, ServerOutputId,
     Shared, ShellCommandCompletedTrigger, ShellCommandError, SuggestNewConversationResult,
     SuggestPromptResult, TransferShellCommandControlToUserResult, UpdatedFileContext,
@@ -1645,6 +1647,134 @@ pub(crate) fn convert_tool_call_result_to_input(
                 context,
             })
         }
+        Some(ToolCallResultType::ReadGithubPr(result)) => {
+            let converted = match &result.result {
+                Some(api::read_github_pr_result::Result::Success(success)) => {
+                    ReadGithubPrResult::Success {
+                        pr_json: success.pr_json.clone(),
+                    }
+                }
+                Some(api::read_github_pr_result::Result::Error(error)) => {
+                    ReadGithubPrResult::Error(error.message.clone())
+                }
+                None => ReadGithubPrResult::Cancelled,
+            };
+            Some(AIAgentInput::ActionResult {
+                result: AIAgentActionResult {
+                    id: tool_call_id.into(),
+                    task_id: task_id.clone(),
+                    result: AIAgentActionResultType::ReadGithubPr(converted),
+                },
+                context,
+            })
+        }
+        Some(ToolCallResultType::ListGithubPrComments(result)) => {
+            let converted = match &result.result {
+                Some(api::list_github_pr_comments_result::Result::Success(success)) => {
+                    ListGithubPrCommentsResult::Success {
+                        comments_json: success.comments_json.clone(),
+                    }
+                }
+                Some(api::list_github_pr_comments_result::Result::Error(error)) => {
+                    ListGithubPrCommentsResult::Error(error.message.clone())
+                }
+                None => ListGithubPrCommentsResult::Cancelled,
+            };
+            Some(AIAgentInput::ActionResult {
+                result: AIAgentActionResult {
+                    id: tool_call_id.into(),
+                    task_id: task_id.clone(),
+                    result: AIAgentActionResultType::ListGithubPrComments(converted),
+                },
+                context,
+            })
+        }
+        Some(ToolCallResultType::CreateGithubPr(result)) => {
+            let converted = match &result.result {
+                Some(api::create_github_pr_result::Result::Success(success)) => {
+                    CreateGithubPrResult::Success {
+                        url: success.url.clone(),
+                        number: success.number,
+                    }
+                }
+                Some(api::create_github_pr_result::Result::Error(error)) => {
+                    CreateGithubPrResult::Error(error.message.clone())
+                }
+                None => CreateGithubPrResult::Cancelled,
+            };
+            Some(AIAgentInput::ActionResult {
+                result: AIAgentActionResult {
+                    id: tool_call_id.into(),
+                    task_id: task_id.clone(),
+                    result: AIAgentActionResultType::CreateGithubPr(converted),
+                },
+                context,
+            })
+        }
+        Some(ToolCallResultType::ReadGithubIssue(result)) => {
+            let converted = match &result.result {
+                Some(api::read_github_issue_result::Result::Success(success)) => {
+                    ReadGithubIssueResult::Success {
+                        issue_json: success.issue_json.clone(),
+                    }
+                }
+                Some(api::read_github_issue_result::Result::Error(error)) => {
+                    ReadGithubIssueResult::Error(error.message.clone())
+                }
+                None => ReadGithubIssueResult::Cancelled,
+            };
+            Some(AIAgentInput::ActionResult {
+                result: AIAgentActionResult {
+                    id: tool_call_id.into(),
+                    task_id: task_id.clone(),
+                    result: AIAgentActionResultType::ReadGithubIssue(converted),
+                },
+                context,
+            })
+        }
+        Some(ToolCallResultType::ListGithubIssues(result)) => {
+            let converted = match &result.result {
+                Some(api::list_github_issues_result::Result::Success(success)) => {
+                    ListGithubIssuesResult::Success {
+                        issues_json: success.issues_json.clone(),
+                    }
+                }
+                Some(api::list_github_issues_result::Result::Error(error)) => {
+                    ListGithubIssuesResult::Error(error.message.clone())
+                }
+                None => ListGithubIssuesResult::Cancelled,
+            };
+            Some(AIAgentInput::ActionResult {
+                result: AIAgentActionResult {
+                    id: tool_call_id.into(),
+                    task_id: task_id.clone(),
+                    result: AIAgentActionResultType::ListGithubIssues(converted),
+                },
+                context,
+            })
+        }
+        Some(ToolCallResultType::ReplyToPrComment(result)) => {
+            let converted = match &result.result {
+                Some(api::reply_to_pr_comment_result::Result::Success(success)) => {
+                    ReplyToPrCommentResult::Success {
+                        comment_id: success.comment_id,
+                        url: success.url.clone(),
+                    }
+                }
+                Some(api::reply_to_pr_comment_result::Result::Error(error)) => {
+                    ReplyToPrCommentResult::Error(error.message.clone())
+                }
+                None => ReplyToPrCommentResult::Cancelled,
+            };
+            Some(AIAgentInput::ActionResult {
+                result: AIAgentActionResult {
+                    id: tool_call_id.into(),
+                    task_id: task_id.clone(),
+                    result: AIAgentActionResultType::ReplyToPrComment(converted),
+                },
+                context,
+            })
+        }
         // Deprecated/unused result types or absent result.
         Some(ToolCallResultType::SuggestCreatePlan(..))
         | Some(ToolCallResultType::SuggestPlan(..))
@@ -1782,6 +1912,24 @@ fn create_cancelled_result_for_tool_call(
         }
         ToolType::RunAgents(_) => {
             AIAgentActionResultType::RunAgents(ai::agent::action_result::RunAgentsResult::Cancelled)
+        }
+        ToolType::ReadGithubPr(_) => {
+            AIAgentActionResultType::ReadGithubPr(ReadGithubPrResult::Cancelled)
+        }
+        ToolType::ListGithubPrComments(_) => {
+            AIAgentActionResultType::ListGithubPrComments(ListGithubPrCommentsResult::Cancelled)
+        }
+        ToolType::CreateGithubPr(_) => {
+            AIAgentActionResultType::CreateGithubPr(CreateGithubPrResult::Cancelled)
+        }
+        ToolType::ReadGithubIssue(_) => {
+            AIAgentActionResultType::ReadGithubIssue(ReadGithubIssueResult::Cancelled)
+        }
+        ToolType::ListGithubIssues(_) => {
+            AIAgentActionResultType::ListGithubIssues(ListGithubIssuesResult::Cancelled)
+        }
+        ToolType::ReplyToPrComment(_) => {
+            AIAgentActionResultType::ReplyToPrComment(ReplyToPrCommentResult::Cancelled)
         }
         // These tools are deprecated.
         ToolType::SuggestCreatePlan(_) | ToolType::SuggestPlan(_) => return None,

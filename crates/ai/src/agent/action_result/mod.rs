@@ -104,6 +104,140 @@ pub enum AIAgentActionResultType {
     /// Result of the client-side wait_for_events watchdog or inbound
     /// resume.
     WaitForEvents(WaitForEventsResult),
+
+    /// The result of reading a GitHub pull request.
+    ReadGithubPr(ReadGithubPrResult),
+
+    /// The result of listing GitHub PR review comments.
+    ListGithubPrComments(ListGithubPrCommentsResult),
+
+    /// The result of creating a GitHub pull request.
+    CreateGithubPr(CreateGithubPrResult),
+
+    /// The result of reading a GitHub issue.
+    ReadGithubIssue(ReadGithubIssueResult),
+
+    /// The result of listing GitHub issues.
+    ListGithubIssues(ListGithubIssuesResult),
+
+    /// The result of replying to a GitHub PR review comment.
+    ReplyToPrComment(ReplyToPrCommentResult),
+}
+
+/// Result of a `ReadGithubPr` action.
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+pub enum ReadGithubPrResult {
+    /// A JSON summary of the pull request.
+    Success { pr_json: String },
+    Error(String),
+    Cancelled,
+}
+
+impl Display for ReadGithubPrResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Success { .. } => write!(f, "Read GitHub PR"),
+            Self::Error(error) => write!(f, "Read GitHub PR error: {error}"),
+            Self::Cancelled => write!(f, "Read GitHub PR cancelled"),
+        }
+    }
+}
+
+/// Result of a `ListGithubPrComments` action.
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+pub enum ListGithubPrCommentsResult {
+    /// A JSON array of PR review comments.
+    Success { comments_json: String },
+    Error(String),
+    Cancelled,
+}
+
+impl Display for ListGithubPrCommentsResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Success { .. } => write!(f, "Listed GitHub PR comments"),
+            Self::Error(error) => write!(f, "List GitHub PR comments error: {error}"),
+            Self::Cancelled => write!(f, "List GitHub PR comments cancelled"),
+        }
+    }
+}
+
+/// Result of a `CreateGithubPr` action.
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+pub enum CreateGithubPrResult {
+    Success { url: String, number: i64 },
+    Error(String),
+    Cancelled,
+}
+
+impl Display for CreateGithubPrResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Success { url, number } => {
+                write!(f, "Created GitHub PR #{number}: {url}")
+            }
+            Self::Error(error) => write!(f, "Create GitHub PR error: {error}"),
+            Self::Cancelled => write!(f, "Create GitHub PR cancelled"),
+        }
+    }
+}
+
+/// Result of a `ReadGithubIssue` action.
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+pub enum ReadGithubIssueResult {
+    /// A JSON summary of the issue.
+    Success { issue_json: String },
+    Error(String),
+    Cancelled,
+}
+
+impl Display for ReadGithubIssueResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Success { .. } => write!(f, "Read GitHub issue"),
+            Self::Error(error) => write!(f, "Read GitHub issue error: {error}"),
+            Self::Cancelled => write!(f, "Read GitHub issue cancelled"),
+        }
+    }
+}
+
+/// Result of a `ListGithubIssues` action.
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+pub enum ListGithubIssuesResult {
+    /// A JSON array of issues.
+    Success { issues_json: String },
+    Error(String),
+    Cancelled,
+}
+
+impl Display for ListGithubIssuesResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Success { .. } => write!(f, "Listed GitHub issues"),
+            Self::Error(error) => write!(f, "List GitHub issues error: {error}"),
+            Self::Cancelled => write!(f, "List GitHub issues cancelled"),
+        }
+    }
+}
+
+/// Result of a `ReplyToPrComment` action.
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+pub enum ReplyToPrCommentResult {
+    Success { comment_id: i64, url: String },
+    Error(String),
+    Cancelled,
+}
+
+impl Display for ReplyToPrCommentResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Success { comment_id, .. } => {
+                write!(f, "Replied to PR comment (new comment id {comment_id})")
+            }
+            Self::Error(error) => write!(f, "Reply to PR comment error: {error}"),
+            Self::Cancelled => write!(f, "Reply to PR comment cancelled"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -172,6 +306,12 @@ impl Display for AIAgentActionResultType {
             AIAgentActionResultType::AskUserQuestion(result) => result.fmt(f),
             AIAgentActionResultType::RunAgents(result) => result.fmt(f),
             AIAgentActionResultType::WaitForEvents(result) => result.fmt(f),
+            AIAgentActionResultType::ReadGithubPr(result) => result.fmt(f),
+            AIAgentActionResultType::ListGithubPrComments(result) => result.fmt(f),
+            AIAgentActionResultType::CreateGithubPr(result) => result.fmt(f),
+            AIAgentActionResultType::ReadGithubIssue(result) => result.fmt(f),
+            AIAgentActionResultType::ListGithubIssues(result) => result.fmt(f),
+            AIAgentActionResultType::ReplyToPrComment(result) => result.fmt(f),
             AIAgentActionResultType::OpenCodeReview | AIAgentActionResultType::InitProject => {
                 Ok(())
             }
@@ -776,6 +916,14 @@ impl AIAgentActionResultType {
             AIAgentActionResultType::WaitForEvents(_) => {
                 "The local watchdog timed out while waiting for inbound events"
             }
+            AIAgentActionResultType::ReadGithubPr(_) => "The GitHub pull request summary",
+            AIAgentActionResultType::ListGithubPrComments(_) => {
+                "The GitHub PR review comments"
+            }
+            AIAgentActionResultType::CreateGithubPr(_) => "The created GitHub pull request",
+            AIAgentActionResultType::ReadGithubIssue(_) => "The GitHub issue",
+            AIAgentActionResultType::ListGithubIssues(_) => "The GitHub issues list",
+            AIAgentActionResultType::ReplyToPrComment(_) => "The posted PR comment reply",
         }
     }
 
@@ -815,6 +963,12 @@ impl AIAgentActionResultType {
             Self::AskUserQuestion(AskUserQuestionResult::Success { .. }) => true,
             Self::RunAgents(RunAgentsResult::Launched { .. }) => true,
             Self::WaitForEvents(WaitForEventsResult::Completed) => true,
+            Self::ReadGithubPr(ReadGithubPrResult::Success { .. })
+            | Self::ListGithubPrComments(ListGithubPrCommentsResult::Success { .. })
+            | Self::CreateGithubPr(CreateGithubPrResult::Success { .. })
+            | Self::ReadGithubIssue(ReadGithubIssueResult::Success { .. })
+            | Self::ListGithubIssues(ListGithubIssuesResult::Success { .. })
+            | Self::ReplyToPrComment(ReplyToPrCommentResult::Success { .. }) => true,
             _ => false,
         }
     }
@@ -844,7 +998,13 @@ impl AIAgentActionResultType {
             | Self::TransferShellCommandControlToUser(
                 TransferShellCommandControlToUserResult::Error(_),
             )
-            | Self::RunAgents(RunAgentsResult::Failure { .. } | RunAgentsResult::Denied { .. }) => {
+            | Self::RunAgents(RunAgentsResult::Failure { .. } | RunAgentsResult::Denied { .. })
+            | Self::ReadGithubPr(ReadGithubPrResult::Error(_))
+            | Self::ListGithubPrComments(ListGithubPrCommentsResult::Error(_))
+            | Self::CreateGithubPr(CreateGithubPrResult::Error(_))
+            | Self::ReadGithubIssue(ReadGithubIssueResult::Error(_))
+            | Self::ListGithubIssues(ListGithubIssuesResult::Error(_))
+            | Self::ReplyToPrComment(ReplyToPrCommentResult::Error(_)) => {
                 true
             }
             _ => false,
@@ -890,7 +1050,13 @@ impl AIAgentActionResultType {
             // SkippedByAutoApprove is intentionally excluded: the agent should continue.
             | Self::AskUserQuestion(AskUserQuestionResult::Cancelled)
             | Self::RunAgents(RunAgentsResult::Cancelled)
-            | Self::WaitForEvents(WaitForEventsResult::Cancelled) => true,
+            | Self::WaitForEvents(WaitForEventsResult::Cancelled)
+            | Self::ReadGithubPr(ReadGithubPrResult::Cancelled)
+            | Self::ListGithubPrComments(ListGithubPrCommentsResult::Cancelled)
+            | Self::CreateGithubPr(CreateGithubPrResult::Cancelled)
+            | Self::ReadGithubIssue(ReadGithubIssueResult::Cancelled)
+            | Self::ListGithubIssues(ListGithubIssuesResult::Cancelled)
+            | Self::ReplyToPrComment(ReplyToPrCommentResult::Cancelled) => true,
             _ => false,
         }
     }

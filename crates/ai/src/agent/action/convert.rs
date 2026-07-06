@@ -652,6 +652,71 @@ impl NoneIfDefault for String {
     }
 }
 
+impl From<api::message::tool_call::ReadGithubPr> for AIAgentActionType {
+    fn from(value: api::message::tool_call::ReadGithubPr) -> Self {
+        AIAgentActionType::ReadGithubPr {
+            owner: value.owner,
+            repo: value.repo,
+            number: value.number.max(0) as u64,
+        }
+    }
+}
+
+impl From<api::message::tool_call::ListGithubPrComments> for AIAgentActionType {
+    fn from(value: api::message::tool_call::ListGithubPrComments) -> Self {
+        AIAgentActionType::ListGithubPrComments {
+            owner: value.owner,
+            repo: value.repo,
+            number: value.number.max(0) as u64,
+        }
+    }
+}
+
+impl From<api::message::tool_call::CreateGithubPr> for AIAgentActionType {
+    fn from(value: api::message::tool_call::CreateGithubPr) -> Self {
+        AIAgentActionType::CreateGithubPr(crate::agent::action::CreateGithubPrRequest {
+            owner: value.owner,
+            repo: value.repo,
+            title: value.title,
+            body: value.body,
+            head: value.head,
+            base: value.base,
+            draft: value.draft,
+        })
+    }
+}
+
+impl From<api::message::tool_call::ReadGithubIssue> for AIAgentActionType {
+    fn from(value: api::message::tool_call::ReadGithubIssue) -> Self {
+        AIAgentActionType::ReadGithubIssue {
+            owner: value.owner,
+            repo: value.repo,
+            number: value.number.max(0) as u64,
+        }
+    }
+}
+
+impl From<api::message::tool_call::ListGithubIssues> for AIAgentActionType {
+    fn from(value: api::message::tool_call::ListGithubIssues) -> Self {
+        AIAgentActionType::ListGithubIssues {
+            owner: value.owner,
+            repo: value.repo,
+            filter: value.filter,
+        }
+    }
+}
+
+impl From<api::message::tool_call::ReplyToPrComment> for AIAgentActionType {
+    fn from(value: api::message::tool_call::ReplyToPrComment) -> Self {
+        AIAgentActionType::ReplyToPrComment {
+            owner: value.owner,
+            repo: value.repo,
+            comment_id: value.comment_id.max(0) as u64,
+            body: value.body,
+        }
+    }
+}
+
 impl From<api::message::tool_call::InsertReviewComments> for AIAgentActionType {
     fn from(value: api::message::tool_call::InsertReviewComments) -> Self {
         AIAgentActionType::InsertCodeReviewComments {
@@ -702,3 +767,7 @@ impl From<api::message::tool_call::insert_review_comments::Comment> for InsertRe
         }
     }
 }
+
+#[cfg(test)]
+#[path = "convert_tests.rs"]
+mod tests;

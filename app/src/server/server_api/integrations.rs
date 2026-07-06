@@ -346,10 +346,7 @@ impl IntegrationsClient for ServerApi {
             .await
             .context("Failed to get access token for GitHub token request")?;
 
-        let url = format!(
-            "{}/api/v1/github/token",
-            ChannelState::server_root_url()
-        );
+        let url = format!("{}/api/v1/github/token", ChannelState::server_root_url());
 
         let mut request = self.base_client.http_client().get(&url);
         if let Some(token) = auth_token.as_bearer_token() {

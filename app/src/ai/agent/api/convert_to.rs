@@ -704,6 +704,12 @@ impl TryFrom<AIAgentActionResult> for api::request::input::user_inputs::user_inp
             AIAgentActionResultType::WaitForEvents(wait_for_events_result) => {
                 Some(wait_for_events_result.try_into()?)
             }
+            AIAgentActionResultType::ReadGithubPr(result) => Some(result.try_into()?),
+            AIAgentActionResultType::ListGithubPrComments(result) => Some(result.try_into()?),
+            AIAgentActionResultType::CreateGithubPr(result) => Some(result.try_into()?),
+            AIAgentActionResultType::ReadGithubIssue(result) => Some(result.try_into()?),
+            AIAgentActionResultType::ListGithubIssues(result) => Some(result.try_into()?),
+            AIAgentActionResultType::ReplyToPrComment(result) => Some(result.try_into()?),
         };
         Ok(
             api::request::input::user_inputs::user_input::Input::ToolCallResult(

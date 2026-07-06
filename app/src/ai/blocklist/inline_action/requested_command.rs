@@ -77,6 +77,7 @@ const REQUESTED_COMMAND_MINIMIZE_LABEL: &str = "Done";
 const LOADING_MESSAGE: &str = "Generating command...";
 const COMMAND_WAITING_FOR_USER_MESSAGE: &str = "OK if I run this command and read the output?";
 const MCP_TOOL_WAITING_FOR_USER_MESSAGE: &str = "OK if I call this MCP tool?";
+const GITHUB_ACTION_WAITING_FOR_USER_MESSAGE: &str = "OK if I perform this GitHub action?";
 const MONITORING_COMMAND_MESSAGE: &str = "Agent is monitoring command...";
 const AGENT_NEEDS_INPUT_MESSAGE: &str = "Agent needs your input to continue";
 const USER_TOOK_CONTROL_COMMAND_MESSAGE: &str = "User is in control.";
@@ -85,6 +86,7 @@ const AGENT_REQUESTED_USER_TAKE_CONTROL_COMMAND_MESSAGE: &str = "User in control
 const AGENT_ERRORED_COMMAND_MESSAGE: &str = "Agent ran into an issue. Take over control.";
 pub const VIEWING_COMMAND_DETAIL_MESSAGE: &str = "Viewing command detail";
 const VIEWING_MCP_TOOL_DETAIL_MESSAGE: &str = "Viewing MCP tool call detail";
+const VIEWING_GITHUB_ACTION_DETAIL_MESSAGE: &str = "Viewing GitHub action detail";
 
 const EDIT_COMMAND_ACTION_NAME: &str = "requested_command:edit";
 
@@ -176,6 +178,10 @@ pub fn init(app: &mut AppContext) {
 pub enum RequestedActionViewType {
     Command,
     McpTool,
+    /// One of the GitHub agent actions (PR/issue reads and writes). Renders
+    /// with the same approval card chrome as MCP tools, with GitHub-specific
+    /// copy.
+    GithubAction,
 }
 
 impl RequestedActionViewType {
@@ -185,6 +191,10 @@ impl RequestedActionViewType {
 
     fn is_mcp_tool(&self) -> bool {
         matches!(self, RequestedActionViewType::McpTool)
+    }
+
+    fn is_github_action(&self) -> bool {
+        matches!(self, RequestedActionViewType::GithubAction)
     }
 }
 
@@ -1022,7 +1032,7 @@ impl RequestedCommandView {
             RequestedActionViewType::Command => terminal_model
                 .block_list()
                 .block_for_ai_action_id(&self.action_id),
-            RequestedActionViewType::McpTool => None,
+            RequestedActionViewType::McpTool | RequestedActionViewType::GithubAction => None,
         };
 
         match action_status {
@@ -1051,6 +1061,9 @@ impl RequestedCommandView {
                 title = match &self.action_type {
                     RequestedActionViewType::Command => COMMAND_WAITING_FOR_USER_MESSAGE.into(),
                     RequestedActionViewType::McpTool => MCP_TOOL_WAITING_FOR_USER_MESSAGE.into(),
+                    RequestedActionViewType::GithubAction => {
+                        GITHUB_ACTION_WAITING_FOR_USER_MESSAGE.into()
+                    }
                 };
             }
             Some(AIActionStatus::RunningAsync) | Some(AIActionStatus::Finished(..))
@@ -1086,6 +1099,9 @@ impl RequestedCommandView {
                         }
                     }
                     RequestedActionViewType::McpTool => VIEWING_MCP_TOOL_DETAIL_MESSAGE.into(),
+                    RequestedActionViewType::GithubAction => {
+                        VIEWING_GITHUB_ACTION_DETAIL_MESSAGE.into()
+                    }
                 };
             }
             None => {
@@ -1218,7 +1234,8 @@ impl RequestedCommandView {
                             ];
                             (action_buttons, LARGE_SIZE_SWITCH_THRESHOLD)
                         }
-                        RequestedActionViewType::McpTool => {
+                        RequestedActionViewType::McpTool
+                        | RequestedActionViewType::GithubAction => {
                             let action_buttons: Vec<Rc<dyn RenderCompactibleActionButton>> = vec![
                                 Rc::new(self.cancel_button.clone()),
                                 Rc::new(self.accept_and_autoexecute_split_button.clone()),
@@ -1299,6 +1316,9 @@ impl RequestedCommandView {
         match &self.action_type {
             RequestedActionViewType::Command => format_command_text(self.command_text()),
             RequestedActionViewType::McpTool => self.extract_mcp_tool_name(self.command_text()),
+            // GitHub action command text is already a short human-readable
+            // description.
+            RequestedActionViewType::GithubAction => self.command_text().to_string(),
         }
     }
 
@@ -1410,9 +1430,10 @@ impl View for RequestedCommandView {
             && self.action_type.is_requested_command()
             && self.editor.is_some();
 
-        // For MCP tools, when expanded, show either the tool call details or the JSON response.
+        // For MCP tools and GitHub actions, when expanded, show either the
+        // call details or the JSON response.
         let should_render_mcp_content = self.is_header_expanded
-            && self.action_type.is_mcp_tool()
+            && (self.action_type.is_mcp_tool() || self.action_type.is_github_action())
             && !self.command_text.is_empty();
 
         let has_citations_footer =
@@ -1449,22 +1470,29 @@ impl View for RequestedCommandView {
 
         if should_render_mcp_content {
             let command_text = self.command_text();
-            let content_text = if let Some(AIAgentActionResultType::CallMCPTool(result)) =
-                action_status
-                    .as_ref()
-                    .and_then(|status| status.finished_result().map(|result| &result.result))
-            {
-                // If we have a result, show the JSON response.
-                let result_text = match result {
-                    CallMCPToolResult::Success { result } => serde_json::to_string_pretty(result)
-                        .unwrap_or_else(|_| "Error formatting JSON".to_string()),
-                    CallMCPToolResult::Error(error) => {
-                        format!("Error: {error}")
-                    }
-                    CallMCPToolResult::Cancelled => "Tool call was cancelled".to_string(),
-                };
+            let finished_result = action_status
+                .as_ref()
+                .and_then(|status| status.finished_result().map(|result| &result.result));
+            let result_text = match finished_result {
+                Some(AIAgentActionResultType::CallMCPTool(result)) => {
+                    // If we have a result, show the JSON response.
+                    Some(match result {
+                        CallMCPToolResult::Success { result } => {
+                            serde_json::to_string_pretty(result)
+                                .unwrap_or_else(|_| "Error formatting JSON".to_string())
+                        }
+                        CallMCPToolResult::Error(error) => {
+                            format!("Error: {error}")
+                        }
+                        CallMCPToolResult::Cancelled => "Tool call was cancelled".to_string(),
+                    })
+                }
+                Some(result) => github_action_result_text(result),
+                None => None,
+            };
+            let content_text = if let Some(result_text) = result_text {
                 format!("{command_text}\n\nResponse: {result_text}")
-            } else if self.is_header_expanded {
+            } else if self.is_header_expanded || self.action_type.is_github_action() {
                 command_text.to_string()
             } else {
                 self.extract_mcp_tool_name(command_text)
@@ -1677,6 +1705,63 @@ impl RequestedCommand {
             command.set_is_header_expanded(false, ctx);
         })
     }
+}
+
+/// Human-readable response text for a finished GitHub action result, shown in
+/// the expanded requested-action card body. Returns `None` for non-GitHub
+/// results.
+fn github_action_result_text(result: &AIAgentActionResultType) -> Option<String> {
+    use crate::ai::agent::{
+        CreateGithubPrResult, ListGithubIssuesResult, ListGithubPrCommentsResult,
+        ReadGithubIssueResult, ReadGithubPrResult, ReplyToPrCommentResult,
+    };
+
+    /// Pretty-prints a JSON payload, falling back to the raw string.
+    fn pretty_json(json: &str) -> String {
+        serde_json::from_str::<serde_json::Value>(json)
+            .and_then(|value| serde_json::to_string_pretty(&value))
+            .unwrap_or_else(|_| json.to_string())
+    }
+
+    const CANCELLED: &str = "GitHub action was cancelled";
+
+    Some(match result {
+        AIAgentActionResultType::ReadGithubPr(result) => match result {
+            ReadGithubPrResult::Success { pr_json } => pretty_json(pr_json),
+            ReadGithubPrResult::Error(error) => format!("Error: {error}"),
+            ReadGithubPrResult::Cancelled => CANCELLED.to_string(),
+        },
+        AIAgentActionResultType::ListGithubPrComments(result) => match result {
+            ListGithubPrCommentsResult::Success { comments_json } => pretty_json(comments_json),
+            ListGithubPrCommentsResult::Error(error) => format!("Error: {error}"),
+            ListGithubPrCommentsResult::Cancelled => CANCELLED.to_string(),
+        },
+        AIAgentActionResultType::CreateGithubPr(result) => match result {
+            CreateGithubPrResult::Success { url, number } => {
+                format!("Created PR #{number}: {url}")
+            }
+            CreateGithubPrResult::Error(error) => format!("Error: {error}"),
+            CreateGithubPrResult::Cancelled => CANCELLED.to_string(),
+        },
+        AIAgentActionResultType::ReadGithubIssue(result) => match result {
+            ReadGithubIssueResult::Success { issue_json } => pretty_json(issue_json),
+            ReadGithubIssueResult::Error(error) => format!("Error: {error}"),
+            ReadGithubIssueResult::Cancelled => CANCELLED.to_string(),
+        },
+        AIAgentActionResultType::ListGithubIssues(result) => match result {
+            ListGithubIssuesResult::Success { issues_json } => pretty_json(issues_json),
+            ListGithubIssuesResult::Error(error) => format!("Error: {error}"),
+            ListGithubIssuesResult::Cancelled => CANCELLED.to_string(),
+        },
+        AIAgentActionResultType::ReplyToPrComment(result) => match result {
+            ReplyToPrCommentResult::Success { comment_id, url } => {
+                format!("Posted reply comment {comment_id}: {url}")
+            }
+            ReplyToPrCommentResult::Error(error) => format!("Error: {error}"),
+            ReplyToPrCommentResult::Cancelled => CANCELLED.to_string(),
+        },
+        _ => return None,
+    })
 }
 
 /// Formats the command text to truncate at the first newline and add an ellipsis.

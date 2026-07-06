@@ -265,6 +265,57 @@ pub(crate) fn redact_inputs(inputs: &mut [AIAgentInput]) {
                     // strings only; no user-provided text to redact.
                     AIAgentActionResultType::RunAgents(_)
                     | AIAgentActionResultType::WaitForEvents(_) => {}
+                    // GitHub payloads come from the GitHub API (not local
+                    // shell/file content), but redact anyway as
+                    // defense-in-depth since they can embed code snippets.
+                    AIAgentActionResultType::ReadGithubPr(result) => {
+                        use crate::ai::agent::ReadGithubPrResult::*;
+                        match result {
+                            Success { pr_json } => redact_secrets(pr_json),
+                            Error(error) => redact_secrets(error),
+                            Cancelled => {}
+                        }
+                    }
+                    AIAgentActionResultType::ListGithubPrComments(result) => {
+                        use crate::ai::agent::ListGithubPrCommentsResult::*;
+                        match result {
+                            Success { comments_json } => redact_secrets(comments_json),
+                            Error(error) => redact_secrets(error),
+                            Cancelled => {}
+                        }
+                    }
+                    AIAgentActionResultType::CreateGithubPr(result) => {
+                        use crate::ai::agent::CreateGithubPrResult::*;
+                        match result {
+                            Success { .. } => {}
+                            Error(error) => redact_secrets(error),
+                            Cancelled => {}
+                        }
+                    }
+                    AIAgentActionResultType::ReadGithubIssue(result) => {
+                        use crate::ai::agent::ReadGithubIssueResult::*;
+                        match result {
+                            Success { issue_json } => redact_secrets(issue_json),
+                            Error(error) => redact_secrets(error),
+                            Cancelled => {}
+                        }
+                    }
+                    AIAgentActionResultType::ListGithubIssues(result) => {
+                        use crate::ai::agent::ListGithubIssuesResult::*;
+                        match result {
+                            Success { issues_json } => redact_secrets(issues_json),
+                            Error(error) => redact_secrets(error),
+                            Cancelled => {}
+                        }
+                    }
+                    AIAgentActionResultType::ReplyToPrComment(result) => {
+                        use crate::ai::agent::ReplyToPrCommentResult::*;
+                        match result {
+                            Success { .. } => {}
+                            Error(error) => redact_secrets(error),
+                            Cancelled => {}
+                        }
+                    }
                 }
             }
             AIAgentInput::FetchReviewComments { repo_path, context } => {

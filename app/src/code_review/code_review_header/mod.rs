@@ -39,6 +39,7 @@ struct StateHandles {
     branch_name_tooltip: MouseStateHandle,
     discard_all_button: MouseStateHandle,
     add_diff_set_context_button: MouseStateHandle,
+    pr_chip: MouseStateHandle,
 }
 
 pub struct CodeReviewHeader {

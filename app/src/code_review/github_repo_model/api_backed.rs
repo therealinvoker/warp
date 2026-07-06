@@ -149,7 +149,11 @@ impl ApiBackedGitHubRepoModel {
         let branch_for_callback = branch.clone();
         let abort_handle = ctx.spawn(
             async move {
-                let fetch = fetch_pr_for_branch(&client, &owner, &repo, &branch);
+                // reqwest requires a Tokio reactor; the app executor is not
+                // Tokio, so run the GitHub calls inside an async-compat shim.
+                use async_compat::CompatExt as _;
+                let fetch =
+                    async { fetch_pr_for_branch(&client, &owner, &repo, &branch).await }.compat();
                 let timeout = async_io::Timer::after(PR_INFO_FETCH_TIMEOUT);
                 futures::pin_mut!(fetch);
                 match futures::future::select(fetch, timeout).await {
@@ -256,8 +260,11 @@ async fn fetch_checks_summary(
             }
             match run.conclusion.as_deref() {
                 Some("success") | Some("neutral") | Some("skipped") => summary.success += 1,
-                Some("failure") | Some("timed_out") | Some("cancelled")
-                | Some("action_required") | Some("stale") => summary.failure += 1,
+                Some("failure")
+                | Some("timed_out")
+                | Some("cancelled")
+                | Some("action_required")
+                | Some("stale") => summary.failure += 1,
                 _ => summary.pending += 1,
             }
         }

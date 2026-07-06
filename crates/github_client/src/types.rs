@@ -99,6 +99,11 @@ pub struct ReviewComment {
     pub body: String,
     pub user: User,
     pub html_url: String,
+    /// API URL of the pull request the comment belongs to
+    /// (`https://api.github.com/repos/{owner}/{repo}/pulls/{number}`). Used to
+    /// resolve the PR number when only a comment id is known.
+    #[serde(default)]
+    pub pull_request_url: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

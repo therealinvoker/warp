@@ -520,6 +520,34 @@ fn write_tool_call_args(out: &mut String, tool: &Tool) {
                 ));
             }
         }
+        Tool::ReadGithubPr(t) => {
+            out.push_str(&format!("owner: {}\nrepo: {}\nnumber: {}\n", t.owner, t.repo, t.number));
+        }
+        Tool::ListGithubPrComments(t) => {
+            out.push_str(&format!("owner: {}\nrepo: {}\nnumber: {}\n", t.owner, t.repo, t.number));
+        }
+        Tool::CreateGithubPr(t) => {
+            out.push_str(&format!("owner: {}\nrepo: {}\n", t.owner, t.repo));
+            out.push_str(&format!("title: \"{}\"\n", escape_yaml_string(&t.title)));
+            out.push_str(&format!("head: {}\nbase: {}\ndraft: {}\n", t.head, t.base, t.draft));
+        }
+        Tool::ReadGithubIssue(t) => {
+            out.push_str(&format!("owner: {}\nrepo: {}\nnumber: {}\n", t.owner, t.repo, t.number));
+        }
+        Tool::ListGithubIssues(t) => {
+            out.push_str(&format!("owner: {}\nrepo: {}\n", t.owner, t.repo));
+            if !t.filter.is_empty() {
+                out.push_str(&format!("filter: \"{}\"\n", escape_yaml_string(&t.filter)));
+            }
+        }
+        Tool::ReplyToPrComment(t) => {
+            out.push_str(&format!(
+                "owner: {}\nrepo: {}\ncomment_id: {}\n",
+                t.owner, t.repo, t.comment_id
+            ));
+            out.push_str("body: |\n");
+            write_block_scalar(out, truncate_content(&t.body, 2048));
+        }
         // No additional args worth serializing.
         Tool::ReadShellCommandOutput(_)
         | Tool::UseComputer(_)
@@ -1090,6 +1118,88 @@ fn write_tool_call_result_content(out: &mut String, result: &ToolCallResultType)
         }
         ToolCallResultType::Cancel(_) => {
             out.push_str("status: cancelled\n");
+        }
+        ToolCallResultType::ReadGithubPr(r) => {
+            if let Some(res) = &r.result {
+                use api::read_github_pr_result::Result;
+                match res {
+                    Result::Success(s) => {
+                        out.push_str("pr_json: |\n");
+                        write_block_scalar(out, truncate_content(&s.pr_json, 4096));
+                    }
+                    Result::Error(e) => {
+                        out.push_str(&format!("error: {}\n", e.message));
+                    }
+                }
+            }
+        }
+        ToolCallResultType::ListGithubPrComments(r) => {
+            if let Some(res) = &r.result {
+                use api::list_github_pr_comments_result::Result;
+                match res {
+                    Result::Success(s) => {
+                        out.push_str("comments_json: |\n");
+                        write_block_scalar(out, truncate_content(&s.comments_json, 4096));
+                    }
+                    Result::Error(e) => {
+                        out.push_str(&format!("error: {}\n", e.message));
+                    }
+                }
+            }
+        }
+        ToolCallResultType::CreateGithubPr(r) => {
+            if let Some(res) = &r.result {
+                use api::create_github_pr_result::Result;
+                match res {
+                    Result::Success(s) => {
+                        out.push_str(&format!("url: {}\nnumber: {}\n", s.url, s.number));
+                    }
+                    Result::Error(e) => {
+                        out.push_str(&format!("error: {}\n", e.message));
+                    }
+                }
+            }
+        }
+        ToolCallResultType::ReadGithubIssue(r) => {
+            if let Some(res) = &r.result {
+                use api::read_github_issue_result::Result;
+                match res {
+                    Result::Success(s) => {
+                        out.push_str("issue_json: |\n");
+                        write_block_scalar(out, truncate_content(&s.issue_json, 4096));
+                    }
+                    Result::Error(e) => {
+                        out.push_str(&format!("error: {}\n", e.message));
+                    }
+                }
+            }
+        }
+        ToolCallResultType::ListGithubIssues(r) => {
+            if let Some(res) = &r.result {
+                use api::list_github_issues_result::Result;
+                match res {
+                    Result::Success(s) => {
+                        out.push_str("issues_json: |\n");
+                        write_block_scalar(out, truncate_content(&s.issues_json, 4096));
+                    }
+                    Result::Error(e) => {
+                        out.push_str(&format!("error: {}\n", e.message));
+                    }
+                }
+            }
+        }
+        ToolCallResultType::ReplyToPrComment(r) => {
+            if let Some(res) = &r.result {
+                use api::reply_to_pr_comment_result::Result;
+                match res {
+                    Result::Success(s) => {
+                        out.push_str(&format!("comment_id: {}\nurl: {}\n", s.comment_id, s.url));
+                    }
+                    Result::Error(e) => {
+                        out.push_str(&format!("error: {}\n", e.message));
+                    }
+                }
+            }
         }
         // No structured content worth serializing.
         ToolCallResultType::Server(_)

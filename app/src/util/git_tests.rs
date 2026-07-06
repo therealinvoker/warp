@@ -422,3 +422,28 @@ async fn detached_tag_display_returns_short_sha() {
         "expected {full_sha} to start with {result}"
     );
 }
+
+#[test]
+fn parse_github_owner_repo_handles_common_url_forms() {
+    use super::parse_github_owner_repo;
+
+    assert_eq!(
+        parse_github_owner_repo("git@github.com:warpdotdev/warp.git"),
+        Some(("warpdotdev".to_string(), "warp".to_string()))
+    );
+    assert_eq!(
+        parse_github_owner_repo("https://github.com/warpdotdev/warp.git"),
+        Some(("warpdotdev".to_string(), "warp".to_string()))
+    );
+    assert_eq!(
+        parse_github_owner_repo("https://github.com/warpdotdev/warp"),
+        Some(("warpdotdev".to_string(), "warp".to_string()))
+    );
+    assert_eq!(
+        parse_github_owner_repo("ssh://git@github.com/o/r.git"),
+        Some(("o".to_string(), "r".to_string()))
+    );
+    // Non-github remotes are ignored (GHES deferred).
+    assert_eq!(parse_github_owner_repo("git@gitlab.com:o/r.git"), None);
+    assert_eq!(parse_github_owner_repo("not a url"), None);
+}

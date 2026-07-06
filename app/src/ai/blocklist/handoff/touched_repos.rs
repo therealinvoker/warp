@@ -382,7 +382,15 @@ fn extract_action_paths(
         | AIAgentActionType::TransferShellCommandControlToUser { .. }
         | AIAgentActionType::AskUserQuestion { .. }
         | AIAgentActionType::RunAgents(_)
-        | AIAgentActionType::WaitForEvents { .. } => {}
+        | AIAgentActionType::WaitForEvents { .. }
+        // GitHub actions operate on remote repos via the API; they never touch
+        // local files.
+        | AIAgentActionType::ReadGithubPr { .. }
+        | AIAgentActionType::ListGithubPrComments { .. }
+        | AIAgentActionType::CreateGithubPr(_)
+        | AIAgentActionType::ReadGithubIssue { .. }
+        | AIAgentActionType::ListGithubIssues { .. }
+        | AIAgentActionType::ReplyToPrComment { .. } => {}
     }
 }
 

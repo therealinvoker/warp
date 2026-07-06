@@ -202,10 +202,8 @@ impl GitRepoModels {
             return None;
         }
 
-        let token_provider =
-            GithubConnection::handle(ctx).update(ctx, |connection, ctx| {
-                connection.token_provider(ctx)
-            });
+        let token_provider = GithubConnection::handle(ctx)
+            .update(ctx, |connection, ctx| connection.token_provider(ctx));
         let client = match github_client::GithubClient::new(token_provider) {
             Ok(client) => std::sync::Arc::new(client),
             Err(err) => {
