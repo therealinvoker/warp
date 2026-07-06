@@ -214,9 +214,12 @@ impl SettingsWidget for GithubSettingsWidget {
     ) -> Box<dyn Element> {
         let state = GithubConnection::as_ref(app).state().clone();
 
+        // Content-sized: this monolith page is not dual-scrollable
+        // (new_monolith(..., false)), so it lays out under an unbounded vertical
+        // constraint. A Max main-axis flex panics there; size to content instead.
         let mut column = Flex::column()
             .with_cross_axis_alignment(CrossAxisAlignment::Start)
-            .with_main_axis_size(MainAxisSize::Max);
+            .with_main_axis_size(MainAxisSize::Min);
 
         column.add_child(render_sub_header(appearance, "Connection", None));
 
