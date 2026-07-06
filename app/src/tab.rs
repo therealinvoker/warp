@@ -482,56 +482,20 @@ impl TabData {
     fn modify_tab_menu_items(
         &self,
         index: usize,
-        can_move_left: bool,
-        can_move_right: bool,
+        _can_move_left: bool,
+        _can_move_right: bool,
         pane_name_target: Option<PaneNameMenuTarget>,
         ctx: &AppContext,
     ) -> Vec<MenuItem<WorkspaceAction>> {
         let mut menu_items = vec![];
-        let uses_vertical_tabs = uses_vertical_tabs(ctx);
 
         // TODO add option to show the keybinding once we figure out a nice API to retrieve
         // the actual keybinding (based on the user's preferences etc.)
         menu_items.append(&mut vec![MenuItemFields::new("Rename tab")
             .with_on_select_action(WorkspaceAction::RenameTab(index))
             .into_item()]);
-        // Group together with rename option (note, resetting doesn't make
-        // sense unless you're able to rename a tab).
-        let title = self.pane_group.as_ref(ctx).custom_title(ctx);
-        if title.is_some() {
-            menu_items.push(
-                MenuItemFields::new("Reset tab name")
-                    .with_on_select_action(WorkspaceAction::ResetTabName(index))
-                    .into_item(),
-            );
-        }
         if let Some(pane_name_target) = pane_name_target {
             menu_items.extend(self.pane_name_menu_items(pane_name_target, ctx));
-        }
-        // `can_move_left` / `can_move_right` come from `Workspace::can_move_tab`
-        // and gate the "Move Tab Up/Down" entries so they disappear when the
-        // move would cross the pinned/unpinned boundary, group boundary or tab list bounds.
-        if can_move_right {
-            menu_items.push(
-                MenuItemFields::new(if uses_vertical_tabs {
-                    "Move Tab Down"
-                } else {
-                    "Move Tab Right"
-                })
-                .with_on_select_action(WorkspaceAction::MoveTabRight(index))
-                .into_item(),
-            );
-        }
-        if can_move_left {
-            menu_items.push(
-                MenuItemFields::new(if uses_vertical_tabs {
-                    "Move Tab Up"
-                } else {
-                    "Move Tab Left"
-                })
-                .with_on_select_action(WorkspaceAction::MoveTabLeft(index))
-                .into_item(),
-            );
         }
         menu_items
     }

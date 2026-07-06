@@ -118,6 +118,8 @@ pub enum SettingsPageViewHandle {
     BillingAndUsage(ViewHandle<BillingAndUsageDispatchView>),
     MCPServers(ViewHandle<MCPServersSettingsPageView>),
     WarpDrive(ViewHandle<WarpDriveSettingsPageView>),
+    #[cfg(feature = "github_integration")]
+    Github(ViewHandle<super::github_page::GithubSettingsPageView>),
 }
 
 impl SettingsPageViewHandle {
@@ -142,6 +144,8 @@ impl SettingsPageViewHandle {
             BillingAndUsage(view_handle) => ChildView::new(view_handle).finish(),
             MCPServers(view_handle) => ChildView::new(view_handle).finish(),
             WarpDrive(view_handle) => ChildView::new(view_handle).finish(),
+            #[cfg(feature = "github_integration")]
+            Github(view_handle) => ChildView::new(view_handle).finish(),
         }
     }
 }

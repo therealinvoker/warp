@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context as _, Result};
 use async_trait::async_trait;
 use cynic::{MutationBuilder, QueryBuilder};
 #[cfg(test)]
@@ -37,6 +37,21 @@ use super::ServerApi;
 use crate::channel::ChannelState;
 use crate::features::FeatureFlag;
 use crate::server::graphql::{get_request_context, get_user_facing_error_message};
+
+/// Response shape of `GET /api/v1/github/token`.
+///
+/// The server mints a short-lived user-to-server GitHub token (refreshed
+/// server-side, issuance audit-logged) so the client can call api.github.com
+/// directly without holding GitHub App credentials. `expires_at` is an RFC3339
+/// timestamp; `installation_id` identifies the GitHub App installation.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct GithubTokenResponse {
+    pub token: String,
+    #[serde(default)]
+    pub expires_at: Option<String>,
+    #[serde(default)]
+    pub installation_id: Option<u64>,
+}
 
 #[cfg(not(target_family = "wasm"))]
 pub trait IntegrationsClientBounds: Send + Sync {}
@@ -128,6 +143,18 @@ pub trait IntegrationsClient: 'static + IntegrationsClientBounds {
     /// * `Ok(UserGithubInfoResult)` - Either connected with repos, or auth required
     /// * `Err` - If the query fails
     async fn get_user_github_info(&self) -> Result<UserGithubInfoResult>;
+
+    /// Fetches a short-lived GitHub token from the backend
+    /// (`GET /api/v1/github/token`) for direct api.github.com access.
+    ///
+    /// The backend mints/refreshes a user-to-server token server-side and
+    /// audit-logs issuance. Callers (`GithubConnection`) cache the token in
+    /// memory and treat `expires_at` strictly.
+    ///
+    /// TODO(G4): governance is enforced server-side at token minting; the
+    /// client also gates token requests as defense-in-depth (see
+    /// `GithubConnection::token`).
+    async fn get_github_token(&self) -> Result<GithubTokenResponse>;
 
     /// Suggests a Docker image for a cloud environment based on the provided repos.
     async fn suggest_cloud_environment_image(
@@ -308,6 +335,43 @@ impl IntegrationsClient for ServerApi {
         }
 
         Ok(result)
+    }
+
+    async fn get_github_token(&self) -> Result<GithubTokenResponse> {
+        // TODO(G4): defense-in-depth governance check would gate here before
+        // requesting a token (mirroring how McpGovernance gates spawns). The
+        // authoritative enforcement is server-side at token minting.
+        let auth_token = self
+            .get_or_refresh_access_token()
+            .await
+            .context("Failed to get access token for GitHub token request")?;
+
+        let url = format!(
+            "{}/api/v1/github/token",
+            ChannelState::server_root_url()
+        );
+
+        let mut request = self.base_client.http_client().get(&url);
+        if let Some(token) = auth_token.as_bearer_token() {
+            request = request.bearer_auth(token);
+        }
+        for (name, value) in self.ambient_agent_headers().await? {
+            request = request.header(name, value);
+        }
+
+        let response = request
+            .send()
+            .await
+            .with_context(|| format!("Failed to send GitHub token request to {url}"))?;
+
+        if !response.status().is_success() {
+            return Err(Self::error_from_response(response).await);
+        }
+
+        response
+            .json::<GithubTokenResponse>()
+            .await
+            .context("Failed to deserialize GitHub token response")
     }
 
     async fn suggest_cloud_environment_image(

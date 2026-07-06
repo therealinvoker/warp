@@ -122,7 +122,10 @@ impl TerminalViewZeroStateBlock {
 
         let ai_settings = AISettings::as_ref(ctx);
         Self {
-            should_hide: false,
+            // The "New terminal session" zero-state card is intentionally never shown. Forcing
+            // `should_hide` keeps the rest of the view reachable (no dead-code warnings) while
+            // `render` returns the existing hidden/empty result.
+            should_hide: true,
             should_render_nld_checkbox: ai_settings.is_any_ai_enabled(ctx),
             state_handles: Default::default(),
         }

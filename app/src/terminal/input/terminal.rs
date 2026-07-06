@@ -1,7 +1,7 @@
 use warp_core::settings::Setting;
 use warpui::elements::{
-    Border, Clipped, Container, DropTarget, Element, Flex, Hoverable, ParentElement, SavePosition,
-    Stack,
+    Border, Clipped, Container, DropTarget, Element, Flex, Hoverable, MainAxisSize, ParentElement,
+    SavePosition, Stack,
 };
 use warpui::presenter::ChildView;
 use warpui::{AppContext, SingletonEntity};
@@ -11,11 +11,14 @@ use super::common::{
     add_workflow_info_overlay, should_show_terminal_input_message_bar,
     wrap_input_with_terminal_padding_and_focus_handler,
 };
-use super::{Input, InputAction, InputDropTargetData};
+use super::{
+    render_session_mode_segmented_control, Input, InputAction, InputDropTargetData,
+    SessionModeSegment,
+};
 use crate::appearance::Appearance;
 use crate::context_chips::spacing;
 use crate::features::FeatureFlag;
-use crate::settings::{AppEditorSettings, InputModeSettings};
+use crate::settings::{AISettings, AppEditorSettings, InputModeSettings};
 use crate::terminal::block_list_settings::BlockListSettings;
 use crate::terminal::block_list_viewport::InputMode;
 use crate::terminal::settings::TerminalSettings;
@@ -67,6 +70,28 @@ impl Input {
                 )
                 .finish(),
         );
+
+        // Persistent session-mode segmented control ("Agent | Cloud Agent | Terminal").
+        // Only shown when agent modes are actually usable so the plain terminal input is
+        // left untouched when AI is disabled.
+        if FeatureFlag::AgentView.is_enabled() && AISettings::as_ref(app).is_any_ai_enabled(app) {
+            let include_cloud_agent = FeatureFlag::CloudMode.is_enabled();
+            column.add_child(
+                Container::new(
+                    Flex::row()
+                        .with_main_axis_size(MainAxisSize::Min)
+                        .with_child(render_session_mode_segmented_control(
+                            SessionModeSegment::Terminal,
+                            include_cloud_agent,
+                            &self.session_mode_mouse_states,
+                            appearance,
+                        ))
+                        .finish(),
+                )
+                .with_margin_top(4.)
+                .finish(),
+            );
+        }
 
         if should_show_terminal_input_message_bar(&model, app) {
             column.add_child(

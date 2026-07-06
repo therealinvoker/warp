@@ -13,6 +13,8 @@ fn pr(number: u64) -> PrInfo {
         state: "OPEN".to_string(),
         draft: false,
         base_branch: "main".to_string(),
+        checks_summary: None,
+        review_comment_count: None,
     }
 }
 

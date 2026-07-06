@@ -188,6 +188,11 @@ pub enum WorkspaceAction {
     /// keyed by the folder's key (git repo root / working directory, or the
     /// empty string for the "Other" bucket).
     ToggleWorkspaceFolderCollapsed(String),
+    /// Toggle whether the given vertical-tabs group/folder shows all of its
+    /// rows or only the first few, keyed by the group/folder key. Ephemeral
+    /// view state only (not persisted); dispatched by the "See more" /
+    /// "Show less" row.
+    ToggleVerticalTabsGroupShowAll(String),
     /// Opens an inline editor over the given group's header for renaming.
     RenameTabGroup(TabGroupId),
     /// Creates a new tab group containing the tab at the given index.
@@ -244,6 +249,11 @@ pub enum WorkspaceAction {
     PinTab(usize),
     /// Unpins the tab at the given index.
     UnpinTab(usize),
+    /// Archives the tab at the given index. There is no dedicated archive
+    /// backend in this fork yet, so this reuses the canonical close/remove-tab
+    /// path to hide the tab from the sidebar (same removal as `CloseTab`). Not
+    /// reversible.
+    ArchiveTab(usize),
     /// Pins the active tab.
     PinActiveTab,
     /// Unpins the active tab.
@@ -1018,6 +1028,7 @@ impl WorkspaceAction {
             | ToggleErrorUnderlining
             | ToggleSyntaxHighlighting
             | OpenLaunchConfigSaveModal
+            | ArchiveTab(_)
             | ToggleTabRightClickMenu { .. }
             | ToggleTabSelectionRightClickMenu { .. }
             | ToggleTabGroupRightClickMenu { .. }
@@ -1074,6 +1085,7 @@ impl WorkspaceAction {
             | ToggleVerticalTabsShowPrLink
             | ToggleVerticalTabsShowDiffStats
             | ToggleVerticalTabsShowDetailsOnHover
+            | ToggleVerticalTabsGroupShowAll(_)
             | ToggleWelcomeTips
             | CopyTextToClipboard(_)
             | CopyAccessTokenToClipboard

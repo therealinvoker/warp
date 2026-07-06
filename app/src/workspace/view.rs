@@ -12271,12 +12271,32 @@ impl Workspace {
             ctx
         );
 
+        // Capture the source before creating/activating the new tab, since activating the new
+        // tab overwrites focus/recency state in ActiveAgentViewsModel.
+        let source_terminal_view_id = self.most_recently_active_agent_terminal_view_id(ctx);
+
         self.add_tab_with_pane_layout(
             PanesLayout::AmbientAgent,
             Arc::new(HashMap::new()),
             None,
             ctx,
         );
+
+        // Default the new cloud agent pane to the model of the most recently active agent
+        // conversation, falling back to the profile/global default when there is no source.
+        let new_terminal_view_id = self.active_session_view(ctx).map(|tv| tv.as_ref(ctx).id());
+        if let (Some(source_terminal_view_id), Some(new_terminal_view_id)) =
+            (source_terminal_view_id, new_terminal_view_id)
+        {
+            if source_terminal_view_id != new_terminal_view_id {
+                Self::copy_agent_model_to_terminal_view(
+                    source_terminal_view_id,
+                    new_terminal_view_id,
+                    ctx,
+                );
+            }
+        }
+
         ctx.notify();
     }
 
@@ -23568,6 +23588,11 @@ impl TypedActionView for Workspace {
             ToggleWorkspaceFolderCollapsed(folder_key) => {
                 self.toggle_workspace_folder_collapsed(folder_key.clone(), ctx)
             }
+            ToggleVerticalTabsGroupShowAll(group_key) => {
+                self.vertical_tabs_panel
+                    .toggle_group_show_all(group_key.clone());
+                ctx.notify();
+            }
             RenameTabGroup(group_id) => self.rename_tab_group(*group_id, ctx),
             NewTabGroupFromTab(tab_index) => self.new_tab_group_from_tab(*tab_index, ctx),
             MoveTabToGroup {
@@ -23601,6 +23626,14 @@ impl TypedActionView for Workspace {
             CloseTabsBelowGroup(group_id) => self.close_tabs_below_group(*group_id, ctx),
             PinTab(tab_index) => self.pin_tab(*tab_index, ctx),
             UnpinTab(tab_index) => self.unpin_tab(*tab_index, ctx),
+            ArchiveTab(tab_index) => {
+                // No dedicated archive backend exists in this fork yet. To make the
+                // affordance actually hide the tab, archive reuses the canonical
+                // close/remove-tab path (same as the old ✕ button's `CloseTab`).
+                // The tab reliably disappears from the sidebar; this is not
+                // reversible.
+                self.close_tab(*tab_index, false, true, ctx)
+            }
             PinActiveTab => self.pin_tab(self.active_tab_index, ctx),
             UnpinActiveTab => self.unpin_tab(self.active_tab_index, ctx),
             PinTabGroup(group_id) => self.pin_tab_group(*group_id, ctx),

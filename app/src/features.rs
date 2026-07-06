@@ -289,6 +289,8 @@ fn enabled_features() -> HashSet<FeatureFlag> {
         FeatureFlag::CursorMcpImport,
         #[cfg(feature = "mcp_governance")]
         FeatureFlag::McpGovernance,
+        #[cfg(feature = "github_integration")]
+        FeatureFlag::GithubIntegration,
         #[cfg(feature = "diff_set_as_context")]
         FeatureFlag::DiffSetAsContext,
         #[cfg(feature = "discard_per_file_and_all_changes")]

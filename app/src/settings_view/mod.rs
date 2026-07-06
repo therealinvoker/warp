@@ -90,6 +90,8 @@ pub(crate) mod environments_page;
 mod execution_profile_view;
 mod features;
 mod features_page;
+#[cfg(feature = "github_integration")]
+pub mod github_page;
 pub(crate) mod handoff_environment_creation_modal;
 pub mod keybindings;
 mod main_page;
@@ -247,6 +249,9 @@ pub enum SettingsSection {
     #[default]
     Account,
     MCPServers,
+    /// GitHub integration settings (connect / manage installation / disconnect).
+    /// Gated on `FeatureFlag::GithubIntegration`.
+    Github,
     BillingAndUsage,
     Appearance,
     Features,
@@ -293,6 +298,7 @@ impl Display for SettingsSection {
             SettingsSection::Keybindings => write!(f, "Keyboard shortcuts"),
             SettingsSection::SharedBlocks => write!(f, "Shared blocks"),
             SettingsSection::MCPServers => write!(f, "MCP Servers"),
+            SettingsSection::Github => write!(f, "GitHub"),
             SettingsSection::Scripting => write!(f, "Scripting"),
             SettingsSection::WarpDrive => write!(f, "Warp Drive"),
             SettingsSection::WarpAgent => write!(f, "Warp Agent"),
@@ -384,6 +390,7 @@ impl FromStr for SettingsSection {
             "Account" => Ok(Self::Account),
             "AI" => Ok(Self::AI),
             "MCP Servers" => Ok(Self::MCPServers),
+            "GitHub" | "Github" => Ok(Self::Github),
             "Billing and usage" => Ok(Self::BillingAndUsage),
             "Appearance" => Ok(Self::Appearance),
             "Code" => Ok(Self::Code),
@@ -1084,6 +1091,8 @@ macro_rules! update_page {
             SettingsPageViewHandle::BillingAndUsage(handle) => $ctx.update_view(handle, $update),
             SettingsPageViewHandle::MCPServers(handle) => $ctx.update_view(handle, $update),
             SettingsPageViewHandle::WarpDrive(handle) => $ctx.update_view(handle, $update),
+            #[cfg(feature = "github_integration")]
+            SettingsPageViewHandle::Github(handle) => $ctx.update_view(handle, $update),
         }
     };
 }
@@ -1249,6 +1258,12 @@ impl SettingsView {
             me.handle_mcp_servers_page_event(event, ctx);
         });
 
+        // GitHub settings page (gated on GithubIntegration).
+        #[cfg(feature = "github_integration")]
+        let github_page_handle = FeatureFlag::GithubIntegration
+            .is_enabled()
+            .then(|| ctx.add_typed_action_view(github_page::GithubSettingsPageView::new));
+
         let font_family = Appearance::as_ref(ctx).ui_font_family();
         let search_editor = ctx.add_typed_action_view(|ctx| {
             let options = SingleLineEditorOptions {
@@ -1304,6 +1319,11 @@ impl SettingsView {
             SettingsPage::new(about_page_handle),
         ]);
 
+        #[cfg(feature = "github_integration")]
+        if let Some(github_page_handle) = github_page_handle {
+            settings_pages.push(SettingsPage::new(github_page_handle));
+        }
+
         // Build sidebar nav items. AI page is presented as an "Agents" umbrella
         // with subpages; the actual AI SettingsPage is hidden from direct sidebar listing.
         let mut nav_items = vec![
@@ -1350,6 +1370,16 @@ impl SettingsView {
                 shared_blocks_index,
                 SettingsNavItem::Page(SettingsSection::Scripting),
             );
+        }
+
+        // GitHub settings nav entry (gated on GithubIntegration). Placed just
+        // before Teams so it sits alongside other integration/account settings.
+        if FeatureFlag::GithubIntegration.is_enabled() {
+            let teams_index = nav_items
+                .iter()
+                .position(|item| matches!(item, SettingsNavItem::Page(SettingsSection::Teams)))
+                .unwrap_or(nav_items.len());
+            nav_items.insert(teams_index, SettingsNavItem::Page(SettingsSection::Github));
         }
 
         // Resolve the initial page: map internal backing-page sections to their default subpage.
@@ -2115,6 +2145,8 @@ impl SettingsView {
             SettingsPageViewHandle::MCPServers(v) => v.as_ref(app).should_render(app),
             SettingsPageViewHandle::Code(v) => v.as_ref(app).should_render(app),
             SettingsPageViewHandle::WarpDrive(v) => v.as_ref(app).should_render(app),
+            #[cfg(feature = "github_integration")]
+            SettingsPageViewHandle::Github(v) => v.as_ref(app).should_render(app),
         }
     }
 

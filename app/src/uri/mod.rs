@@ -385,6 +385,22 @@ impl UriHost {
                                 );
                             }
                         }
+                        "github" => {
+                            // warp://settings/github — GitHub OAuth connect redirect.
+                            // Notify that GitHub auth completed so the GitHub
+                            // settings page and GithubConnection refresh.
+                            GitHubAuthNotifier::handle(ctx).update(ctx, |notifier, ctx| {
+                                notifier.notify_auth_completed(ctx);
+                            });
+                            #[cfg(feature = "github_integration")]
+                            dispatch_action_in_new_or_existing_window(
+                                primary_window_id,
+                                "root_view:open_settings_page_in_existing_window",
+                                "root_view:open_settings_page_in_new_window",
+                                &SettingsSection::Github,
+                                ctx,
+                            );
+                        }
                         "mcp" => {
                             // warp://settings/mcp?autoinstall=<name> auto-installs a gallery MCP server.
                             // The value is matched case-insensitively against gallery titles.

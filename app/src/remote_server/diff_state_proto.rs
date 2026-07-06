@@ -41,6 +41,11 @@ impl From<&proto::PrInfo> for PrInfo {
             state: pr_info.state.clone(),
             draft: pr_info.draft,
             base_branch: pr_info.base_branch.clone(),
+            // The proto wire type has no checks/review-count fields (they are
+            // populated only by the local API-backed path), so remote-sourced
+            // PR info leaves them empty.
+            checks_summary: None,
+            review_comment_count: None,
         }
     }
 }

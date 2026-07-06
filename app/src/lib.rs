@@ -37,6 +37,8 @@ mod experiments;
 mod external_secrets;
 #[cfg(target_family = "wasm")]
 mod font_fallback;
+#[cfg(feature = "github_integration")]
+mod github;
 mod global_resource_handles;
 mod gpu_state;
 mod input_classifier;
@@ -2054,6 +2056,13 @@ pub(crate) fn initialize_app(
     // policy snapshot gates file-based auto-start and server restore. It
     // subscribes to UserWorkspaces, which must already be registered.
     ctx.add_singleton_model(|ctx| McpGovernance::new(cached_mcp_governance_policy_json, ctx));
+
+    // GithubConnection mirrors the user's server-mediated GitHub connection and
+    // vends short-lived tokens for direct api.github.com access. Registered
+    // after ServerApiProvider (which it queries) and GitHubAuthNotifier (which
+    // it subscribes to). Gated at the module level on `github_integration`.
+    #[cfg(feature = "github_integration")]
+    ctx.add_singleton_model(crate::github::GithubConnection::new);
 
     // FileMCPWatcher must be registered before FileBasedMCPManager, which subscribes to it.
     ctx.add_singleton_model(FileMCPWatcher::new);

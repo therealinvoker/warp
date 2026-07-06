@@ -121,6 +121,23 @@ impl GitRepoModels {
                     // branch info.
                     let git_status = self.subscribe(repo, ctx)?;
                     let repo_path = repo_path.clone();
+
+                    // Prefer the API-backed model when a connected GitHub App
+                    // installation covers this repo. Falls back to the gh-CLI
+                    // (Local) path otherwise.
+                    //
+                    // TODO(G4): governance is enforced here as defense-in-depth
+                    // (ApiBacked construction is a choke point); the
+                    // authoritative check is server-side.
+                    #[cfg(feature = "github_integration")]
+                    if let Some(api_handle) =
+                        self.try_build_api_backed(&repo_path, &git_status, ctx)
+                    {
+                        self.github_repo_models
+                            .insert(repo.clone(), api_handle.downgrade());
+                        return Ok(api_handle);
+                    }
+
                     let inner =
                         ctx.add_model(|ctx| LocalGitHubRepoModel::new(repo_path, git_status, ctx));
                     ctx.add_model(|ctx| {
@@ -154,6 +171,83 @@ impl GitRepoModels {
             .insert(repo.clone(), handle.downgrade());
         Ok(handle)
     }
+
+    /// Attempt to build an [`GitHubRepoModel::ApiBacked`] handle for a local
+    /// repo. Returns `None` (so the caller falls back to the gh-CLI path) when
+    /// the feature is off, the repo's `origin` isn't a GitHub remote, GitHub
+    /// isn't connected, or the repo isn't covered by the installation.
+    #[cfg(all(feature = "local_fs", feature = "github_integration"))]
+    fn try_build_api_backed(
+        &self,
+        repo_path: &std::path::Path,
+        git_status: &ModelHandle<GitRepoStatusModel>,
+        ctx: &mut ModelContext<Self>,
+    ) -> Option<ModelHandle<GitHubRepoModel>> {
+        use warp_core::features::FeatureFlag;
+
+        use super::github_repo_model::ApiBackedGitHubRepoModel;
+        use crate::github::GithubConnection;
+
+        if !FeatureFlag::GithubIntegration.is_enabled() {
+            return None;
+        }
+
+        // Resolve owner/repo synchronously from `.git/config` (cheap, one-time).
+        let (owner, repo_name) = read_origin_owner_repo(repo_path)?;
+
+        let connection = GithubConnection::as_ref(ctx);
+        if !connection.state().connected
+            || !connection.state().is_repo_installed(&owner, &repo_name)
+        {
+            return None;
+        }
+
+        let token_provider =
+            GithubConnection::handle(ctx).update(ctx, |connection, ctx| {
+                connection.token_provider(ctx)
+            });
+        let client = match github_client::GithubClient::new(token_provider) {
+            Ok(client) => std::sync::Arc::new(client),
+            Err(err) => {
+                log::warn!("Failed to construct GithubClient; falling back to gh: {err}");
+                return None;
+            }
+        };
+
+        let git_status = git_status.clone();
+        let inner = ctx.add_model(|ctx| {
+            ApiBackedGitHubRepoModel::new(owner, repo_name, git_status, client, ctx)
+        });
+        Some(ctx.add_model(|ctx| {
+            ctx.subscribe_to_model(&inner, |me, _, event, ctx| {
+                GitHubRepoModel::forward_event(me, event, ctx)
+            });
+            GitHubRepoModel::ApiBacked(inner)
+        }))
+    }
+}
+
+/// Read the GitHub `owner/repo` from a repo's `.git/config` `origin` remote,
+/// synchronously and without spawning a subprocess.
+#[cfg(all(feature = "local_fs", feature = "github_integration"))]
+fn read_origin_owner_repo(repo_path: &std::path::Path) -> Option<(String, String)> {
+    let config = std::fs::read_to_string(repo_path.join(".git").join("config")).ok()?;
+    let mut in_origin = false;
+    for line in config.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            in_origin = trimmed.contains("remote \"origin\"");
+            continue;
+        }
+        if in_origin {
+            if let Some(rest) = trimmed.strip_prefix("url") {
+                if let Some((_, url)) = rest.split_once('=') {
+                    return crate::util::git::parse_github_owner_repo(url.trim());
+                }
+            }
+        }
+    }
+    None
 }
 
 impl Entity for GitRepoModels {

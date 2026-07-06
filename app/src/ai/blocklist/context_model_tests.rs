@@ -388,6 +388,8 @@ fn pull_request_context_from_pr_info_excludes_url() {
         state: "OPEN".to_owned(),
         draft: true,
         base_branch: "main".to_owned(),
+        checks_summary: None,
+        review_comment_count: None,
     };
 
     assert_eq!(
@@ -409,6 +411,8 @@ fn pull_request_context_from_pr_info_rejects_numbers_that_do_not_fit_agent_conte
         state: "OPEN".to_owned(),
         draft: false,
         base_branch: "main".to_owned(),
+        checks_summary: None,
+        review_comment_count: None,
     };
 
     assert_eq!(
@@ -445,6 +449,8 @@ fn pull_request_context_reads_github_repo_model() {
                     state: "OPEN".to_owned(),
                     draft: false,
                     base_branch: "main".to_owned(),
+                    checks_summary: None,
+                    review_comment_count: None,
                 }),
                 ctx,
             );

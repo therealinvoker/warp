@@ -324,31 +324,10 @@ mod internal {
 
 struct DefaultMessageProducer;
 impl MessageProvider<TerminalMessageArgs<'_>> for DefaultMessageProducer {
-    fn produce_message(&self, args: TerminalMessageArgs<'_>) -> Option<Message> {
-        let is_input_ai_detected = args.is_input_ai_detected();
-
-        let keystroke = if is_input_ai_detected {
-            Some(Keystroke {
-                key: "enter".to_owned(),
-                ..Default::default()
-            })
-        } else if let Some(keystroke) = keybinding_name_to_keystroke(commands::AGENT.name, args.app)
-        {
-            Some(keystroke)
-        } else {
-            keybinding_name_to_keystroke(commands::NEW.name, args.app)
-        };
-
-        if let Some(keystroke) = keystroke {
-            Some(Message::new(vec![
-                MessageItem::keystroke(keystroke),
-                MessageItem::text(" new /agent conversation"),
-            ]))
-        } else {
-            Some(Message::new(vec![MessageItem::text(
-                "/agent for new conversation",
-            )]))
-        }
+    fn produce_message(&self, _args: TerminalMessageArgs<'_>) -> Option<Message> {
+        // Intentionally emit no default hint: the "new /agent conversation" line is no longer
+        // shown in the empty-buffer terminal state. Other producers/transformers still apply.
+        None
     }
 }
 

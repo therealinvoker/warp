@@ -337,32 +337,11 @@ impl View for AgentViewZeroStateBlock {
         let appearance = Appearance::as_ref(app);
         let theme = appearance.theme();
 
-        // Local (non-cloud) zero state: a bare title only.
+        // Local (non-cloud) zero state: intentionally render nothing. The bare "New agent
+        // conversation" title is no longer shown. We still preserve the position anchor when one
+        // is present, in case an overlay depends on the zero-state's saved position.
         if !self.origin.is_cloud_agent() {
-            let title = Text::new(
-                "New agent conversation",
-                appearance.ui_font_family(),
-                styles::title_font_size(appearance),
-            )
-            .with_color(theme.main_text_color(theme.background()).into_solid())
-            .with_style(Properties::default().weight(Weight::Bold))
-            .finish();
-
-            let content = Flex::column()
-                .with_main_axis_size(MainAxisSize::Min)
-                .with_child(title)
-                .finish();
-
-            let content = Container::new(content)
-                .with_horizontal_padding(*terminal::view::PADDING_LEFT)
-                .with_vertical_padding(styles::CONTAINER_VERTICAL_PADDING)
-                .with_border(
-                    Border::new(1.)
-                        .with_sides(true, false, true, false)
-                        .with_border_fill(theme.outline()),
-                )
-                .finish();
-
+            let content = Empty::new().finish();
             return if let Some(save_position_id) = self.save_position_id(app) {
                 SavePosition::new(content, &save_position_id).finish()
             } else {

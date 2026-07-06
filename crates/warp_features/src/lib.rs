@@ -907,6 +907,14 @@ pub enum FeatureFlag {
     /// (kill switch + allowlist), enforced client-side at install- and
     /// spawn-time with a locally cached policy snapshot.
     McpGovernance,
+
+    /// Enables the GitHub integration foundation: server-mediated GitHub
+    /// connect flow surfaced in settings, direct GitHub API access via
+    /// short-lived tokens (`crates/github_client`), an API-backed
+    /// `GitHubRepoModel` variant that enriches PR info with checks and review
+    /// comments, and a read-only PR review-comment overlay. Agent GitHub
+    /// actions are gated separately and land after the proto fork.
+    GithubIntegration,
 }
 
 static FLAG_STATES: [AtomicBool; cardinality::<FeatureFlag>()] =

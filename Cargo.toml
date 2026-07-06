@@ -44,6 +44,7 @@ computer_use = { path = "crates/computer_use" }
 field_mask = { path = "crates/field_mask" }
 firebase = { path = "crates/firebase" }
 fuzzy_match = { path = "crates/fuzzy_match" }
+github_client = { path = "crates/github_client" }
 handlebars = { path = "crates/handlebars" }
 http_client = { path = "crates/http_client" }
 http_server = { path = "crates/http_server" }
@@ -338,7 +339,7 @@ version-compare = "0.1"
 vte = { git = "https://github.com/warpdotdev/vte.git", rev = "4b399c87b63ba88f45709edaa6383fc519f6c900", default-features = false }
 walkdir = "2"
 warp-workflows = { git = "https://github.com/warpdotdev/workflows", rev = "793a98ddda6ef19682aed66364faebd2829f0e01" }
-warp_multi_agent_api = { git = "https://github.com/warpdotdev/warp-proto-apis.git", rev = "ac1af7303d2931b0fb485be650a1fbc8b80d5667" }
+warp_multi_agent_api = { git = "https://github.com/therealinvoker/warp-proto-apis.git", rev = "ac1af7303d2931b0fb485be650a1fbc8b80d5667" }
 wasm-bindgen = "0.2.89"
 wasm-bindgen-futures = "0.4.42"
 web-sys = { version = "0.3.69", features = [
@@ -548,7 +549,7 @@ tink-hybrid = { git = "https://github.com/warpdotdev/tink-rust", rev = "54b9ac9a
 tikv-jemallocator = { git = "https://github.com/warpdotdev/jemallocator.git", rev = "2ee30bfdf7059223b54810e4ea6c666f0a379e0b" }
 tikv-jemalloc-sys = { git = "https://github.com/warpdotdev/jemallocator.git", rev = "2ee30bfdf7059223b54810e4ea6c666f0a379e0b" }
 
-[patch."https://github.com/warpdotdev/warp-proto-apis.git"]
+[patch."https://github.com/therealinvoker/warp-proto-apis.git"]
 # Uncomment for local development of warp-proto-apis
 # warp_multi_agent_api = { path = "../warp-proto-apis/apis/multi_agent/v1/gen/rust" }
 

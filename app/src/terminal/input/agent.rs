@@ -558,6 +558,7 @@ impl Input {
                 .with_max_width(CLOUD_MODE_V2_MAX_WIDTH)
                 .finish(),
         )
+        .left()
         .finish()
     }
 

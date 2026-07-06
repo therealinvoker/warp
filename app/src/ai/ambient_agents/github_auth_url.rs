@@ -6,6 +6,8 @@ use crate::ChannelState;
 pub enum GithubAuthRedirectTarget {
     SettingsEnvironments,
     FocusCloudMode,
+    /// Redirect back to the GitHub settings page after connecting.
+    SettingsGithub,
 }
 
 impl GithubAuthRedirectTarget {
@@ -13,8 +15,18 @@ impl GithubAuthRedirectTarget {
         match self {
             Self::SettingsEnvironments => "settings/environments",
             Self::FocusCloudMode => "action/focus_cloud_mode",
+            Self::SettingsGithub => "settings/github",
         }
     }
+}
+
+/// Build an auth URL that redirects back to the GitHub settings page.
+pub fn settings_github_auth_url_with_next(base_auth_url: &str) -> String {
+    auth_url_with_next(
+        base_auth_url,
+        GithubAuthRedirectTarget::SettingsGithub,
+        AuthSource::Settings,
+    )
 }
 
 /// Indicates where the GitHub authorization flow was initiated from.
@@ -141,6 +153,10 @@ fn build_next_url(
                 }
                 GithubAuthRedirectTarget::FocusCloudMode => {
                     url.set_path("/action/focus_cloud_mode");
+                }
+                GithubAuthRedirectTarget::SettingsGithub => {
+                    url.set_path("/settings/github");
+                    url.query_pairs_mut().append_pair("oauth", "github");
                 }
             }
 

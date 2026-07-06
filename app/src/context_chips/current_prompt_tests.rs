@@ -776,6 +776,8 @@ fn test_git_status_pr_info_updates_github_pr_chip_value() {
                     state: "OPEN".to_string(),
                     draft: true,
                     base_branch: "main".to_string(),
+                    checks_summary: None,
+                    review_comment_count: None,
                 }),
                 ctx,
             );
@@ -816,6 +818,8 @@ fn test_git_status_pr_info_updates_github_pr_chip_value() {
                     state: "OPEN".to_string(),
                     draft: false,
                     base_branch: "main".to_string(),
+                    checks_summary: None,
+                    review_comment_count: None,
                 }),
                 ctx,
             );

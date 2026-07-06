@@ -723,7 +723,43 @@ pub async fn run_push(_repo_path: &Path, _branch: &str, _path_env: Option<&str>)
 
 // ── gh CLI helpers ───────────────────────────────────────────────────────────
 
-/// PR information returned by `gh pr view`.
+/// Aggregate CI check state for a PR's head commit.
+///
+/// Populated by the API-backed GitHub repo model (from GitHub's check-runs and
+/// combined-status endpoints). The `gh` CLI path leaves this as `None` on
+/// [`PrInfo`] because it does not fetch check state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ChecksSummary {
+    /// Number of checks that completed successfully.
+    pub success: u32,
+    /// Number of checks that failed (failure, error, timed out, cancelled).
+    pub failure: u32,
+    /// Number of checks still pending / in progress / queued.
+    pub pending: u32,
+}
+
+impl ChecksSummary {
+    /// Total number of checks counted.
+    pub fn total(&self) -> u32 {
+        self.success + self.failure + self.pending
+    }
+
+    /// Whether any check has failed.
+    pub fn has_failure(&self) -> bool {
+        self.failure > 0
+    }
+
+    /// Whether all counted checks succeeded (and there is at least one).
+    pub fn all_passing(&self) -> bool {
+        self.total() > 0 && self.failure == 0 && self.pending == 0
+    }
+}
+
+/// PR information returned by `gh pr view` (or the GitHub API).
+///
+/// `checks_summary` and `review_comment_count` are only populated by the
+/// API-backed path (`GitHubRepoModel::ApiBacked`); the `gh` CLI path leaves
+/// them `None`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrInfo {
     pub number: u64,
@@ -731,12 +767,66 @@ pub struct PrInfo {
     pub state: String,
     pub draft: bool,
     pub base_branch: String,
+    /// Aggregate CI check state for the PR head. `None` on the `gh` path.
+    pub checks_summary: Option<ChecksSummary>,
+    /// Number of review comments on the PR. `None` on the `gh` path.
+    pub review_comment_count: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepositoryInfo {
     pub name: String,
     pub owner: Option<String>,
+}
+
+/// Parse a GitHub `owner/repo` pair out of a git remote URL.
+///
+/// Handles the common SSH (`git@github.com:owner/repo.git`), HTTPS
+/// (`https://github.com/owner/repo.git`), and scpless forms. Returns `None`
+/// for non-github remotes or unparseable input. Used by the API-backed
+/// [`crate::code_review::github_repo_model`] path to resolve the repo without
+/// shelling out to `gh`.
+pub fn parse_github_owner_repo(remote_url: &str) -> Option<(String, String)> {
+    let trimmed = remote_url.trim();
+    // Strip a scheme + host prefix, leaving `owner/repo(.git)`.
+    let after_host = if let Some(rest) = trimmed.strip_prefix("git@") {
+        // git@github.com:owner/repo.git
+        rest.split_once(':').map(|(_, path)| path)?
+    } else if let Some(rest) = trimmed
+        .strip_prefix("https://")
+        .or_else(|| trimmed.strip_prefix("http://"))
+        .or_else(|| trimmed.strip_prefix("ssh://git@"))
+        .or_else(|| trimmed.strip_prefix("ssh://"))
+    {
+        // host/owner/repo.git — drop the host segment.
+        rest.split_once('/').map(|(_, path)| path)?
+    } else {
+        return None;
+    };
+
+    // Only treat github.com remotes as GitHub (GHES is deferred).
+    let host_ok = trimmed.contains("github.com");
+    if !host_ok {
+        return None;
+    }
+
+    let path = after_host.trim_end_matches('/');
+    let path = path.strip_suffix(".git").unwrap_or(path);
+    let (owner, repo) = path.split_once('/')?;
+    if owner.is_empty() || repo.is_empty() {
+        return None;
+    }
+    Some((owner.to_string(), repo.to_string()))
+}
+
+/// Resolve the GitHub `owner/repo` for a local repo from its `origin` remote.
+#[cfg(feature = "local_fs")]
+pub async fn get_github_owner_repo(
+    repo_path: &Path,
+    _path_env: Option<&str>,
+) -> Result<Option<(String, String)>> {
+    let url = run_git_command(repo_path, &["remote", "get-url", "origin"]).await?;
+    Ok(parse_github_owner_repo(url.trim()))
 }
 
 #[cfg(feature = "local_fs")]
@@ -895,6 +985,10 @@ pub async fn get_pr_for_branch(repo_path: &Path, path_env: Option<&str>) -> Resu
                 state,
                 draft,
                 base_branch,
+                // The `gh` CLI path does not fetch checks or review-comment
+                // counts; only the API-backed path populates these.
+                checks_summary: None,
+                review_comment_count: None,
             }))
         }
         Err(e) => {
@@ -1064,6 +1158,8 @@ pub async fn create_pr(
         state: "OPEN".to_string(),
         draft: false,
         base_branch: base.to_string(),
+        checks_summary: None,
+        review_comment_count: None,
     })
 }
 

@@ -101,6 +101,8 @@ fn pr_info_round_trips_through_proto() {
         state: "OPEN".into(),
         draft: true,
         base_branch: "develop".into(),
+        checks_summary: None,
+        review_comment_count: None,
     };
 
     let proto_info = proto::PrInfo::from(&pr_info);

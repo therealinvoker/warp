@@ -84,7 +84,10 @@ use crate::terminal::cli_agent_sessions::{
     CLIAgentInputState, CLIAgentSessionsModel, CLIAgentSessionsModelEvent,
 };
 use crate::terminal::input::models::InlineModelSelectorTab;
-use crate::terminal::input::{HandoffComposeState, MenuPositioningProvider};
+use crate::terminal::input::{
+    render_session_mode_segmented_control, HandoffComposeState, MenuPositioningProvider,
+    SessionModeSegment, SessionModeSegmentMouseStates,
+};
 #[cfg(not(target_family = "wasm"))]
 use crate::terminal::local_shell::LocalShellState;
 use crate::terminal::profile_model_selector::{ProfileModelSelector, ProfileModelSelectorEvent};
@@ -253,6 +256,10 @@ pub struct AgentInputFooter {
     /// yellow notification dot on the context-window chip when the
     /// `PromptCacheExpiryWarning` flag is enabled.
     prompt_cache_expired: bool,
+
+    /// Mouse state handles for the leftmost session-mode segmented control
+    /// ("Agent | Cloud Agent | Terminal") rendered at the start of the footer's left row.
+    session_mode_mouse_states: SessionModeSegmentMouseStates,
 }
 
 impl AgentInputFooter {
@@ -866,6 +873,7 @@ impl AgentInputFooter {
             v2_model_selector,
             prompt_cache_expiry_timer_handle: None,
             prompt_cache_expired: false,
+            session_mode_mouse_states: Default::default(),
         };
         me.sync_fast_forward_button(ctx);
         me.sync_remote_control_button(ctx);
@@ -923,15 +931,18 @@ impl AgentInputFooter {
     }
 
     fn render_cloud_mode_v2_footer(&self, app: &AppContext) -> Box<dyn Element> {
-        // `app` is only consumed under the `voice_input` cfg below; reference it here so the
-        // parameter doesn't trip the unused-variable lint when the feature is disabled.
-        #[cfg(not(feature = "voice_input"))]
-        let _ = app;
+        let appearance = Appearance::as_ref(app);
 
         let mut left = Flex::row()
             .with_main_axis_size(MainAxisSize::Min)
             .with_cross_axis_alignment(CrossAxisAlignment::Center)
             .with_spacing(CLOUD_MODE_V2_FOOTER_GAP);
+        left = left.with_child(render_session_mode_segmented_control(
+            SessionModeSegment::CloudAgent,
+            FeatureFlag::CloudMode.is_enabled(),
+            &self.session_mode_mouse_states,
+            appearance,
+        ));
         if let Some(environment_selector) = self.environment_selector.as_ref() {
             left = left.with_child(ChildView::new(environment_selector).finish());
         }
@@ -2206,6 +2217,7 @@ impl View for AgentInputFooter {
             return self.render_cli_mode_footer(app);
         }
 
+        let appearance = Appearance::as_ref(app);
         let session_settings = SessionSettings::as_ref(app);
         let left_items = session_settings.agent_footer_chip_selection.left_items();
         let right_items = session_settings.agent_footer_chip_selection.right_items();
@@ -2224,6 +2236,22 @@ impl View for AgentInputFooter {
                 .is_some_and(|ambient_agent_model| {
                     ambient_agent_model.as_ref(app).is_ambient_agent()
                 });
+
+        // Leftmost persistent session-mode segmented control ("Agent | Cloud Agent | Terminal").
+        // This footer only renders in agent/CLI/cloud contexts, so the current segment is either
+        // Cloud Agent (ambient/cloud pane) or Agent.
+        let session_mode_current = if is_ambient_agent {
+            SessionModeSegment::CloudAgent
+        } else {
+            SessionModeSegment::Agent
+        };
+        left_buttons = left_buttons.with_child(render_session_mode_segmented_control(
+            session_mode_current,
+            FeatureFlag::CloudMode.is_enabled(),
+            &self.session_mode_mouse_states,
+            appearance,
+        ));
+
         if is_ambient_agent {
             if let Some(environment_selector) = self.environment_selector.as_ref() {
                 left_buttons =

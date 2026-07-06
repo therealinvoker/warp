@@ -322,6 +322,8 @@ async fn get_pr_for_branch_does_not_require_origin_remote() {
             state: "OPEN".to_string(),
             draft: true,
             base_branch: "main".to_string(),
+            checks_summary: None,
+            review_comment_count: None,
         })
     );
 }

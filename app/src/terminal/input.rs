@@ -16,6 +16,7 @@ pub mod profiles;
 pub mod prompts;
 pub mod repos;
 pub mod rewind;
+pub(crate) mod session_mode_control;
 pub mod skills;
 pub mod slash_command_model;
 pub mod slash_commands;
@@ -106,6 +107,9 @@ use warpui::{
 
 use self::decorations::InputBackgroundJobOptions;
 pub use self::handoff_compose::{HandoffComposeState, HandoffComposeStateEvent};
+pub(crate) use self::session_mode_control::{
+    render_session_mode_segmented_control, SessionModeSegment, SessionModeSegmentMouseStates,
+};
 use super::alias::is_expandable_alias;
 use super::block_list_viewport::InputMode;
 use super::event::{BlockCompletedEvent, BlockType, UserBlockCompleted};
@@ -1745,6 +1749,10 @@ pub struct Input {
     /// we snapshot the current input contents here so we can restore them after the command
     /// completes and the buffer would normally be cleared.
     input_contents_before_prompt_chip_command: Option<String>,
+
+    /// Mouse state handles for the persistent session-mode segmented control
+    /// ("Agent | Cloud Agent | Terminal") rendered in the terminal input footer.
+    session_mode_mouse_states: SessionModeSegmentMouseStates,
 }
 
 struct AmbientAgentViewState {
@@ -3726,6 +3734,7 @@ impl Input {
             cloud_mode_composer_slash_command_data_source,
             ephemeral_message_model,
             input_contents_before_prompt_chip_command: None,
+            session_mode_mouse_states: Default::default(),
         };
 
         #[cfg(feature = "local_fs")]

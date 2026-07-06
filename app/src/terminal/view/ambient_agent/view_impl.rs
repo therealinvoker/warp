@@ -27,6 +27,7 @@ use crate::ai::ambient_agents::telemetry::{CloudAgentTelemetryEvent, CloudModeEn
 use crate::ai::blocklist::agent_view::AgentViewEntryOrigin;
 use crate::ai::blocklist::BlocklistAIHistoryModel;
 use crate::ai::conversation_details_panel::ConversationDetailsData;
+use crate::ai::llms::LLMPreferences;
 use crate::ai::AIRequestUsageModel;
 use crate::pane_group::TerminalViewResources;
 use crate::terminal::cli_agent_sessions::CLIAgentSessionsModel;
@@ -790,6 +791,26 @@ impl TerminalView {
             log::warn!("Cloud mode view was created without an ambient agent view model");
             return None;
         };
+
+        // Seed the new cloud pane's agent-mode model from the parent pane so cloud agent defaults
+        // to the most-recently-used model. When the parent pane has no meaningful model,
+        // `get_active_base_model` returns the profile/global default, which is the desired fallback.
+        let source_terminal_view_id = self.id();
+        let new_cloud_terminal_view_id = terminal_view.as_ref(ctx).id();
+        if new_cloud_terminal_view_id != source_terminal_view_id {
+            let source_llm_id = LLMPreferences::as_ref(ctx)
+                .get_active_base_model(ctx, Some(source_terminal_view_id))
+                .id
+                .clone();
+            LLMPreferences::handle(ctx).update(ctx, |prefs, ctx| {
+                prefs.update_preferred_agent_mode_llm(
+                    &source_llm_id,
+                    new_cloud_terminal_view_id,
+                    ctx,
+                );
+            });
+        }
+
         let terminal_view_weak = terminal_view.downgrade();
         let terminal_manager_weak = terminal_manager.downgrade();
         let pane_stack = self.pane_stack.clone();

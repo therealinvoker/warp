@@ -5,6 +5,11 @@ mod local;
 #[cfg(feature = "local_fs")]
 pub use local::LocalGitHubRepoModel;
 
+#[cfg(all(feature = "local_fs", feature = "github_integration"))]
+mod api_backed;
+#[cfg(all(feature = "local_fs", feature = "github_integration"))]
+pub use api_backed::ApiBackedGitHubRepoModel;
+
 mod remote;
 pub use remote::RemoteGitHubRepoModel;
 
@@ -33,6 +38,11 @@ pub enum GitHubRepoEvent {
 pub enum GitHubRepoModel {
     #[cfg(feature = "local_fs")]
     Local(ModelHandle<LocalGitHubRepoModel>),
+    /// A local repo whose GitHub metadata is sourced from the REST API rather
+    /// than the `gh` CLI. Preferred when a connected GitHub App installation
+    /// covers the repo.
+    #[cfg(all(feature = "local_fs", feature = "github_integration"))]
+    ApiBacked(ModelHandle<ApiBackedGitHubRepoModel>),
     Remote(ModelHandle<RemoteGitHubRepoModel>),
 }
 impl Entity for GitHubRepoModel {
@@ -55,6 +65,8 @@ impl GitHubRepoModel {
         match self {
             #[cfg(feature = "local_fs")]
             Self::Local(m) => m.as_ref(ctx).pr_info(),
+            #[cfg(all(feature = "local_fs", feature = "github_integration"))]
+            Self::ApiBacked(m) => m.as_ref(ctx).pr_info(),
             Self::Remote(m) => m.as_ref(ctx).pr_info(),
         }
     }
@@ -64,6 +76,8 @@ impl GitHubRepoModel {
         match self {
             #[cfg(feature = "local_fs")]
             Self::Local(m) => m.as_ref(ctx).repository_info(),
+            #[cfg(all(feature = "local_fs", feature = "github_integration"))]
+            Self::ApiBacked(m) => m.as_ref(ctx).repository_info(),
             Self::Remote(m) => m.as_ref(ctx).repository_info(),
         }
     }
@@ -73,6 +87,8 @@ impl GitHubRepoModel {
         match self {
             #[cfg(feature = "local_fs")]
             Self::Local(m) => m.as_ref(ctx).is_refreshing_pr_info(),
+            #[cfg(all(feature = "local_fs", feature = "github_integration"))]
+            Self::ApiBacked(m) => m.as_ref(ctx).is_refreshing_pr_info(),
             Self::Remote(m) => m.as_ref(ctx).is_refreshing_pr_info(),
         }
     }
@@ -82,6 +98,8 @@ impl GitHubRepoModel {
         match self {
             #[cfg(feature = "local_fs")]
             Self::Local(m) => m.update(ctx, |m, ctx| m.refresh_pr_info(ctx)),
+            #[cfg(all(feature = "local_fs", feature = "github_integration"))]
+            Self::ApiBacked(m) => m.update(ctx, |m, ctx| m.refresh_pr_info(ctx)),
             Self::Remote(m) => m.update(ctx, |m, ctx| m.refresh_pr_info(ctx)),
         }
     }
@@ -91,6 +109,8 @@ impl GitHubRepoModel {
         match self {
             #[cfg(feature = "local_fs")]
             Self::Local(m) => m.update(ctx, |m, ctx| m.refresh_repository_info(ctx)),
+            #[cfg(all(feature = "local_fs", feature = "github_integration"))]
+            Self::ApiBacked(m) => m.update(ctx, |m, ctx| m.refresh_repository_info(ctx)),
             Self::Remote(m) => m.update(ctx, |m, ctx| m.refresh_repository_info(ctx)),
         }
     }

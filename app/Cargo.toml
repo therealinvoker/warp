@@ -149,6 +149,7 @@ lsp.workspace = true
 warp_logging.workspace = true
 sentry = { workspace = true, optional = true }
 lz4_flex = "0.11"
+github_client = { workspace = true, optional = true }
 markdown_parser.workspace = true
 mcp.workspace = true
 memchr.workspace = true
@@ -980,6 +981,7 @@ new_tab_styling = []
 file_based_mcp = []
 cursor_mcp_import = []
 mcp_governance = []
+github_integration = ["dep:github_client"]
 skill_arguments = []
 active_conversation_requires_interaction = []
 incremental_auto_reload = []
