@@ -14,8 +14,10 @@ fn workspace(
     governance_controls_enabled: Option<bool>,
     settings: Option<McpGovernanceSettings>,
 ) -> Workspace {
-    let mut workspace =
-        Workspace::from_local_cache(format!("uid-{name}").into(), name.to_string(), None);
+    // ServerIds must be exactly 22 characters; pad/truncate the name to fit.
+    let padded = format!("{name:0>22}");
+    let uid = padded[padded.len() - 22..].to_string();
+    let mut workspace = Workspace::from_local_cache(uid.into(), name.to_string(), None);
     workspace.billing_metadata.tier.marketplace_policy =
         governance_controls_enabled.map(|enabled| MarketplacePolicy {
             enabled: true,
@@ -268,9 +270,8 @@ fn model_loads_cached_snapshot_at_startup() {
     };
     let cached_json = serde_json::to_string(&cached).expect("serialize");
 
-    App::test((), |mut app| async move {
-        let handle =
-            app.add_singleton_model(move |ctx| McpGovernance::new(Some(cached_json), ctx));
+    App::test((), |app| async move {
+        let handle = app.add_singleton_model(move |ctx| McpGovernance::new(Some(cached_json), ctx));
         handle.read(&app, |governance, _| {
             assert_eq!(governance.effective_policy(), &cached);
         });
@@ -279,7 +280,7 @@ fn model_loads_cached_snapshot_at_startup() {
 
 #[test]
 fn model_falls_back_to_self_managed_without_or_with_corrupt_cache() {
-    App::test((), |mut app| async move {
+    App::test((), |app| async move {
         let no_cache = app.add_singleton_model(|ctx| McpGovernance::new(None, ctx));
         no_cache.read(&app, |governance, _| {
             assert_eq!(
@@ -289,9 +290,9 @@ fn model_falls_back_to_self_managed_without_or_with_corrupt_cache() {
         });
     });
 
-    App::test((), |mut app| async move {
-        let corrupt_cache = app
-            .add_singleton_model(|ctx| McpGovernance::new(Some("not json".to_string()), ctx));
+    App::test((), |app| async move {
+        let corrupt_cache =
+            app.add_singleton_model(|ctx| McpGovernance::new(Some("not json".to_string()), ctx));
         corrupt_cache.read(&app, |governance, _| {
             assert_eq!(
                 governance.effective_policy(),

@@ -4,7 +4,9 @@ use warp_graphql::workspace::{
     McpGovernanceMode as GqlMcpGovernanceMode, McpGovernanceSettings as GqlMcpGovernanceSettings,
 };
 
-use super::workspace::{MarketplacePolicy, McpAllowlistEntryKind, McpGovernanceMode};
+use crate::workspaces::workspace::{
+    MarketplacePolicy, McpAllowlistEntryKind, McpGovernanceMode, McpGovernanceSettings,
+};
 
 fn gql_entry(kind: GqlMcpAllowlistEntryKind) -> GqlMcpAllowlistEntry {
     GqlMcpAllowlistEntry {
@@ -34,7 +36,7 @@ fn converts_marketplace_policy() {
 
 #[test]
 fn converts_mcp_governance_settings() {
-    let settings: super::workspace::McpGovernanceSettings = GqlMcpGovernanceSettings {
+    let settings: McpGovernanceSettings = GqlMcpGovernanceSettings {
         mode: GqlMcpGovernanceMode::Allowlist,
         allowlist: vec![gql_entry(GqlMcpAllowlistEntryKind::RegistryName)],
         allow_file_based_servers: false,
@@ -78,7 +80,7 @@ fn unknown_governance_mode_fails_closed_to_disable() {
 
 #[test]
 fn unknown_allowlist_entry_kind_drops_the_entry() {
-    let settings: super::workspace::McpGovernanceSettings = GqlMcpGovernanceSettings {
+    let settings: McpGovernanceSettings = GqlMcpGovernanceSettings {
         mode: GqlMcpGovernanceMode::Allowlist,
         allowlist: vec![
             gql_entry(GqlMcpAllowlistEntryKind::CanonicalHash),
@@ -125,7 +127,7 @@ fn converts_all_known_allowlist_entry_kinds() {
         ),
     ];
     for (gql_kind, expected) in cases {
-        let settings: super::workspace::McpGovernanceSettings = GqlMcpGovernanceSettings {
+        let settings: McpGovernanceSettings = GqlMcpGovernanceSettings {
             mode: GqlMcpGovernanceMode::EnableAll,
             allowlist: vec![gql_entry(gql_kind)],
             allow_file_based_servers: true,

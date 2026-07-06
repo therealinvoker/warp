@@ -1746,10 +1746,10 @@ fn read_mcp_governance_policy(
 ) -> Result<Option<String>, diesel::result::Error> {
     use schema::mcp_governance_policy::dsl::*;
 
-    Ok(mcp_governance_policy
+    mcp_governance_policy
         .select(policy_json)
         .first::<String>(conn)
-        .optional()?)
+        .optional()
 }
 
 /// Replaces the single-row MCP governance policy snapshot.

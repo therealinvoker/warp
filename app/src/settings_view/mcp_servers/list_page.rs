@@ -1692,13 +1692,12 @@ impl MCPServersListPageView {
 
         // File-based servers stay listed for visibility but are locked (no
         // start affordance) when org governance disallows them.
-        let file_based_card_status = if McpGovernance::current_policy(ctx)
-            .allows_spawn(ServerOrigin::FileBased)
-        {
-            ServerCardStatus::AvailableToSave
-        } else {
-            ServerCardStatus::Locked
-        };
+        let file_based_card_status =
+            if McpGovernance::current_policy(ctx).allows_spawn(ServerOrigin::FileBased) {
+                ServerCardStatus::AvailableToSave
+            } else {
+                ServerCardStatus::Locked
+            };
 
         // Creates a template card for each (provider, uninstalled server) pair.
         for provider in MCPProvider::iter() {

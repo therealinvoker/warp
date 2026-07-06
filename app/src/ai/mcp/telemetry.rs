@@ -11,12 +11,12 @@ use warp_core::telemetry::{EnablementState, TelemetryEvent, TelemetryEventDesc};
 #[strum_discriminants(derive(EnumIter))]
 pub enum McpGovernanceTelemetryEvent {
     /// An install/import was blocked by org policy.
-    GovernanceBlockedInstall,
+    BlockedInstall,
     /// A server spawn (start, restart, reconnect, or auto-start) was blocked
     /// by org policy.
-    GovernanceBlockedSpawn,
+    BlockedSpawn,
     /// A policy tightening shut down running servers.
-    GovernancePolicyShutdown { server_count: usize },
+    PolicyShutdown { server_count: usize },
 }
 
 impl TelemetryEvent for McpGovernanceTelemetryEvent {
@@ -26,8 +26,8 @@ impl TelemetryEvent for McpGovernanceTelemetryEvent {
 
     fn payload(&self) -> Option<Value> {
         match self {
-            Self::GovernanceBlockedInstall | Self::GovernanceBlockedSpawn => None,
-            Self::GovernancePolicyShutdown { server_count } => Some(json!({
+            Self::BlockedInstall | Self::BlockedSpawn => None,
+            Self::PolicyShutdown { server_count } => Some(json!({
                 "server_count": server_count,
             })),
         }
@@ -43,9 +43,7 @@ impl TelemetryEvent for McpGovernanceTelemetryEvent {
 
     fn contains_ugc(&self) -> bool {
         match self {
-            Self::GovernanceBlockedInstall
-            | Self::GovernanceBlockedSpawn
-            | Self::GovernancePolicyShutdown { .. } => false,
+            Self::BlockedInstall | Self::BlockedSpawn | Self::PolicyShutdown { .. } => false,
         }
     }
 
@@ -57,21 +55,21 @@ impl TelemetryEvent for McpGovernanceTelemetryEvent {
 impl TelemetryEventDesc for McpGovernanceTelemetryEventDiscriminants {
     fn name(&self) -> &'static str {
         match self {
-            Self::GovernanceBlockedInstall => "MCP Governance Blocked Install",
-            Self::GovernanceBlockedSpawn => "MCP Governance Blocked Spawn",
-            Self::GovernancePolicyShutdown => "MCP Governance Policy Shutdown",
+            Self::BlockedInstall => "MCP Governance Blocked Install",
+            Self::BlockedSpawn => "MCP Governance Blocked Spawn",
+            Self::PolicyShutdown => "MCP Governance Policy Shutdown",
         }
     }
 
     fn description(&self) -> &'static str {
         match self {
-            Self::GovernanceBlockedInstall => {
+            Self::BlockedInstall => {
                 "An MCP server install or import was blocked by the organization's governance policy"
             }
-            Self::GovernanceBlockedSpawn => {
+            Self::BlockedSpawn => {
                 "An MCP server spawn was blocked by the organization's governance policy"
             }
-            Self::GovernancePolicyShutdown => {
+            Self::PolicyShutdown => {
                 "Running MCP servers were shut down because the organization's governance policy tightened"
             }
         }
@@ -79,9 +77,9 @@ impl TelemetryEventDesc for McpGovernanceTelemetryEventDiscriminants {
 
     fn enablement_state(&self) -> EnablementState {
         match self {
-            Self::GovernanceBlockedInstall
-            | Self::GovernanceBlockedSpawn
-            | Self::GovernancePolicyShutdown => EnablementState::Flag(FeatureFlag::McpGovernance),
+            Self::BlockedInstall | Self::BlockedSpawn | Self::PolicyShutdown => {
+                EnablementState::Flag(FeatureFlag::McpGovernance)
+            }
         }
     }
 }

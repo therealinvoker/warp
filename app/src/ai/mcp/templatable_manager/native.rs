@@ -26,10 +26,10 @@ use super::{
 };
 use crate::ai::mcp::file_based_manager::FileBasedMCPManagerEvent;
 use crate::ai::mcp::parsing::resolve_json;
+use crate::ai::mcp::telemetry::McpGovernanceTelemetryEvent;
 use crate::ai::mcp::templatable::{CloudTemplatableMCPServer, GalleryData};
 use crate::ai::mcp::templatable_installation::VariableValue;
 use crate::ai::mcp::templatable_manager::FigmaMcpStatus;
-use crate::ai::mcp::telemetry::McpGovernanceTelemetryEvent;
 use crate::ai::mcp::{
     logs, Author, CloudMCPServer, FileBasedMCPManager, JsonTemplate, MCPGalleryManager, MCPServer,
     MCPServerExt, MCPServerUpdate, McpGovernance, McpGovernanceEvent,
@@ -739,7 +739,7 @@ impl TemplatableMCPServerManager {
             installation.templatable_mcp_server().name,
             installation.uuid()
         );
-        send_telemetry_from_ctx!(McpGovernanceTelemetryEvent::GovernanceBlockedSpawn, ctx);
+        send_telemetry_from_ctx!(McpGovernanceTelemetryEvent::BlockedSpawn, ctx);
         true
     }
 
@@ -1202,7 +1202,7 @@ impl TemplatableMCPServerManager {
                 "Blocked install of MCP server '{}': disabled by organization governance policy",
                 templatable_mcp_server.name
             );
-            send_telemetry_from_ctx!(McpGovernanceTelemetryEvent::GovernanceBlockedInstall, ctx);
+            send_telemetry_from_ctx!(McpGovernanceTelemetryEvent::BlockedInstall, ctx);
             if let Some(window_id) = WindowManager::as_ref(ctx).active_window() {
                 ToastStack::handle(ctx).update(ctx, |toast_stack, ctx| {
                     toast_stack.add_ephemeral_toast(
@@ -1882,7 +1882,7 @@ impl TemplatableMCPServerManager {
         }
 
         send_telemetry_from_ctx!(
-            McpGovernanceTelemetryEvent::GovernancePolicyShutdown { server_count },
+            McpGovernanceTelemetryEvent::PolicyShutdown { server_count },
             ctx
         );
 

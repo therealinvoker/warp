@@ -217,13 +217,15 @@ impl McpGovernance {
     pub fn new(cached_policy_json: Option<String>, ctx: &mut ModelContext<Self>) -> Self {
         let effective_policy = cached_policy_json
             .as_deref()
-            .and_then(|json| match serde_json::from_str::<EffectiveMcpPolicy>(json) {
-                Ok(policy) => Some(policy),
-                Err(err) => {
-                    log::error!("Failed to parse cached MCP governance policy snapshot: {err}");
-                    None
-                }
-            })
+            .and_then(
+                |json| match serde_json::from_str::<EffectiveMcpPolicy>(json) {
+                    Ok(policy) => Some(policy),
+                    Err(err) => {
+                        log::error!("Failed to parse cached MCP governance policy snapshot: {err}");
+                        None
+                    }
+                },
+            )
             // No cached snapshot (fresh install, or pre-governance builds):
             // solo behavior until fresh workspace metadata arrives.
             .unwrap_or_else(EffectiveMcpPolicy::self_managed);
@@ -260,10 +262,7 @@ impl McpGovernance {
     /// Convenience for UI surfaces: whether MCP is fully disabled by org
     /// policy (kill switch).
     pub fn is_disabled_by_org(app: &AppContext) -> bool {
-        matches!(
-            Self::current_policy(app).mode,
-            EffectiveMcpMode::Disable
-        )
+        matches!(Self::current_policy(app).mode, EffectiveMcpMode::Disable)
     }
 
     fn recompute_policy(&mut self, ctx: &mut ModelContext<Self>) {
