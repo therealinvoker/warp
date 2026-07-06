@@ -1,7 +1,7 @@
 use warp_core::settings::Setting;
 use warpui::elements::{
-    Border, Clipped, Container, DropTarget, Element, Flex, Hoverable, MainAxisSize, ParentElement,
-    SavePosition, Stack,
+    Border, Clipped, Container, CrossAxisAlignment, DropTarget, Element, Flex, Hoverable,
+    MainAxisSize, ParentElement, SavePosition, Stack,
 };
 use warpui::presenter::ChildView;
 use warpui::{AppContext, SingletonEntity};
@@ -74,34 +74,50 @@ impl Input {
         // Persistent session-mode segmented control ("Agent | Cloud Agent | Terminal").
         // Only shown when agent modes are actually usable so the plain terminal input is
         // left untouched when AI is disabled.
-        if FeatureFlag::AgentView.is_enabled() && AISettings::as_ref(app).is_any_ai_enabled(app) {
+        let show_session_mode_control =
+            FeatureFlag::AgentView.is_enabled() && AISettings::as_ref(app).is_any_ai_enabled(app);
+        let show_message_bar = should_show_terminal_input_message_bar(&model, app);
+
+        if show_session_mode_control {
             let include_cloud_agent = FeatureFlag::CloudMode.is_enabled();
-            column.add_child(
-                Container::new(
-                    Flex::row()
-                        .with_main_axis_size(MainAxisSize::Min)
-                        .with_child(render_session_mode_segmented_control(
-                            SessionModeSegment::Terminal,
-                            include_cloud_agent,
-                            &self.session_mode_mouse_states,
-                            appearance,
-                        ))
-                        .finish(),
-                )
-                .with_margin_top(4.)
-                .finish(),
-            );
+            let mut mode_row = Flex::row()
+                .with_main_axis_size(MainAxisSize::Min)
+                .with_cross_axis_alignment(CrossAxisAlignment::Center)
+                .with_child(render_session_mode_segmented_control(
+                    SessionModeSegment::Terminal,
+                    include_cloud_agent,
+                    &self.session_mode_mouse_states,
+                    appearance,
+                ));
+
+            // Show the "⌘↑ attach `?` output as agent context" hint inline, to the right of the
+            // Terminal segment, instead of on its own row below the control.
+            if show_message_bar {
+                mode_row = mode_row.with_child(
+                    Container::new(
+                        Clipped::new(ChildView::new(&self.terminal_input_message_bar).finish())
+                            .finish(),
+                    )
+                    .with_margin_left(8.)
+                    .finish(),
+                );
+            }
+
+            column.add_child(Container::new(mode_row.finish()).with_margin_top(4.).finish());
         }
 
-        if should_show_terminal_input_message_bar(&model, app) {
+        if show_message_bar && !show_session_mode_control {
+            // Fallback: keep the hint on its own row below the input when the segmented control
+            // isn't shown, so the hint's Terminal-mode visibility matches its prior condition.
             column.add_child(
                 Clipped::new(ChildView::new(&self.terminal_input_message_bar).finish()).finish(),
             );
-        } else if !(matches!(input_mode, InputMode::PinnedToTop)
-            && self
-                .suggestions_mode_model
-                .as_ref(app)
-                .is_inline_menu_open())
+        } else if !show_message_bar
+            && !(matches!(input_mode, InputMode::PinnedToTop)
+                && self
+                    .suggestions_mode_model
+                    .as_ref(app)
+                    .is_inline_menu_open())
         {
             column.add_child(
                 Container::new(Flex::row().finish())
