@@ -34,6 +34,13 @@ pub enum TeamUpdateManagerEvent {
     LeaveError,
     RenameTeamSuccess,
     RenameTeamError,
+    /// The user successfully joined a team by redeeming an invite code. The
+    /// joined workspace has already been adopted into `UserWorkspaces`.
+    RedeemInviteCodeSuccess,
+    /// Redeeming an invite code failed. The string is a user-facing message
+    /// (wrong/expired code, domain-restricted, or the "server does not support
+    /// this yet" degradation when the backend op is not deployed).
+    RedeemInviteCodeError(String),
 }
 
 /// TeamUpdateManager is a singleton model responsible for communicating with the server and local
@@ -304,6 +311,58 @@ impl TeamUpdateManager {
         UserWorkspaces::handle(ctx).update(ctx, |user_workspaces, ctx| {
             user_workspaces.team_created(&create_team_response, ctx);
         });
+    }
+
+    /// Joins the team whose invite code is provided. On success the joined
+    /// workspace is adopted exactly like [`Self::create_team`] (persisted,
+    /// added to `UserWorkspaces`, set current, `TeamsChanged` emitted) and a
+    /// [`TeamUpdateManagerEvent::RedeemInviteCodeSuccess`] event is emitted so
+    /// the caller can navigate. On failure a
+    /// [`TeamUpdateManagerEvent::RedeemInviteCodeError`] carries a user-facing
+    /// message for inline display (including the "not supported by the server
+    /// yet" degradation while the backend op is undeployed).
+    pub fn redeem_invite_code(
+        &mut self,
+        invite_code: String,
+        entrypoint: CloudObjectEventEntrypoint,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        let team_client = self.team_client.clone();
+        let _ = ctx.spawn(
+            async move {
+                team_client
+                    .redeem_team_invite_code(invite_code, entrypoint)
+                    .await
+            },
+            Self::on_invite_code_redeemed,
+        );
+    }
+
+    fn on_invite_code_redeemed(
+        &mut self,
+        redeem_response: Result<CreateTeamResponse>,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        let redeem_response = match redeem_response {
+            Ok(redeem_response) => redeem_response,
+            Err(err) => {
+                ctx.emit(TeamUpdateManagerEvent::RedeemInviteCodeError(format!(
+                    "{err:#}"
+                )));
+                return;
+            }
+        };
+
+        // Persist to sqlite, then adopt into UserWorkspaces exactly as
+        // create_team does (push workspace, set current, emit TeamsChanged).
+        self.save_to_db([ModelEvent::UpsertWorkspace {
+            workspace: Box::new(redeem_response.workspace.clone()),
+        }]);
+        UserWorkspaces::handle(ctx).update(ctx, |user_workspaces, ctx| {
+            user_workspaces.team_created(&redeem_response, ctx);
+        });
+
+        ctx.emit(TeamUpdateManagerEvent::RedeemInviteCodeSuccess);
     }
 
     pub fn leave_team(

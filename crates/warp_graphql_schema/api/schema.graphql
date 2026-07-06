@@ -1013,6 +1013,22 @@ type CreateTeamOutput implements Response {
 
 union CreateTeamResult = CreateTeamOutput | UserFacingError
 
+"""
+Joins the team whose invite code (from an invite link or email) is provided.
+Errors (wrong/expired code, domain restrictions) surface as UserFacingError.
+"""
+input RedeemTeamInviteCodeInput {
+  entrypoint: CloudObjectEventEntrypoint!
+  inviteCode: String!
+}
+
+type RedeemTeamInviteCodeOutput implements Response {
+  responseContext: ResponseContext!
+  workspace: Workspace!
+}
+
+union RedeemTeamInviteCodeResult = RedeemTeamInviteCodeOutput | UserFacingError
+
 type CreateUploadTarget {
   fields: [UploadField!]!
   headers: [CreateUploadTargetHeader!]!
@@ -3048,6 +3064,7 @@ type RootMutation {
   The generic API for recording an action (EXECUTED, OPENED, etc.) on some object.
   """
   recordObjectAction(input: RecordObjectActionInput!, requestContext: RequestContext!): RecordObjectActionResult!
+  redeemTeamInviteCode(input: RedeemTeamInviteCodeInput!, requestContext: RequestContext!): RedeemTeamInviteCodeResult!
   removeMCPAllowlistEntry(input: RemoveMCPAllowlistEntryInput!, requestContext: RequestContext!): RemoveMCPAllowlistEntryResult!
   removeObjectGuest(input: RemoveObjectGuestInput!, requestContext: RequestContext!): RemoveObjectGuestResult!
   removeObjectLinkPermissions(input: RemoveObjectLinkPermissionsInput!, requestContext: RequestContext!): RemoveObjectLinkPermissionsResult!

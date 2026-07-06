@@ -35,6 +35,7 @@ pub mod move_object;
 pub mod populate_merkle_tree_cache;
 pub mod purchase_addon_credits;
 pub mod record_object_action;
+pub mod redeem_team_invite_code;
 pub mod remove_mcp_allowlist_entry;
 pub mod remove_object_guest;
 pub mod remove_object_link_permissions;

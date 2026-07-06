@@ -87,6 +87,9 @@ const TEAM_MEMBERS_HEADER_POSITION_ID: &str = "team_settings:team_members_header
 const TEAM_NAME_EDITOR_PLACEHOLDER_TEXT: &str = "Team name";
 const CREATE_TEAM_BUTTON_LEFT_PADDING: f32 = 10.;
 const CREATE_TEAM_DESCRIPTION: &str = "When you create a team, you can collaborate on agent-driven development by sharing cloud agent runs, environments, automations, and artifacts. You can also create a shared knowledge store for teammates and agents alike.";
+const JOIN_TEAM_DESCRIPTION: &str = "Have an invite code from an invite link or email? Enter it here to join an existing team.";
+const JOIN_TEAM_EDITOR_PLACEHOLDER_TEXT: &str = "Invite code";
+const JOIN_TEAM_BUTTON_LABEL: &str = "Join";
 
 // Styling for team management page
 const LEAVE_TEAM_BUTTON_LABEL: &str = "Leave team";
@@ -169,6 +172,7 @@ pub enum TeamsPageAction {
     ShowDeleteTeamConfirmationDialog,
     CopyLink(String),
     CreateTeam,
+    JoinTeam,
     ChangeInviteViewOption(TeamsInviteOption),
     DeletePendingEmailInvitation {
         team_uid: ServerId,
@@ -266,6 +270,7 @@ impl TeamsPageAction {
                 | ShowLeaveTeamConfirmationDialog
                 | ShowDeleteTeamConfirmationDialog
                 | CreateTeam
+                | JoinTeam
                 | DeletePendingEmailInvitation { .. }
                 | RemoveUserFromTeam { .. }
                 | AddDomainRestrictions { .. }
@@ -295,6 +300,7 @@ impl From<&TeamsPageAction> for LoginGatedFeature {
             LeaveTeam => "Leave Team",
             ShowDeleteTeamConfirmationDialog => "Delete Team",
             CreateTeam => "Create Team",
+            JoinTeam => "Join Team",
             DeletePendingEmailInvitation { .. } => "Delete Pending Email Invitation",
             RemoveUserFromTeam { .. } => "Remove User From Team",
             AddDomainRestrictions { .. } => "Add Domain Restrictions",
@@ -354,6 +360,7 @@ struct TeamsWidgetMouseHandles {
     send_email_invites_button: MouseStateHandle,
     leave_team_button: MouseStateHandle,
     create_team_button: MouseStateHandle,
+    join_team_button: MouseStateHandle,
     approve_domains_button: MouseStateHandle,
     reset_invite_links_button: MouseStateHandle,
     invite_by_link_toggle_state: SwitchStateHandle,
@@ -520,6 +527,11 @@ pub struct TeamsPageView {
     page: PageType<Self>,
     auth_state: Arc<AuthState>,
     create_team_editor: ViewHandle<EditorView>,
+    join_team_editor: ViewHandle<EditorView>,
+    /// Inline error under the "Join a team" section. Also carries the "server
+    /// does not support this yet" degradation message while the backend
+    /// RedeemTeamInviteCode op is undeployed.
+    join_team_error: Option<String>,
     approve_domains_block_editor: ViewHandle<WordBlockEditorView>,
     approve_domains_block_editor_state: ChipEditorState,
     email_invites_block_editor: ViewHandle<WordBlockEditorView>,
@@ -584,6 +596,7 @@ impl TypedActionView for TeamsPageView {
             TeamsPageAction::CopyLink(link) => self.copy_invite_link(link, ctx),
             TeamsPageAction::LeaveTeam => self.leave_team(ctx),
             TeamsPageAction::CreateTeam => self.create_team(ctx),
+            TeamsPageAction::JoinTeam => self.join_team(ctx),
             TeamsPageAction::RemoveUserFromTeam { user_uid, team_uid } => {
                 if FeatureFlag::BillingAndUsagePageV2.is_enabled() {
                     self.show_team_action_confirmation(
@@ -859,6 +872,13 @@ impl TeamsPageView {
             ctx,
         );
 
+        let join_team_editor = Self::editor(
+            |me, event, ctx| me.handle_join_team_editor_event(event, ctx),
+            JOIN_TEAM_EDITOR_PLACEHOLDER_TEXT,
+            font_size,
+            ctx,
+        );
+
         let approve_domains_block_editor = ctx.add_typed_action_view(|ctx| {
             WordBlockEditorView::new(
                 ctx,
@@ -997,6 +1017,8 @@ impl TeamsPageView {
             page,
             auth_state: AuthStateProvider::as_ref(ctx).get().clone(),
             create_team_editor,
+            join_team_editor,
+            join_team_error: None,
             approve_domains_block_editor,
             approve_domains_block_editor_state: ChipEditorState {
                 is_valid: false,
@@ -1355,6 +1377,20 @@ impl TeamsPageView {
             TeamUpdateManagerEvent::RenameTeamError => {
                 self.show_error("Failed to rename team", None, ctx)
             }
+            TeamUpdateManagerEvent::RedeemInviteCodeSuccess => {
+                self.join_team_error = None;
+                self.join_team_editor.update(ctx, |editor, ctx| {
+                    editor.clear_buffer_and_reset_undo_stack(ctx);
+                });
+                self.show_success("Successfully joined team", ctx);
+                // Navigate to the joined team, mirroring create_team.
+                ctx.emit(TeamsPageViewEvent::OpenWarpDrive);
+                ctx.notify();
+            }
+            TeamUpdateManagerEvent::RedeemInviteCodeError(message) => {
+                self.join_team_error = Some(message.clone());
+                ctx.notify();
+            }
         }
     }
 
@@ -1679,6 +1715,33 @@ impl TeamsPageView {
         ctx.dispatch_typed_action(&WorkspaceAction::OpenWarpDrive);
     }
 
+    fn join_team(&mut self, ctx: &mut ViewContext<Self>) {
+        let invite_code = self
+            .join_team_editor
+            .as_ref(ctx)
+            .buffer_text(ctx)
+            .trim()
+            .to_string();
+        if invite_code.is_empty() {
+            self.join_team_error = Some("Enter an invite code to join a team.".to_string());
+            ctx.notify();
+            return;
+        }
+
+        // Clear any prior inline error before firing the request. Navigation
+        // and adoption happen when the manager emits RedeemInviteCodeSuccess;
+        // failures land in RedeemInviteCodeError and render inline.
+        self.join_team_error = None;
+        TeamUpdateManager::handle(ctx).update(ctx, |manager, ctx| {
+            manager.redeem_invite_code(
+                invite_code,
+                CloudObjectEventEntrypoint::TeamSettings,
+                ctx,
+            );
+        });
+        ctx.notify();
+    }
+
     fn set_team_member_role(
         &mut self,
         user_uid: UserUid,
@@ -1948,6 +2011,18 @@ impl TeamsPageView {
     fn handle_editor_event(&mut self, event: &EditorEvent, ctx: &mut ViewContext<Self>) {
         match event {
             EditorEvent::Edited(_) => ctx.notify(),
+            EditorEvent::Escape => ctx.focus_self(),
+            _ => (),
+        }
+    }
+
+    fn handle_join_team_editor_event(&mut self, event: &EditorEvent, ctx: &mut ViewContext<Self>) {
+        match event {
+            EditorEvent::Edited(_) => {
+                // Clear a stale error once the user starts fixing the code.
+                self.join_team_error = None;
+                ctx.notify();
+            }
             EditorEvent::Escape => ctx.focus_self(),
             _ => (),
         }
@@ -4800,6 +4875,10 @@ impl TeamsWidget {
                 .finish(),
         );
 
+        // "Join a team" section: invite-code input + Join button.
+        page.add_child(render_separator(appearance));
+        page.add_child(self.render_join_team_section(view, appearance, app));
+
         if !view.discoverable_teams_states.is_empty() {
             // Separator and subtitle
             page.add_child(render_separator(appearance));
@@ -4839,6 +4918,115 @@ impl TeamsWidget {
                     )
                     .finish(),
             )
+            .finish()
+    }
+
+    fn render_join_team_section(
+        &self,
+        view: &TeamsPageView,
+        appearance: &Appearance,
+        app: &AppContext,
+    ) -> Box<dyn Element> {
+        let mut section = Flex::column();
+
+        section.add_child(
+            self.render_sub_header_with_subtext_color(appearance, "Join a team".to_string()),
+        );
+        section.add_child(
+            Container::new(self.render_description(JOIN_TEAM_DESCRIPTION.to_string(), appearance))
+                .with_padding_top(6.)
+                .finish(),
+        );
+
+        // Invite-code editor + Join button, mirroring render_create_team_actions.
+        section.add_child(
+            Container::new(
+                Flex::row()
+                    .with_main_axis_size(MainAxisSize::Max)
+                    .with_child(
+                        Shrinkable::new(
+                            1.,
+                            self.render_editor(appearance, view.join_team_editor.clone(), None),
+                        )
+                        .finish(),
+                    )
+                    .with_child(
+                        Container::new(self.render_join_team_by_code_button(view, appearance, app))
+                            .with_padding_left(CREATE_TEAM_BUTTON_LEFT_PADDING)
+                            .finish(),
+                    )
+                    .finish(),
+            )
+            .with_padding_top(12.)
+            .finish(),
+        );
+
+        // Inline error (wrong/expired code, domain-restricted, or the
+        // "server does not support this yet" degradation).
+        if let Some(error) = &view.join_team_error {
+            section.add_child(
+                Container::new(self.render_error_sub_text(error.clone(), appearance))
+                    .with_padding_top(6.)
+                    .finish(),
+            );
+        }
+
+        section.finish()
+    }
+
+    /// Join-by-invite-code button. Named distinctly from
+    /// [`Self::render_join_team_button`] (the team-discovery "Join" button).
+    fn render_join_team_by_code_button(
+        &self,
+        view: &TeamsPageView,
+        appearance: &Appearance,
+        app: &AppContext,
+    ) -> Box<dyn Element> {
+        let mut button = appearance
+            .ui_builder()
+            .button(
+                ButtonVariant::Accent,
+                self.mouse_state_handles.join_team_button.clone(),
+            )
+            .with_centered_text_label(JOIN_TEAM_BUTTON_LABEL.to_owned())
+            .with_style(UiComponentStyles {
+                font_color: Some(
+                    appearance
+                        .theme()
+                        .main_text_color(appearance.theme().accent())
+                        .into_solid(),
+                ),
+                font_weight: Some(Weight::Medium),
+                width: Some(100.),
+                height: Some(38.),
+                font_size: Some(14.),
+                ..Default::default()
+            });
+
+        if view
+            .join_team_editor
+            .as_ref(app)
+            .buffer_text(app)
+            .trim()
+            .is_empty()
+        {
+            button = button
+                .with_style(UiComponentStyles {
+                    font_color: Some(
+                        appearance
+                            .theme()
+                            .disabled_text_color(appearance.theme().background())
+                            .into(),
+                    ),
+                    ..Default::default()
+                })
+                .disabled();
+        }
+
+        button
+            .build()
+            .with_cursor(Cursor::PointingHand)
+            .on_click(move |ctx, _, _| ctx.dispatch_typed_action(TeamsPageAction::JoinTeam))
             .finish()
     }
 

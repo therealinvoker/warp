@@ -31,6 +31,10 @@ use warp_graphql::mutations::rename_team::{
 use warp_graphql::mutations::reset_invite_links::{
     ResetInviteLinks, ResetInviteLinksInput, ResetInviteLinksResult, ResetInviteLinksVariables,
 };
+use warp_graphql::mutations::redeem_team_invite_code::{
+    RedeemTeamInviteCode, RedeemTeamInviteCodeInput, RedeemTeamInviteCodeResult,
+    RedeemTeamInviteCodeVariables,
+};
 use warp_graphql::mutations::remove_mcp_allowlist_entry::{
     RemoveMCPAllowlistEntry, RemoveMCPAllowlistEntryInput, RemoveMCPAllowlistEntryResult,
     RemoveMCPAllowlistEntryVariables,
@@ -142,6 +146,15 @@ pub trait TeamClient: 'static + Send + Sync {
         name: String,
         entrypoint: CloudObjectEventEntrypoint,
         discoverable: Option<bool>,
+    ) -> Result<CreateTeamResponse>;
+
+    /// Joins the team whose invite code (from an invite link or email
+    /// invite) is provided, returning the joined workspace like
+    /// [`Self::create_team`] does.
+    async fn redeem_team_invite_code(
+        &self,
+        invite_code: String,
+        entrypoint: CloudObjectEventEntrypoint,
     ) -> Result<CreateTeamResponse>;
 
     /// Removes the user from the selected team and returns a list of all teams that a user is
@@ -385,6 +398,47 @@ impl TeamClient for ServerApi {
                 Err(anyhow!(get_user_facing_error_message(user_facing_error)))
             }
             CreateTeamResult::Unknown => Err(anyhow!("unknown error while creating team")),
+        }
+    }
+
+    async fn redeem_team_invite_code(
+        &self,
+        invite_code: String,
+        entrypoint: CloudObjectEventEntrypoint,
+    ) -> Result<CreateTeamResponse> {
+        let variables = RedeemTeamInviteCodeVariables {
+            input: RedeemTeamInviteCodeInput {
+                invite_code,
+                entrypoint: entrypoint.into(),
+            },
+            request_context: get_request_context(),
+        };
+
+        let operation = RedeemTeamInviteCode::build(variables);
+        let result = self
+            .send_graphql_request(operation, None)
+            .await
+            .map_err(|err| map_unsupported_op_error(err, "Joining a team by invite code"))?
+            .redeem_team_invite_code;
+
+        match result {
+            RedeemTeamInviteCodeResult::RedeemTeamInviteCodeOutput(output) => {
+                let workspace: Workspace = output.workspace.into();
+                if let Some(team) = workspace.teams.first() {
+                    Ok(CreateTeamResponse {
+                        team: team.clone(),
+                        workspace: workspace.clone(),
+                    })
+                } else {
+                    Err(anyhow!("joined workspace is missing its team"))
+                }
+            }
+            RedeemTeamInviteCodeResult::UserFacingError(user_facing_error) => {
+                Err(anyhow!(get_user_facing_error_message(user_facing_error)))
+            }
+            RedeemTeamInviteCodeResult::Unknown => {
+                Err(anyhow!("unknown error while joining team by invite code"))
+            }
         }
     }
 
