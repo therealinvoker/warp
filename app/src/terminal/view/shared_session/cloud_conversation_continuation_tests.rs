@@ -191,6 +191,7 @@ fn ambient_agent_task(
         artifacts: vec![],
         last_event_sequence: None,
         children: vec![],
+        trigger_metadata: None,
     }
 }
 

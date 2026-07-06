@@ -120,6 +120,10 @@ pub enum SettingsPageViewHandle {
     WarpDrive(ViewHandle<WarpDriveSettingsPageView>),
     #[cfg(feature = "github_integration")]
     Github(ViewHandle<super::github_page::GithubSettingsPageView>),
+    #[cfg(feature = "github_automations")]
+    GithubAutomations(
+        ViewHandle<super::github_automations::list_page::GithubAutomationsListPageView>,
+    ),
 }
 
 impl SettingsPageViewHandle {
@@ -146,6 +150,8 @@ impl SettingsPageViewHandle {
             WarpDrive(view_handle) => ChildView::new(view_handle).finish(),
             #[cfg(feature = "github_integration")]
             Github(view_handle) => ChildView::new(view_handle).finish(),
+            #[cfg(feature = "github_automations")]
+            GithubAutomations(view_handle) => ChildView::new(view_handle).finish(),
         }
     }
 }

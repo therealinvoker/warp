@@ -138,6 +138,16 @@ impl Team {
         })
     }
 
+    /// Whether this team's tier entitles it to GitHub automations. Reads the
+    /// tier `githubPolicy.automationsEnabled`; returns `false` when the backend
+    /// has not yet reported a policy (fail closed).
+    pub fn github_automations_enabled(&self) -> bool {
+        self.billing_metadata
+            .tier
+            .github_policy
+            .is_some_and(|policy| policy.automations_enabled)
+    }
+
     pub fn get_delete_disabled_reason(
         &self,
         current_user_email: &str,

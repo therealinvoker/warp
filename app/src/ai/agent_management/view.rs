@@ -559,6 +559,11 @@ impl AgentManagementView {
         if FeatureFlag::ScheduledAmbientAgents.is_enabled() {
             sources.push(AgentSource::ScheduledAgent);
         }
+        // Surface a GitHub-action source filter chip once automations are
+        // enabled, so users can isolate automation/bugbot runs.
+        if FeatureFlag::GithubAutomations.is_enabled() {
+            sources.push(AgentSource::GitHubAction);
+        }
 
         let mut items = vec![MenuItem::Item(
             MenuItemFields::new("All").with_on_select_action(
@@ -1833,9 +1838,64 @@ impl AgentManagementView {
             metadata_parts.push(format!("Credits used: {usage}"));
         }
 
-        Text::new(metadata_parts.join(" • "), font_family, font_size)
+        let metadata_line = Text::new(metadata_parts.join(" • "), font_family, font_size)
             .with_color(theme.nonactive_ui_text_color().into())
-            .finish()
+            .finish();
+
+        // For automated (GitHub) runs, surface a trigger-context line (event ·
+        // repo, plus the PR/issue link when present) and, for failures, the
+        // server status message (e.g. "no provider key configured").
+        let trigger_line = entry
+            .display
+            .trigger_metadata
+            .as_ref()
+            .and_then(|meta| {
+                let mut text = meta.context_line()?;
+                if let Some(link) = meta.link() {
+                    text.push_str(" · ");
+                    text.push_str(link);
+                }
+                Some(text)
+            })
+            .map(|text| {
+                Container::new(
+                    Text::new(format!("Triggered by {text}"), font_family, font_size)
+                        .with_color(theme.nonactive_ui_text_color().into())
+                        .finish(),
+                )
+                .with_margin_top(2.)
+                .finish()
+            });
+
+        let status_line = entry
+            .display
+            .status_message
+            .as_deref()
+            .filter(|_| entry.display.status.is_failure_like())
+            .map(|message| {
+                Container::new(
+                    Text::new(message.to_string(), font_family, font_size)
+                        .with_color(theme.ansi_fg_red())
+                        .finish(),
+                )
+                .with_margin_top(2.)
+                .finish()
+            });
+
+        if trigger_line.is_none() && status_line.is_none() {
+            return metadata_line;
+        }
+
+        let mut column = Flex::column()
+            .with_cross_axis_alignment(CrossAxisAlignment::Start)
+            .with_child(metadata_line);
+        if let Some(trigger_line) = trigger_line {
+            column.add_child(trigger_line);
+        }
+        if let Some(status_line) = status_line {
+            column.add_child(status_line);
+        }
+        column.finish()
     }
 
     // Render the main page header based on the current view state

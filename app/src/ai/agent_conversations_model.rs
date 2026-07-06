@@ -458,6 +458,20 @@ impl AgentRunDisplayStatus {
         )
     }
 
+    /// Whether this status is failure-like (failed / error / blocked / unknown).
+    /// Used to decide when to surface the run's `status_message`.
+    pub fn is_failure_like(&self) -> bool {
+        matches!(
+            self,
+            AgentRunDisplayStatus::TaskFailed
+                | AgentRunDisplayStatus::TaskError
+                | AgentRunDisplayStatus::TaskUnknown
+                | AgentRunDisplayStatus::ConversationError
+                | AgentRunDisplayStatus::TaskBlocked { .. }
+                | AgentRunDisplayStatus::ConversationBlocked { .. }
+        )
+    }
+
     pub fn status_icon_and_color(&self, theme: &WarpTheme) -> (Icon, ColorU) {
         match self {
             AgentRunDisplayStatus::TaskQueued

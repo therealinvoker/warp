@@ -311,6 +311,7 @@ fn ambient_agent_task_for_current_user(task_id: AmbientAgentTaskId) -> AmbientAg
         artifacts: vec![],
         last_event_sequence: None,
         children: vec![],
+        trigger_metadata: None,
     }
 }
 

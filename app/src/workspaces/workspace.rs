@@ -402,6 +402,24 @@ pub struct AmbientAgentsPolicy {
     pub instance_shape: Option<InstanceShape>,
 }
 
+/// The tier's GitHub entitlements. Rust representation of `githubPolicy` on the
+/// GraphQL `Tier`. Absent (`None`) on [`Tier`] means the backend has not yet
+/// reported a policy; callers treat that as "not entitled" (fail closed).
+#[derive(Clone, Debug, Copy, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GithubPolicy {
+    /// Whether the GitHub integration is available at all for this tier.
+    pub enabled: bool,
+    /// Whether event-driven automations are available (team+).
+    pub automations_enabled: bool,
+    /// Whether Bugbot automatic review is available (team+).
+    pub bugbot_enabled: bool,
+    /// Cap on concurrently-running automation/bugbot runs.
+    pub max_concurrent_runs: i32,
+    /// Cap on the number of automations that may be configured.
+    pub max_automations: i32,
+}
+
 #[derive(Clone, Debug, Copy, Serialize, Deserialize)]
 pub struct InstanceShape {
     pub vcpus: i32,
@@ -496,6 +514,11 @@ pub struct Tier {
     pub ambient_agents_policy: Option<AmbientAgentsPolicy>,
     pub usage_visibility_policy: Option<UsageVisibilityPolicy>,
     pub marketplace_policy: Option<MarketplacePolicy>,
+    /// GitHub entitlements (integration/automations/bugbot). `None` until the
+    /// backend serves `githubPolicy` in workspace metadata; treated as
+    /// not-entitled while absent.
+    #[serde(default)]
+    pub github_policy: Option<GithubPolicy>,
 }
 
 /// This struct is the rust representation of `BillingMetadata` from the GraphQL Schema.

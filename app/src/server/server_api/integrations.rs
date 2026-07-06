@@ -36,6 +36,11 @@ use warp_graphql::queries::user_repo_auth_status::{
 use super::ServerApi;
 use crate::channel::ChannelState;
 use crate::features::FeatureFlag;
+#[cfg(feature = "github_automations")]
+use crate::github::automations::{
+    GithubAutomationInput, GithubProviderKey, ListGithubAutomationsData,
+    UpsertGithubAutomationOutcome,
+};
 use crate::server::graphql::{get_request_context, get_user_facing_error_message};
 
 /// Response shape of `GET /api/v1/github/token`.
@@ -161,6 +166,48 @@ pub trait IntegrationsClient: 'static + IntegrationsClientBounds {
         &self,
         repos: Vec<(String, String)>,
     ) -> Result<SuggestCloudEnvironmentImageResult>;
+
+    /// Lists the GitHub automations and masked provider keys for a workspace.
+    ///
+    /// Gated on `FeatureFlag::GithubAutomations` at the call site.
+    #[cfg(feature = "github_automations")]
+    async fn list_github_automations(
+        &self,
+        workspace_uid: String,
+    ) -> Result<ListGithubAutomationsData>;
+
+    /// Creates or updates a GitHub automation.
+    ///
+    /// Returns the stored automation and, on CUSTOM-trigger creation, the
+    /// plaintext `hook_key` (surfaced exactly once).
+    #[cfg(feature = "github_automations")]
+    async fn upsert_github_automation(
+        &self,
+        workspace_uid: String,
+        input: GithubAutomationInput,
+    ) -> Result<UpsertGithubAutomationOutcome>;
+
+    /// Removes a GitHub automation by id.
+    #[cfg(feature = "github_automations")]
+    async fn remove_github_automation(&self, workspace_uid: String, id: String) -> Result<()>;
+
+    /// Sets (creates or replaces) a workspace GitHub provider key. The plaintext
+    /// `key` is sent once; the server returns only the masked `{provider,last4}`.
+    #[cfg(feature = "github_automations")]
+    async fn set_github_provider_key(
+        &self,
+        workspace_uid: String,
+        provider: String,
+        key: String,
+    ) -> Result<GithubProviderKey>;
+
+    /// Removes a workspace GitHub provider key.
+    #[cfg(feature = "github_automations")]
+    async fn remove_github_provider_key(
+        &self,
+        workspace_uid: String,
+        provider: String,
+    ) -> Result<()>;
 }
 
 #[cfg_attr(target_family = "wasm", async_trait(?Send))]
@@ -404,6 +451,210 @@ impl IntegrationsClient for ServerApi {
             }
             SuggestCloudEnvironmentImageResult::Unknown => Err(anyhow!(
                 "Unknown response from suggestCloudEnvironmentImage query"
+            )),
+        }
+    }
+
+    #[cfg(feature = "github_automations")]
+    async fn list_github_automations(
+        &self,
+        workspace_uid: String,
+    ) -> Result<ListGithubAutomationsData> {
+        use warp_graphql::queries::list_github_automations::{
+            ListGithubAutomations, ListGithubAutomationsInput, ListGithubAutomationsResult,
+            ListGithubAutomationsVariables,
+        };
+
+        let variables = ListGithubAutomationsVariables {
+            request_context: get_request_context(),
+            input: ListGithubAutomationsInput {
+                workspace_uid: cynic::Id::new(workspace_uid),
+            },
+        };
+        let operation = ListGithubAutomations::build(variables);
+        let response = self.send_graphql_request(operation, None).await?;
+
+        match response.list_github_automations {
+            ListGithubAutomationsResult::ListGithubAutomationsOutput(output) => {
+                Ok(ListGithubAutomationsData {
+                    automations: output.automations.into_iter().map(Into::into).collect(),
+                    provider_keys: output.provider_keys.into_iter().map(Into::into).collect(),
+                })
+            }
+            ListGithubAutomationsResult::UserFacingError(error) => {
+                Err(anyhow!(get_user_facing_error_message(error)))
+            }
+            ListGithubAutomationsResult::Unknown => {
+                Err(anyhow!("Unknown response while listing GitHub automations"))
+            }
+        }
+    }
+
+    #[cfg(feature = "github_automations")]
+    async fn upsert_github_automation(
+        &self,
+        workspace_uid: String,
+        input: GithubAutomationInput,
+    ) -> Result<UpsertGithubAutomationOutcome> {
+        use warp_graphql::mutations::upsert_github_automation::{
+            GithubAutomationActionInput, GithubAutomationTriggerInput, UpsertGithubAutomation,
+            UpsertGithubAutomationInput, UpsertGithubAutomationResult,
+            UpsertGithubAutomationVariables,
+        };
+
+        let GithubAutomationInput {
+            id,
+            name,
+            enabled,
+            trigger,
+            action,
+        } = input;
+
+        let variables = UpsertGithubAutomationVariables {
+            request_context: get_request_context(),
+            input: UpsertGithubAutomationInput {
+                id: id.map(cynic::Id::new),
+                workspace_uid: cynic::Id::new(workspace_uid),
+                name,
+                enabled,
+                trigger: GithubAutomationTriggerInput {
+                    event_type: trigger.event_type.to_gql_input(),
+                    repo_filter: trigger.repo_filter,
+                    branch_pattern: trigger.branch_pattern,
+                    comment_phrase: trigger.comment_phrase,
+                },
+                action: GithubAutomationActionInput {
+                    action_type: action.action_type.to_gql_input(),
+                    prompt: action.prompt,
+                    skill: action.skill,
+                    harness: action.harness,
+                    model_id: action.model_id,
+                },
+            },
+        };
+        let operation = UpsertGithubAutomation::build(variables);
+        let response = self.send_graphql_request(operation, None).await?;
+
+        match response.upsert_github_automation {
+            UpsertGithubAutomationResult::UpsertGithubAutomationOutput(output) => {
+                Ok(UpsertGithubAutomationOutcome {
+                    automation: output.automation.into(),
+                    hook_key: output.hook_key,
+                })
+            }
+            UpsertGithubAutomationResult::UserFacingError(error) => {
+                Err(anyhow!(get_user_facing_error_message(error)))
+            }
+            UpsertGithubAutomationResult::Unknown => {
+                Err(anyhow!("Unknown response while saving GitHub automation"))
+            }
+        }
+    }
+
+    #[cfg(feature = "github_automations")]
+    async fn remove_github_automation(&self, workspace_uid: String, id: String) -> Result<()> {
+        use warp_graphql::mutations::remove_github_automation::{
+            RemoveGithubAutomation, RemoveGithubAutomationInput, RemoveGithubAutomationResult,
+            RemoveGithubAutomationVariables,
+        };
+
+        let variables = RemoveGithubAutomationVariables {
+            request_context: get_request_context(),
+            input: RemoveGithubAutomationInput {
+                workspace_uid: cynic::Id::new(workspace_uid),
+                id: cynic::Id::new(id),
+            },
+        };
+        let operation = RemoveGithubAutomation::build(variables);
+        let response = self.send_graphql_request(operation, None).await?;
+
+        match response.remove_github_automation {
+            RemoveGithubAutomationResult::RemoveGithubAutomationOutput(output) => {
+                if output.success {
+                    Ok(())
+                } else {
+                    Err(anyhow!("Server declined to remove the GitHub automation"))
+                }
+            }
+            RemoveGithubAutomationResult::UserFacingError(error) => {
+                Err(anyhow!(get_user_facing_error_message(error)))
+            }
+            RemoveGithubAutomationResult::Unknown => {
+                Err(anyhow!("Unknown response while removing GitHub automation"))
+            }
+        }
+    }
+
+    #[cfg(feature = "github_automations")]
+    async fn set_github_provider_key(
+        &self,
+        workspace_uid: String,
+        provider: String,
+        key: String,
+    ) -> Result<GithubProviderKey> {
+        use warp_graphql::mutations::set_github_provider_key::{
+            SetGithubProviderKey, SetGithubProviderKeyInput, SetGithubProviderKeyResult,
+            SetGithubProviderKeyVariables,
+        };
+
+        let variables = SetGithubProviderKeyVariables {
+            request_context: get_request_context(),
+            input: SetGithubProviderKeyInput {
+                workspace_uid: cynic::Id::new(workspace_uid),
+                provider,
+                key,
+            },
+        };
+        let operation = SetGithubProviderKey::build(variables);
+        let response = self.send_graphql_request(operation, None).await?;
+
+        match response.set_github_provider_key {
+            SetGithubProviderKeyResult::SetGithubProviderKeyOutput(output) => {
+                Ok(output.provider_key.into())
+            }
+            SetGithubProviderKeyResult::UserFacingError(error) => {
+                Err(anyhow!(get_user_facing_error_message(error)))
+            }
+            SetGithubProviderKeyResult::Unknown => {
+                Err(anyhow!("Unknown response while setting GitHub provider key"))
+            }
+        }
+    }
+
+    #[cfg(feature = "github_automations")]
+    async fn remove_github_provider_key(
+        &self,
+        workspace_uid: String,
+        provider: String,
+    ) -> Result<()> {
+        use warp_graphql::mutations::remove_github_provider_key::{
+            RemoveGithubProviderKey, RemoveGithubProviderKeyInput, RemoveGithubProviderKeyResult,
+            RemoveGithubProviderKeyVariables,
+        };
+
+        let variables = RemoveGithubProviderKeyVariables {
+            request_context: get_request_context(),
+            input: RemoveGithubProviderKeyInput {
+                workspace_uid: cynic::Id::new(workspace_uid),
+                provider,
+            },
+        };
+        let operation = RemoveGithubProviderKey::build(variables);
+        let response = self.send_graphql_request(operation, None).await?;
+
+        match response.remove_github_provider_key {
+            RemoveGithubProviderKeyResult::RemoveGithubProviderKeyOutput(output) => {
+                if output.success {
+                    Ok(())
+                } else {
+                    Err(anyhow!("Server declined to remove the GitHub provider key"))
+                }
+            }
+            RemoveGithubProviderKeyResult::UserFacingError(error) => {
+                Err(anyhow!(get_user_facing_error_message(error)))
+            }
+            RemoveGithubProviderKeyResult::Unknown => Err(anyhow!(
+                "Unknown response while removing GitHub provider key"
             )),
         }
     }

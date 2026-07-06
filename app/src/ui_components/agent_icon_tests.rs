@@ -411,6 +411,8 @@ fn non_ambient_entry_uses_display_harness() {
             environment_id: None,
             harness: Some(Harness::Codex),
             artifacts: Vec::new(),
+            trigger_metadata: None,
+            status_message: None,
         },
         backing: AgentConversationBackingData {
             has_loaded_conversation: true,
