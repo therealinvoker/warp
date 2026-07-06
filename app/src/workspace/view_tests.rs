@@ -107,6 +107,24 @@ fn query_for_rewind_prefill_uses_custom_display_query_inputs() {
     );
 }
 
+#[test]
+fn parse_terminal_tab_number_matches_only_canonical_titles() {
+    assert_eq!(parse_terminal_tab_number("Terminal 1"), Some(1));
+    assert_eq!(parse_terminal_tab_number("Terminal 42"), Some(42));
+
+    // Non-canonical or unrelated titles are not counted.
+    assert_eq!(parse_terminal_tab_number("Terminal"), None);
+    assert_eq!(parse_terminal_tab_number("Terminal "), None);
+    assert_eq!(parse_terminal_tab_number("Terminal 0"), None);
+    assert_eq!(parse_terminal_tab_number("Terminal 01"), None);
+    assert_eq!(parse_terminal_tab_number("Terminal -1"), None);
+    assert_eq!(parse_terminal_tab_number("Terminal 1x"), None);
+    assert_eq!(parse_terminal_tab_number("Terminal 1 "), None);
+    assert_eq!(parse_terminal_tab_number("terminal 1"), None);
+    assert_eq!(parse_terminal_tab_number("My Terminal 1"), None);
+    assert_eq!(parse_terminal_tab_number("~/code"), None);
+}
+
 pub(crate) fn initialize_app(app: &mut App) {
     initialize_settings_for_tests(app);
 

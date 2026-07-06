@@ -340,8 +340,7 @@ impl BlocklistAIActionExecutor {
             ctx.add_model(|_| AskUserQuestionExecutor::new(terminal_view_id));
         let wait_for_events_executor =
             ctx.add_model(|ctx| WaitForEventsExecutor::new(terminal_view_id, ctx));
-        let github_action_executor =
-            ctx.add_model(|_| GithubActionExecutor::new(terminal_view_id));
+        let github_action_executor = ctx.add_model(|_| GithubActionExecutor::new(terminal_view_id));
         Self {
             shell_command_executor,
             read_files_executor,

@@ -21,9 +21,10 @@ use warpui_core::{
 
 use super::OnboardingSlide;
 use crate::model::{AiSetupChoice, OnboardingStateModel};
+use crate::slides::brand::bang_logo_mark;
 use crate::slides::{bottom_nav, layout, slide_content};
 
-/// Checklist shown on the "Use Warp agent" card.
+/// Checklist shown on the "Use Bang Agent" card.
 const WARP_AGENT_FEATURES: &[&str] = &[
     "Best harness for terminal tasks and agentic coding",
     "Frontier models from OpenAI, Anthropic, and Google",
@@ -65,7 +66,7 @@ impl AiSetupSlide {
 
     // The final DES-816 visual exports have not landed yet, so the right panel
     // reuses existing bundled assets that match each choice: the agent
-    // experience for "Use Warp agent" and the CLI-agent toolbar for
+    // experience for "Use Bang Agent" and the CLI-agent toolbar for
     // "Use third party agents".
     pub(crate) const VISUAL_IMAGE_PATHS: &'static [&'static str] = &[
         "async/png/onboarding/welcome_agent.png",
@@ -98,11 +99,7 @@ impl AiSetupSlide {
     fn render_header(&self, appearance: &Appearance) -> Box<dyn Element> {
         let theme = appearance.theme();
 
-        let logo_fill = internal_colors::fg_overlay_4(theme);
-        let logo = ConstrainedBox::new(Icon::WarpLogoLight.to_warpui_icon(logo_fill).finish())
-            .with_width(64.)
-            .with_height(64.)
-            .finish();
+        let logo = bang_logo_mark(64.);
 
         let title = appearance
             .ui_builder()
@@ -116,7 +113,7 @@ impl AiSetupSlide {
             .finish();
 
         let subtitle = FormattedTextElement::from_str(
-            "Choose if you'd like to use Warp Agent or third party agents.",
+            "Choose if you'd like to use Bang Agent or third party agents.",
             appearance.ui_font_family(),
             16.,
         )
@@ -227,7 +224,7 @@ impl AiSetupSlide {
         let header_row = {
             let label = appearance
                 .ui_builder()
-                .paragraph("Use Warp Agent")
+                .paragraph("Use Bang Agent")
                 .with_style(UiComponentStyles {
                     font_size: Some(16.),
                     font_weight: Some(Weight::Semibold),

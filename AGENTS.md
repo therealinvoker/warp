@@ -49,6 +49,15 @@ Environment variables:
 - `./script/run-clang-format.py -r --extensions 'c,h,cpp,m' ./crates/warpui/src/ ./app/src/` - Format C/C++/Obj-C code
 - `find . -name "*.wgsl" -exec wgslfmt --check {} +` - Check WGSL shader formatting
 
+### Iteration & Verification Cadence (fork workflow)
+
+Verifying edits recompiles the crate under test. The `warp` app crate is ~1M LOC, so running a full `cargo clippy --workspace --all-targets` (or `./script/presubmit`) after every small edit is the main source of slow turnaround. Keep the loop tight:
+
+- **Batch related edits, then verify once.** Apply all the edits for a related change (across files) first, then run a single verification pass. Do not recompile after each individual file when the edits ship together. This matters most when `app/src` is touched, since `-p warp` is the slow compile.
+- **Iterate with one scoped `cargo check`.** While iterating, run `cargo check -p <crate>` for the *smallest* crate that changed — e.g. `-p onboarding` for onboarding-slide work (fast), `-p warp` only when `app/src` is touched. Run `cargo fmt` freely; it is cheap.
+- **Defer the heavy checks to the end.** Run `cargo clippy` (the version in `./script/presubmit`) and the relevant `cargo nextest` tests once the change is complete — not on every intermediate edit. Run the full `./script/presubmit` before opening/updating a PR (see Pull Request Workflow).
+- **Scope tests while iterating.** Prefer `cargo nextest run -p <crate> <filter>` for the crate you changed over a whole-workspace run.
+
 ### Platform Setup
 - `./script/bootstrap` - Platform-specific setup plus common agent skill installation from `skills-lock.json`; prompts for project/global when an install or update is needed unless a target flag or environment override is provided.
 - `./script/bootstrap --skip-common-skills` - Platform setup without installing or updating common agent skills.

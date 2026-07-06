@@ -521,18 +521,30 @@ fn write_tool_call_args(out: &mut String, tool: &Tool) {
             }
         }
         Tool::ReadGithubPr(t) => {
-            out.push_str(&format!("owner: {}\nrepo: {}\nnumber: {}\n", t.owner, t.repo, t.number));
+            out.push_str(&format!(
+                "owner: {}\nrepo: {}\nnumber: {}\n",
+                t.owner, t.repo, t.number
+            ));
         }
         Tool::ListGithubPrComments(t) => {
-            out.push_str(&format!("owner: {}\nrepo: {}\nnumber: {}\n", t.owner, t.repo, t.number));
+            out.push_str(&format!(
+                "owner: {}\nrepo: {}\nnumber: {}\n",
+                t.owner, t.repo, t.number
+            ));
         }
         Tool::CreateGithubPr(t) => {
             out.push_str(&format!("owner: {}\nrepo: {}\n", t.owner, t.repo));
             out.push_str(&format!("title: \"{}\"\n", escape_yaml_string(&t.title)));
-            out.push_str(&format!("head: {}\nbase: {}\ndraft: {}\n", t.head, t.base, t.draft));
+            out.push_str(&format!(
+                "head: {}\nbase: {}\ndraft: {}\n",
+                t.head, t.base, t.draft
+            ));
         }
         Tool::ReadGithubIssue(t) => {
-            out.push_str(&format!("owner: {}\nrepo: {}\nnumber: {}\n", t.owner, t.repo, t.number));
+            out.push_str(&format!(
+                "owner: {}\nrepo: {}\nnumber: {}\n",
+                t.owner, t.repo, t.number
+            ));
         }
         Tool::ListGithubIssues(t) => {
             out.push_str(&format!("owner: {}\nrepo: {}\n", t.owner, t.repo));

@@ -14729,6 +14729,7 @@ impl TerminalView {
         ctx: &mut ViewContext<Self>,
     ) {
         let prompt = callout_view.as_ref(ctx).prompt(ctx);
+        let is_terminal_mode_step = callout_view.as_ref(ctx).is_terminal_mode_step(ctx);
 
         if let OnboardingQuery::None = prompt {
             // No-op: don't clear existing input
@@ -14738,7 +14739,15 @@ impl TerminalView {
         self.input.update(ctx, |input, ctx| {
             match &prompt {
                 OnboardingQuery::TerminalCommand(text) => {
-                    input.replace_buffer_content(text, ctx);
+                    // On the terminal-mode coach-mark the command input keeps
+                    // focus, so leave it empty rather than seeding the hint text
+                    // (e.g. "Run a command...") — otherwise pressing Enter would
+                    // run that placeholder as a command.
+                    if is_terminal_mode_step {
+                        input.replace_buffer_content("", ctx);
+                    } else {
+                        input.replace_buffer_content(text, ctx);
+                    }
                 }
                 OnboardingQuery::AgentPrompt(text) => {
                     input.replace_buffer_content(text, ctx);
@@ -14753,7 +14762,14 @@ impl TerminalView {
             }
         });
 
-        ctx.focus(callout_view);
+        if is_terminal_mode_step {
+            // Put the cursor in the command input so the user can type
+            // immediately. The callout remains visible and advanceable via its
+            // "Next"/"Finish" button.
+            self.focus_input_box(ctx);
+        } else {
+            ctx.focus(callout_view);
+        }
     }
 
     // Redundantly issues resize changes to increase the chances that the alt-screen program
@@ -19921,6 +19937,17 @@ impl TerminalView {
         if !onboarding_callout_view
             .as_ref(ctx)
             .is_onboarding_active(ctx)
+        {
+            return false;
+        }
+
+        // On the terminal-mode coach-mark, leave focus in the command input so
+        // the user can type/run a command right away. The callout stays visible
+        // and its buttons remain clickable to advance the tutorial, so we skip
+        // stealing focus here and let the caller fall through to focusing input.
+        if onboarding_callout_view
+            .as_ref(ctx)
+            .is_terminal_mode_step(ctx)
         {
             return false;
         }

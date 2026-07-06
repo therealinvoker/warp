@@ -82,6 +82,10 @@ pub struct AgentOnboardingView {
     ai_access_slide: ViewHandle<AiAccessSlide>,
     third_party_slide: ViewHandle<ThirdPartySlide>,
     project_slide: ViewHandle<ProjectSlide>,
+    /// The theme applied by default now that the "Choose a theme" slide is
+    /// skipped. Resolved from the picker themes as the "Dark" theme; applied
+    /// live during onboarding and persisted on completion.
+    default_theme: WarpTheme,
     skippable: bool,
     close_button: button::Button,
     no_ai_confirm_button: button::Button,
@@ -144,6 +148,14 @@ impl AgentOnboardingView {
         auth_state: OnboardingAuthState,
         ctx: &mut ViewContext<Self>,
     ) -> Self {
+        // The "Choose a theme" slide is skipped for now, so default to the Dark
+        // theme: match by display name, falling back to index 1 (Dark) then 0.
+        let default_theme = theme_picker_themes
+            .iter()
+            .find(|theme| theme.name().as_deref() == Some("Dark"))
+            .cloned()
+            .unwrap_or_else(|| theme_picker_themes[1].clone());
+
         let onboarding_state = ctx.add_model(|_| {
             OnboardingStateModel::new(
                 models,
@@ -274,6 +286,7 @@ impl AgentOnboardingView {
             ai_access_slide,
             third_party_slide,
             project_slide,
+            default_theme,
             skippable,
             close_button: button::Button::default(),
             no_ai_confirm_button: button::Button::default(),
@@ -328,6 +341,13 @@ impl AgentOnboardingView {
         // Focus the onboarding view so key bindings (Enter, arrow keys, etc.) are routed here
         // instead of to other views (e.g. the editor).
         ctx.focus_self();
+
+        // The "Choose a theme" slide is skipped, so apply the default Dark theme
+        // live up front so every onboarding slide renders in it.
+        let default_theme = self.default_theme.clone();
+        Appearance::handle(ctx).update(ctx, |appearance, ctx| {
+            appearance.set_theme(default_theme, ctx);
+        });
 
         // Preload customize-slide images so they're ready when the user reaches that slide.
         if FeatureFlag::OpenWarpNewSettingsModes.is_enabled() {
@@ -424,7 +444,7 @@ impl AgentOnboardingView {
             appearance,
             FeatureOptOutDialog {
                 title: "Are you sure you don't want AI?",
-                body: "Without AI, you'll still get Warp's terminal experience, but you'll miss \
+                body: "Without AI, you'll still get Bang's terminal experience, but you'll miss \
                        our agentic features like automatic fixes for terminal errors.",
                 features: &[],
                 close_button,
@@ -435,6 +455,14 @@ impl AgentOnboardingView {
     }
 
     fn handle_onboarding_completed(&mut self, ctx: &mut ViewContext<Self>) {
+        // The "Choose a theme" slide is skipped, so persist the default Dark
+        // theme before completing (root_view handles `ThemeSelected`).
+        let theme_name = self
+            .default_theme
+            .name()
+            .unwrap_or_else(|| "Dark".to_string());
+        ctx.emit(AgentOnboardingEvent::ThemeSelected { theme_name });
+
         let settings = self.onboarding_state.as_ref(ctx).settings();
         ctx.emit(AgentOnboardingEvent::OnboardingCompleted(settings));
     }

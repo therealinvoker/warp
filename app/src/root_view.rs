@@ -1656,7 +1656,12 @@ impl RootView {
             workspace_setting,
         };
 
-        let auth_onboarding_state = if auth_state.is_logged_in() {
+        // Dev/testing build flag (`--features force_onboarding`): always show the
+        // first-run onboarding experience on launch, ignoring login state, the
+        // persisted completion flag, and ForceLogin.
+        let force_onboarding = FeatureFlag::ForceOnboarding.is_enabled();
+
+        let auth_onboarding_state = if auth_state.is_logged_in() && !force_onboarding {
             AuthOnboardingState::Terminal(workspace_args.create_workspace(ctx))
         } else {
             cfg_if! {
@@ -1665,12 +1670,14 @@ impl RootView {
                 } else {
                     // When OpenWarpNewSettingsModes is enabled, show onboarding before login for
                     // users who haven't completed it yet (tracked via a local UserPreferences key).
-                    let has_completed_local_onboarding = FeatureFlag::OpenWarpNewSettingsModes.is_enabled()
+                    let has_completed_local_onboarding = !force_onboarding
+                        && FeatureFlag::OpenWarpNewSettingsModes.is_enabled()
                         && has_completed_local_onboarding(ctx);
-                    let should_show_pre_login_onboarding = FeatureFlag::OpenWarpNewSettingsModes.is_enabled()
-                        && FeatureFlag::AgentOnboarding.is_enabled()
-                        && !has_completed_local_onboarding;
-                    if FeatureFlag::ForceLogin.is_enabled() {
+                    let should_show_pre_login_onboarding = force_onboarding
+                        || (FeatureFlag::OpenWarpNewSettingsModes.is_enabled()
+                            && FeatureFlag::AgentOnboarding.is_enabled()
+                            && !has_completed_local_onboarding);
+                    if FeatureFlag::ForceLogin.is_enabled() && !force_onboarding {
                         // ForceLogin is true for Preview
                         AuthOnboardingState::Auth(workspace_args.into())
                     } else if should_show_pre_login_onboarding {

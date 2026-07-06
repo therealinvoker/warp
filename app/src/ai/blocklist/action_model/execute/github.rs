@@ -14,9 +14,9 @@
 
 use futures::future::BoxFuture;
 use futures::FutureExt;
-use warpui::{Entity, EntityId, ModelContext};
 #[cfg(feature = "github_integration")]
 use warpui::SingletonEntity as _;
+use warpui::{Entity, EntityId, ModelContext};
 
 use super::{ActionExecution, AnyActionExecution, ExecuteActionInput, PreprocessActionInput};
 use crate::ai::agent::{
@@ -331,7 +331,9 @@ mod run {
                 url: pr.html_url,
                 number: pr.number as i64,
             },
-            Err(err) => CreateGithubPrResult::Error(format!("Failed to create pull request: {err}")),
+            Err(err) => {
+                CreateGithubPrResult::Error(format!("Failed to create pull request: {err}"))
+            }
         }
     }
 

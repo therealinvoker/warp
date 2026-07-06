@@ -64,6 +64,7 @@ use crate::pricing::PricingInfoModel;
 use crate::send_telemetry_from_ctx;
 use crate::server::cloud_objects::update_manager::UpdateManager;
 use crate::server::ids::ServerId;
+use crate::server::server_api::team::{McpAllowlistEntryUpsert, McpGovernanceSettingsUpdate};
 use crate::server::telemetry::TelemetryEvent;
 use crate::themes::theme::Blend;
 use crate::themes::{self};
@@ -74,7 +75,6 @@ use crate::view_components::{
 use crate::word_block_editor::{ChipEditorState, WordBlockEditorView, WordBlockEditorViewEvent};
 use crate::workspace::WorkspaceAction;
 use crate::workspaces::team::{DiscoverableTeam, MembershipRole, Team, TeamDeleteDisabledReason};
-use crate::server::server_api::team::{McpAllowlistEntryUpsert, McpGovernanceSettingsUpdate};
 use crate::workspaces::update_manager::{TeamUpdateManager, TeamUpdateManagerEvent};
 use crate::workspaces::user_workspaces::{UserWorkspaces, UserWorkspacesEvent};
 use crate::workspaces::workspace::{
@@ -87,7 +87,8 @@ const TEAM_MEMBERS_HEADER_POSITION_ID: &str = "team_settings:team_members_header
 const TEAM_NAME_EDITOR_PLACEHOLDER_TEXT: &str = "Team name";
 const CREATE_TEAM_BUTTON_LEFT_PADDING: f32 = 10.;
 const CREATE_TEAM_DESCRIPTION: &str = "When you create a team, you can collaborate on agent-driven development by sharing cloud agent runs, environments, automations, and artifacts. You can also create a shared knowledge store for teammates and agents alike.";
-const JOIN_TEAM_DESCRIPTION: &str = "Have an invite code from an invite link or email? Enter it here to join an existing team.";
+const JOIN_TEAM_DESCRIPTION: &str =
+    "Have an invite code from an invite link or email? Enter it here to join an existing team.";
 const JOIN_TEAM_EDITOR_PLACEHOLDER_TEXT: &str = "Invite code";
 const JOIN_TEAM_BUTTON_LABEL: &str = "Join";
 
@@ -1733,11 +1734,7 @@ impl TeamsPageView {
         // failures land in RedeemInviteCodeError and render inline.
         self.join_team_error = None;
         TeamUpdateManager::handle(ctx).update(ctx, |manager, ctx| {
-            manager.redeem_invite_code(
-                invite_code,
-                CloudObjectEventEntrypoint::TeamSettings,
-                ctx,
-            );
+            manager.redeem_invite_code(invite_code, CloudObjectEventEntrypoint::TeamSettings, ctx);
         });
         ctx.notify();
     }
@@ -1790,7 +1787,11 @@ impl TeamsPageView {
         ctx.notify();
     }
 
-    fn add_mcp_allowlist_entry(&mut self, workspace_uid: WorkspaceUid, ctx: &mut ViewContext<Self>) {
+    fn add_mcp_allowlist_entry(
+        &mut self,
+        workspace_uid: WorkspaceUid,
+        ctx: &mut ViewContext<Self>,
+    ) {
         let value = self
             .mcp_allowlist_value_editor
             .as_ref(ctx)
@@ -3716,13 +3717,15 @@ impl TeamsWidget {
             self.render_subsection_header("MCP & marketplace policy".to_owned(), appearance),
         );
         section.add_child(
-            Container::new(self.render_sub_text(
-                "Control which MCP servers members of this team may install and run. \
+            Container::new(
+                self.render_sub_text(
+                    "Control which MCP servers members of this team may install and run. \
                  The most restrictive policy across a member's teams wins."
-                    .to_string(),
-                appearance,
-                Some(Coords::uniform(0.).right(48.)),
-            ))
+                        .to_string(),
+                    appearance,
+                    Some(Coords::uniform(0.).right(48.)),
+                ),
+            )
             .with_padding_top(8.)
             .finish(),
         );
@@ -3733,32 +3736,36 @@ impl TeamsWidget {
                 .finish(),
         );
 
-        section.add_child(self.render_mcp_governance_toggle_row(
-            "Allow file-based servers",
-            "Permit MCP servers detected from project or global config files (e.g. .mcp.json).",
-            settings.allow_file_based_servers,
-            self.mouse_state_handles
-                .mcp_allow_file_based_toggle_state
-                .clone(),
-            TeamsPageAction::ToggleMcpAllowFileBasedServers {
-                workspace_uid,
-                current_state: settings.allow_file_based_servers,
-            },
-            appearance,
-        ));
-        section.add_child(self.render_mcp_governance_toggle_row(
-            "Allow plugin import",
-            "Permit members to import MCP plugin bundles.",
-            settings.allow_plugin_import,
-            self.mouse_state_handles
-                .mcp_allow_plugin_import_toggle_state
-                .clone(),
-            TeamsPageAction::ToggleMcpAllowPluginImport {
-                workspace_uid,
-                current_state: settings.allow_plugin_import,
-            },
-            appearance,
-        ));
+        section.add_child(
+            self.render_mcp_governance_toggle_row(
+                "Allow file-based servers",
+                "Permit MCP servers detected from project or global config files (e.g. .mcp.json).",
+                settings.allow_file_based_servers,
+                self.mouse_state_handles
+                    .mcp_allow_file_based_toggle_state
+                    .clone(),
+                TeamsPageAction::ToggleMcpAllowFileBasedServers {
+                    workspace_uid,
+                    current_state: settings.allow_file_based_servers,
+                },
+                appearance,
+            ),
+        );
+        section.add_child(
+            self.render_mcp_governance_toggle_row(
+                "Allow plugin import",
+                "Permit members to import MCP plugin bundles.",
+                settings.allow_plugin_import,
+                self.mouse_state_handles
+                    .mcp_allow_plugin_import_toggle_state
+                    .clone(),
+                TeamsPageAction::ToggleMcpAllowPluginImport {
+                    workspace_uid,
+                    current_state: settings.allow_plugin_import,
+                },
+                appearance,
+            ),
+        );
 
         if settings.mode == McpGovernanceMode::Allowlist {
             section.add_child(self.render_mcp_allowlist_editor(
@@ -3929,11 +3936,7 @@ impl TeamsWidget {
                 .display_name
                 .clone()
                 .unwrap_or_else(|| entry.value.clone());
-            let mut detail = format!(
-                "{}: {}",
-                mcp_allowlist_kind_label(entry.kind),
-                entry.value
-            );
+            let mut detail = format!("{}: {}", mcp_allowlist_kind_label(entry.kind), entry.value);
             if let Some(pinned_version) = &entry.pinned_version {
                 detail.push_str(&format!(" (pinned to {pinned_version})"));
             }
@@ -4003,8 +4006,7 @@ impl TeamsWidget {
 
         // Add-entry form: kind picker + value on the first row, optional
         // metadata + Add button on the second.
-        let kind_label =
-            mcp_allowlist_kind_label(view.mcp_allowlist_entry_kind).to_string();
+        let kind_label = mcp_allowlist_kind_label(view.mcp_allowlist_entry_kind).to_string();
         let kind_menu_open = view.mcp_allowlist_kind_menu_open;
         let kind_button = appearance
             .ui_builder()

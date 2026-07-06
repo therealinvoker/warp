@@ -203,7 +203,10 @@ impl ServerCandidate {
     /// Candidate for an installation, with template variables resolved to
     /// their concrete values.
     pub fn from_installation(installation: &TemplatableMCPServerInstallation) -> Self {
-        Self::from_template_and_json(installation.templatable_mcp_server(), &resolve_json(installation))
+        Self::from_template_and_json(
+            installation.templatable_mcp_server(),
+            &resolve_json(installation),
+        )
     }
 
     fn from_template_and_json(template: &TemplatableMCPServer, config_json: &str) -> Self {
@@ -301,7 +304,8 @@ fn entry_matches(entry: &McpAllowlistEntry, candidate: &ServerCandidate) -> bool
             (Ok(entry_id), Some(candidate_id)) if entry_id == candidate_id
         ),
         McpAllowlistEntryKind::UrlPattern => match &candidate.spec {
-            Some(CandidateSpec::Remote { url }) | Some(CandidateSpec::Plugin { bundle_url: url }) => {
+            Some(CandidateSpec::Remote { url })
+            | Some(CandidateSpec::Plugin { bundle_url: url }) => {
                 let normalized = normalize_url(url);
                 if value.contains('*') {
                     wildcard_match(value, &normalized)

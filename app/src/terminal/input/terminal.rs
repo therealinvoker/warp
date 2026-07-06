@@ -103,7 +103,15 @@ impl Input {
                 );
             }
 
-            column.add_child(Container::new(mode_row.finish()).with_margin_top(4.).finish());
+            // Match the Agent footer's vertical spacing exactly: no top padding (the gap from the
+            // editor comes from the editor's own `margin_top`, shared with the agent render path)
+            // and an 8px bottom padding identical to the agent footer container
+            // (`Container::new(content).with_padding_bottom(8.0)` in agent_input_footer/mod.rs).
+            column.add_child(
+                Container::new(mode_row.finish())
+                    .with_padding_bottom(8.0)
+                    .finish(),
+            );
         }
 
         if show_message_bar && !show_session_mode_control {
@@ -113,6 +121,7 @@ impl Input {
                 Clipped::new(ChildView::new(&self.terminal_input_message_bar).finish()).finish(),
             );
         } else if !show_message_bar
+            && !show_session_mode_control
             && !(matches!(input_mode, InputMode::PinnedToTop)
                 && self
                     .suggestions_mode_model

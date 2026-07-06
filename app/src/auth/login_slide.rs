@@ -532,7 +532,7 @@ impl LoginSlideView {
 
         let (title_text, subtitle_text) = match self.login_purpose() {
             LoginPurpose::WarpDrive => (
-                "Get started with Warp Drive",
+                "Get started with Bang Drive",
                 "Connect your account to save and share notebooks, workflows, and more across devices.",
             ),
             LoginPurpose::WarpAgent => (
@@ -541,7 +541,7 @@ impl LoginSlideView {
             ),
             LoginPurpose::ThirdParty => (
                 "Create an account",
-                "Create a Warp account to enable AI-powered planning, coding, and automations.",
+                "Create a Bang account to enable AI-powered planning, coding, and automations.",
             ),
         };
         let title = FormattedTextElement::from_str(title_text, appearance.ui_font_family(), 36.)
@@ -571,7 +571,7 @@ impl LoginSlideView {
         let tos_line = Flex::row()
             .with_child(
                 ui_builder
-                    .span("By continuing, you agree to Warp's ")
+                    .span("By continuing, you agree to Bang's ")
                     .with_style(disclaimer_styles)
                     .build()
                     .finish(),
@@ -956,14 +956,14 @@ impl LoginSlideView {
             &'static str,
         ) = match self.login_purpose() {
             LoginPurpose::WarpDrive => (
-                "Are you sure you want to disable Warp Drive?",
-                "Warp Drive lets you save workflows and knowledge across devices and share them with your team. By continuing, you won't have access to the following features:",
+                "Are you sure you want to disable Bang Drive?",
+                "Bang Drive lets you save workflows and knowledge across devices and share them with your team. By continuing, you won't have access to the following features:",
                 WARP_DRIVE_FEATURES,
-                "Enable Warp Drive",
+                "Enable Bang Drive",
             ),
             LoginPurpose::WarpAgent => (
                 "Continue without signing in?",
-                "Without an account, you won't have access to Warp's AI features. Sign in anytime to unlock agents and other AI features.",
+                "Without an account, you won't have access to Bang's AI features. Sign in anytime to unlock agents and other AI features.",
                 &[],
                 "Sign in",
             ),
@@ -974,7 +974,7 @@ impl LoginSlideView {
             // stay stored so AI is enabled once the user returns logged in.
             LoginPurpose::ThirdParty => (
                 "Continue without an account?",
-                "Without a Warp account, you won't have access to Warp's AI features. Create an account anytime to unlock agents and other AI features.",
+                "Without a Bang account, you won't have access to Bang's AI features. Create an account anytime to unlock agents and other AI features.",
                 &[],
                 "Create account",
             ),

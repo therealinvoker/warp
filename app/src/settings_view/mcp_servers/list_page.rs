@@ -537,7 +537,9 @@ impl MCPServersListPageView {
             .map(|gallery_item| {
                 let item_id = ServerCardItemId::GalleryMCP(gallery_item.uuid());
                 let allowed = TemplatableMCPServer::try_from(gallery_item.clone())
-                    .map(|template| policy.allows_install(&ServerCandidate::from_template(&template)))
+                    .map(|template| {
+                        policy.allows_install(&ServerCandidate::from_template(&template))
+                    })
                     .unwrap_or_else(|_| policy.allows_new_installs());
                 let gallery_card_status = if allowed {
                     ServerCardStatus::AvailableToSave

@@ -4,7 +4,6 @@ use ui_components::{button, Component as _, Options as _};
 use warp_core::send_telemetry_from_ctx;
 use warp_core::ui::appearance::Appearance;
 use warp_core::ui::theme::color::internal_colors;
-use warp_core::ui::Icon;
 use warpui_core::elements::shimmering_text::{
     ShimmerConfig, ShimmeringTextElement, ShimmeringTextStateHandle,
 };
@@ -21,6 +20,7 @@ use warpui_core::{
     ViewContext,
 };
 
+use super::brand::{bang_logo_mark, bang_pink, BangButtonTheme};
 use super::OnboardingSlide;
 use crate::model::OnboardingStateModel;
 use crate::OnboardingEvent;
@@ -142,16 +142,16 @@ impl IntroSlide {
     fn render_centered_content(&self, appearance: &Appearance) -> Box<dyn Element> {
         let theme = appearance.theme();
 
-        let logo_fill = internal_colors::fg_overlay_4(theme);
-        let logo = ConstrainedBox::new(Icon::WarpLogoLight.to_warpui_icon(logo_fill).finish())
-            .with_width(64.)
-            .with_height(64.)
-            .finish();
+        // Bang brand "app icon": a rounded-square tile with a diagonal pink -> blue
+        // gradient (naturally passing through the brand purple), centered on a white
+        // lightning mark.
+        let logo = bang_logo_mark(64.);
 
         let base_color: ColorU = internal_colors::fg_overlay_4(theme).into();
-        let shimmer_color: ColorU = theme.foreground().into();
+        // ACCENT intensity: shimmer the title toward the Bang pink brand highlight.
+        let shimmer_color = bang_pink();
         let title = ShimmeringTextElement::new(
-            "Welcome to Warp",
+            "Welcome to Bang",
             appearance.ui_font_family(),
             32.,
             base_color,
@@ -163,7 +163,7 @@ impl IntroSlide {
 
         let subtitle_color = internal_colors::text_sub(theme, theme.background().into_solid());
         let subtitle = FormattedTextElement::from_str(
-            "A modern terminal with state of the art agents built in.",
+            "An AI-native terminal with a real agent inside.",
             appearance.ui_font_family(),
             16.,
         )
@@ -177,7 +177,7 @@ impl IntroSlide {
             appearance,
             button::Params {
                 content: button::Content::Label("Get started".into()),
-                theme: &button::themes::Primary,
+                theme: &BangButtonTheme,
                 options: button::Options {
                     keystroke: Some(enter),
                     on_click: Some(Box::new(|ctx, _app, _pos| {

@@ -12383,6 +12383,27 @@ impl Workspace {
         ctx.notify();
     }
 
+    /// Returns the lowest positive integer `n` such that no existing tab in
+    /// this workspace currently has the effective display title
+    /// `"Terminal {n}"`. Used to serially name new plain terminal tabs
+    /// ("Terminal 1", "Terminal 2", ...) while reusing numbers freed by closed
+    /// or renamed tabs.
+    fn next_terminal_tab_number(&self, ctx: &AppContext) -> usize {
+        let used: HashSet<usize> = self
+            .tabs
+            .iter()
+            .filter_map(|tab| {
+                parse_terminal_tab_number(&tab.pane_group.as_ref(ctx).display_title(ctx))
+            })
+            .collect();
+
+        let mut candidate = 1;
+        while used.contains(&candidate) {
+            candidate += 1;
+        }
+        candidate
+    }
+
     fn add_new_session_tab_with_default_mode(
         &mut self,
         new_session_source: NewSessionSource,
@@ -12453,6 +12474,16 @@ impl Workspace {
             )
         });
 
+        // Serially name plain new terminal tabs ("Terminal 1", "Terminal 2", ...)
+        // instead of using the shell/hostname title. Agent/Cloud Agent tabs keep
+        // their own naming, so skip when the tab will enter agent view. Docker
+        // sandbox tabs also keep their descriptive shell name.
+        let custom_tab_title = if should_enter_agent_view || is_docker_sandbox {
+            None
+        } else {
+            Some(format!("Terminal {}", self.next_terminal_tab_number(ctx)))
+        };
+
         self.add_tab_with_pane_layout(
             PanesLayout::SingleTerminal(Box::new(NewTerminalOptions {
                 shell: chosen_shell,
@@ -12462,7 +12493,7 @@ impl Workspace {
                 ..Default::default()
             })),
             Arc::new(HashMap::new()),
-            None, /*custom_tab_title*/
+            custom_tab_title,
             ctx,
         );
 
@@ -28935,6 +28966,18 @@ fn group_member_index_range(tabs: &[TabData], group_id: TabGroupId) -> Option<(u
     let first = members.next()?;
     let last = members.last().unwrap_or(first);
     Some((first, last))
+}
+
+/// Parses the serial number from a terminal tab title of the exact canonical
+/// form `"Terminal {n}"`, where `n` is a positive integer without a leading
+/// zero or sign. Returns `None` for any other title, so only the titles we
+/// generate in [`Workspace::next_terminal_tab_number`] are counted.
+fn parse_terminal_tab_number(title: &str) -> Option<usize> {
+    let digits = title.strip_prefix("Terminal ")?;
+    if digits.is_empty() || digits.starts_with('0') || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse::<usize>().ok().filter(|n| *n >= 1)
 }
 
 /// Returns `true` when `group_id` has exactly one member in `tabs`. Shared

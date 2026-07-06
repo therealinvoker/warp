@@ -2,6 +2,7 @@ mod agent_slide;
 mod ai_access_slide;
 mod ai_setup_slide;
 mod bottom_nav;
+mod brand;
 mod customize_slide;
 mod intention_slide;
 mod intro_slide;

@@ -135,6 +135,8 @@ fn enabled_features() -> HashSet<FeatureFlag> {
         FeatureFlag::AgentModePrePlanXML,
         #[cfg(feature = "agent_onboarding")]
         FeatureFlag::AgentOnboarding,
+        #[cfg(feature = "force_onboarding")]
+        FeatureFlag::ForceOnboarding,
         #[cfg(feature = "agent_shared_sessions")]
         FeatureFlag::AgentSharedSessions,
         #[cfg(feature = "suggested_rules")]

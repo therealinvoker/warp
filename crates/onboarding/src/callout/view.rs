@@ -59,7 +59,7 @@ fn get_universal_input_callout_options(
 ) -> Option<CalloutOptions> {
     match state {
         UniversalInputCalloutState::MeetInput => Some(CalloutOptions {
-            title: "Meet the Warp input",
+            title: "Meet the Bang input",
             text: format!(
                 "Your terminal input accepts both terminal commands and agent prompts and automatically detects which you're using. Use {} to lock the input to Agent mode (natural language) or Terminal mode (commands).",
                 keybindings.toggle_input_mode
@@ -119,7 +119,7 @@ fn get_agent_modality_callout_options(
                 Some(CalloutOptions {
                     title: "Welcome to terminal mode",
                     text: format!(
-                        "Run commands here, just like a regular terminal. If you type a question or task using natural language, Warp can suggest opening it in agent mode. You can always override using {}.",
+                        "Run commands here, just like a regular terminal. If you type a question or task using natural language, Bang can suggest opening it in agent mode. You can always override using {}.",
                         keybindings.toggle_input_mode
                     ),
                     step: StepStatus::new(0, total_steps),
@@ -136,7 +136,7 @@ fn get_agent_modality_callout_options(
                 Some(CalloutOptions {
                     title: "You’re in terminal mode",
                     text: format!(
-                        "Run commands here, just like a regular terminal. If you type a question or task using natural language, Warp can suggest opening it in agent mode. You can always override using {}.",
+                        "Run commands here, just like a regular terminal. If you type a question or task using natural language, Bang can suggest opening it in agent mode. You can always override using {}.",
                         keybindings.toggle_input_mode
                     ),
                     step: StepStatus::new(0, total_steps),
@@ -336,6 +336,17 @@ impl OnboardingCalloutView {
 
     pub fn is_onboarding_active(&self, app: &AppContext) -> bool {
         self.model.as_ref(app).is_onboarding_active()
+    }
+
+    /// Whether the callout is currently on the terminal-mode coach-mark
+    /// ("Welcome to terminal mode"). During this step the command input should
+    /// keep keyboard focus so the user can type/run a command immediately; the
+    /// callout stays visible and its buttons remain clickable to advance it.
+    pub fn is_terminal_mode_step(&self, app: &AppContext) -> bool {
+        matches!(
+            self.model.as_ref(app).state(),
+            OnboardingCalloutState::AgentModality(AgentModalityCalloutState::TerminalMode)
+        )
     }
 
     pub fn prompt_string(&self, app: &AppContext) -> String {

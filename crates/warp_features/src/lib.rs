@@ -233,6 +233,11 @@ pub enum FeatureFlag {
     /// Enables Agent Mode onboarding.
     AgentOnboarding,
 
+    /// Dev/testing flag: forces the first-run onboarding experience to show on
+    /// every launch, regardless of login state or whether onboarding was
+    /// previously completed. Intended for iterating on the onboarding flow.
+    ForceOnboarding,
+
     /// Enables suggested rules.
     SuggestedRules,
 

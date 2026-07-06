@@ -115,7 +115,7 @@ impl AiAccessSlide {
             .finish();
 
         let subtitle = FormattedTextElement::from_str(
-            "Save with a recurring plan, or explore Warp's AI before committing.",
+            "Save with a recurring plan, or explore Bang's AI before committing.",
             appearance.ui_font_family(),
             16.,
         )
@@ -309,7 +309,7 @@ impl AiAccessSlide {
             .finish();
 
         let description = FormattedTextElement::from_str(
-            "Explore Warp's built-in AI features before committing to a plan, or bring your own \
+            "Explore Bang's built-in AI features before committing to a plan, or bring your own \
              inference.",
             appearance.ui_font_family(),
             14.,

@@ -83,7 +83,10 @@ fn issues_filter_parsing() {
     assert_eq!(issues_state_from_filter("all"), "all");
     assert_eq!(issues_state_from_filter("state=closed"), "closed");
     assert_eq!(issues_state_from_filter("state=all&labels=bug"), "all");
-    assert_eq!(issues_state_from_filter("labels=bug&state=closed"), "closed");
+    assert_eq!(
+        issues_state_from_filter("labels=bug&state=closed"),
+        "closed"
+    );
     // Invalid states and junk fall back to open.
     assert_eq!(issues_state_from_filter("state=bogus"), "open");
     assert_eq!(issues_state_from_filter("what even is this"), "open");

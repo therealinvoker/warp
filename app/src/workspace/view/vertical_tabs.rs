@@ -26,8 +26,7 @@ use warpui::elements::{
     DispatchEventResult, DragAxis, DragBarSide, Draggable, DropShadow, DropTarget, Element, Empty,
     EventHandler, Expanded, Fill as ElementFill, Flex, Hoverable, LiveElement, MainAxisAlignment,
     MainAxisSize, MouseStateHandle, OffsetPositioning, Padding, ParentAnchor, ParentElement,
-    ParentOffsetBounds,
-    PositionedElementAnchor, PositionedElementOffsetBounds, Radius, Resizable,
+    ParentOffsetBounds, PositionedElementAnchor, PositionedElementOffsetBounds, Radius, Resizable,
     ResizableStateHandle, SavePosition, ScrollTarget, ScrollToPositionMode, ScrollbarWidth,
     Shrinkable, Stack, Text,
 };
@@ -3953,14 +3952,17 @@ fn pane_leading_dot_pulse_opacity() -> f32 {
     let progress = (elapsed / period).fract();
     // cos goes 1 → -1 → 1 over the period; normalize to 1 → 0 → 1.
     let normalized = ((progress * std::f32::consts::TAU).cos() + 1.0) * 0.5;
-    PANE_LEADING_DOT_PULSE_MIN_OPACITY
-        + (1.0 - PANE_LEADING_DOT_PULSE_MIN_OPACITY) * normalized
+    PANE_LEADING_DOT_PULSE_MIN_OPACITY + (1.0 - PANE_LEADING_DOT_PULSE_MIN_OPACITY) * normalized
 }
 
 /// Maps a row's run status to the fill used for its leading dot. The dot color now
 /// encodes STATUS (not tab type): red for errors, accent for actively running, amber for
 /// recovering / user-blocked, and a muted/idle color for quiescent or finished runs.
-fn status_dot_fill(status: &ConversationStatus, theme: &WarpTheme, muted: WarpThemeFill) -> WarpThemeFill {
+fn status_dot_fill(
+    status: &ConversationStatus,
+    theme: &WarpTheme,
+    muted: WarpThemeFill,
+) -> WarpThemeFill {
     match status {
         ConversationStatus::Error => WarpThemeFill::Solid(theme.ansi_fg_red()),
         ConversationStatus::InProgress => theme.accent(),

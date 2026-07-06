@@ -44,7 +44,10 @@ impl ChannelState {
             config: ChannelConfig {
                 app_id,
                 logfile_name: "".into(),
-                server_config: WarpServerConfig::production(),
+                server_config: WarpServerConfig {
+                    server_root_url: "https://api.trybang.ai".into(),
+                    ..WarpServerConfig::production()
+                },
                 oz_config: OzConfig::production(),
                 telemetry_config: None,
                 autoupdate_config: None,

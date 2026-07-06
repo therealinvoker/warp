@@ -1,11 +1,14 @@
+use std::cell::Cell;
+use std::rc::Rc;
+
 use ai::LLMId;
 use warp_core::features::FeatureFlag;
 use warp_core::telemetry::testing::MockTelemetryContextProvider;
 use warpui_core::{App, ModelHandle};
 
 use crate::model::{
-    AiSetupChoice, NoAiConfirmationSource, OnboardingAuthState, OnboardingStateModel,
-    OnboardingStep, SelectedSettings,
+    AiSetupChoice, NoAiConfirmationSource, OnboardingAuthState, OnboardingStateEvent,
+    OnboardingStateModel, OnboardingStep, SelectedSettings,
 };
 use crate::OnboardingIntention;
 
@@ -26,11 +29,26 @@ fn step(app: &App, model: &ModelHandle<OnboardingStateModel>) -> OnboardingStep 
     model.read(app, |model, _| model.step())
 }
 
+/// Subscribes to the model and returns a counter of `Completed` events emitted.
+fn track_completions(app: &mut App, model: &ModelHandle<OnboardingStateModel>) -> Rc<Cell<usize>> {
+    let completions = Rc::new(Cell::new(0usize));
+    let completions_cb = completions.clone();
+    app.update(|ctx| {
+        ctx.subscribe_to_model(model, move |_model, event, _ctx| {
+            if matches!(event, OnboardingStateEvent::Completed) {
+                completions_cb.set(completions_cb.get() + 1);
+            }
+        });
+    });
+    completions
+}
+
 #[test]
-fn agent_path_routes_through_ai_setup() {
+fn agent_path_completes_from_agent_slide() {
     let _flag = FeatureFlag::OpenWarpNewSettingsModes.override_enabled(true);
     App::test((), |mut app| async move {
         let model = add_test_model(&mut app);
+        let completions = track_completions(&mut app, &model);
 
         // Default intention is agent-driven development.
         model.update(&mut app, |model, ctx| model.next(ctx));
@@ -38,23 +56,19 @@ fn agent_path_routes_through_ai_setup() {
         model.update(&mut app, |model, ctx| model.next(ctx));
         assert_eq!(step(&app, &model), OnboardingStep::AiSetup);
 
-        // The default AI setup choice is the Warp agent.
+        // The default AI setup choice is the Warp agent, which lands on the
+        // Agent slide.
         model.update(&mut app, |model, ctx| model.next(ctx));
         assert_eq!(step(&app, &model), OnboardingStep::Agent);
+
+        // The "Get AI access", "Customize", and "Choose a theme" slides are
+        // skipped: advancing from the Agent slide completes onboarding directly.
+        assert_eq!(completions.get(), 0);
         model.update(&mut app, |model, ctx| model.next(ctx));
-        assert_eq!(step(&app, &model), OnboardingStep::AiAccess);
-        model.update(&mut app, |model, ctx| model.next(ctx));
-        assert_eq!(step(&app, &model), OnboardingStep::Customize);
-        model.update(&mut app, |model, ctx| model.next(ctx));
-        assert_eq!(step(&app, &model), OnboardingStep::ThemePicker);
+        assert_eq!(completions.get(), 1);
+        assert_eq!(step(&app, &model), OnboardingStep::Agent);
 
         // Back navigation mirrors the forward path.
-        model.update(&mut app, |model, ctx| model.back(ctx));
-        assert_eq!(step(&app, &model), OnboardingStep::Customize);
-        model.update(&mut app, |model, ctx| model.back(ctx));
-        assert_eq!(step(&app, &model), OnboardingStep::AiAccess);
-        model.update(&mut app, |model, ctx| model.back(ctx));
-        assert_eq!(step(&app, &model), OnboardingStep::Agent);
         model.update(&mut app, |model, ctx| model.back(ctx));
         assert_eq!(step(&app, &model), OnboardingStep::AiSetup);
         model.update(&mut app, |model, ctx| model.back(ctx));
@@ -63,10 +77,11 @@ fn agent_path_routes_through_ai_setup() {
 }
 
 #[test]
-fn third_party_choice_routes_to_third_party_slide() {
+fn third_party_choice_completes_from_third_party_slide() {
     let _flag = FeatureFlag::OpenWarpNewSettingsModes.override_enabled(true);
     App::test((), |mut app| async move {
         let model = add_test_model(&mut app);
+        let completions = track_completions(&mut app, &model);
 
         model.update(&mut app, |model, ctx| {
             model.next(ctx); // Intro → Intention
@@ -76,12 +91,14 @@ fn third_party_choice_routes_to_third_party_slide() {
         });
         assert_eq!(step(&app, &model), OnboardingStep::ThirdParty);
 
+        // The "Customize" and "Choose a theme" slides are skipped: advancing
+        // from the ThirdParty slide completes onboarding directly.
+        assert_eq!(completions.get(), 0);
         model.update(&mut app, |model, ctx| model.next(ctx));
-        assert_eq!(step(&app, &model), OnboardingStep::Customize);
-
-        // Back from Customize returns to the chosen AI-setup slide.
-        model.update(&mut app, |model, ctx| model.back(ctx));
+        assert_eq!(completions.get(), 1);
         assert_eq!(step(&app, &model), OnboardingStep::ThirdParty);
+
+        // Back from ThirdParty returns to the AI-setup slide.
         model.update(&mut app, |model, ctx| model.back(ctx));
         assert_eq!(step(&app, &model), OnboardingStep::AiSetup);
     });
@@ -265,14 +282,13 @@ fn progress_reports_v3_positions_for_agent_path() {
     App::test((), |mut app| async move {
         let model = add_test_model(&mut app);
 
-        // Warp Agent path: Intention → AiSetup → Agent → AiAccess → Customize → ThemePicker.
+        // Warp Agent path is now three steps: Intention → AiSetup → Agent.
+        // The "Get AI access", "Customize", and "Choose a theme" slides are
+        // skipped.
         let cases = [
-            (OnboardingStep::Intention, (0, 6)),
-            (OnboardingStep::AiSetup, (1, 6)),
-            (OnboardingStep::Agent, (2, 6)),
-            (OnboardingStep::AiAccess, (3, 6)),
-            (OnboardingStep::Customize, (4, 6)),
-            (OnboardingStep::ThemePicker, (5, 6)),
+            (OnboardingStep::Intention, (0, 3)),
+            (OnboardingStep::AiSetup, (1, 3)),
+            (OnboardingStep::Agent, (2, 3)),
         ];
         for (target, expected) in cases {
             model.update(&mut app, |model, ctx| model.set_step(target, ctx));
@@ -291,14 +307,13 @@ fn progress_reports_v3_positions_for_third_party_path() {
             model.set_ai_setup_choice(AiSetupChoice::ThirdParty, ctx)
         });
 
-        // Third-party path has no "Choose how to access AI" step, so it is one
-        // dot shorter than the Warp Agent path.
+        // Third-party path is now three steps: Intention → AiSetup → ThirdParty.
+        // The "Customize" and "Choose a theme" slides are skipped, matching the
+        // Warp Agent path length.
         let cases = [
-            (OnboardingStep::Intention, (0, 5)),
-            (OnboardingStep::AiSetup, (1, 5)),
-            (OnboardingStep::ThirdParty, (2, 5)),
-            (OnboardingStep::Customize, (3, 5)),
-            (OnboardingStep::ThemePicker, (4, 5)),
+            (OnboardingStep::Intention, (0, 3)),
+            (OnboardingStep::AiSetup, (1, 3)),
+            (OnboardingStep::ThirdParty, (2, 3)),
         ];
         for (target, expected) in cases {
             model.update(&mut app, |model, ctx| model.set_step(target, ctx));

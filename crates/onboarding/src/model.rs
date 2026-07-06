@@ -166,6 +166,7 @@ impl std::fmt::Display for AiAccessChoice {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum NoAiConfirmationSource {
     /// Triggered from the intention slide via "Just use the terminal" + Next.
+    #[cfg_attr(not(test), allow(dead_code))]
     Intention,
 }
 
@@ -222,7 +223,9 @@ impl OnboardingStateModel {
             workspace_enforces_autonomy,
             agent_modality_enabled,
             ai_setup_choice: AiSetupChoice::default(),
-            ai_access_choice: AiAccessChoice::default(),
+            // The "Get AI access" slide is skipped in this flow; record the
+            // "set up later" path (telemetry-only within the crate).
+            ai_access_choice: AiAccessChoice::SetUpLater,
             auth_state,
             no_ai_confirmation: None,
         }
@@ -365,6 +368,7 @@ impl OnboardingStateModel {
 
     /// Shows the "Are you sure you don't want AI?" confirmation modal, recording
     /// which opt-out entry point triggered it so cancel can route appropriately.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn request_no_ai_confirmation(
         &mut self,
         source: NoAiConfirmationSource,
@@ -624,10 +628,12 @@ impl OnboardingStateModel {
         ctx.notify();
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn set_intention_terminal(&mut self, ctx: &mut ModelContext<Self>) {
         self.set_intention(OnboardingIntention::Terminal, ctx);
     }
 
+    #[allow(dead_code)]
     pub(crate) fn set_intention_agent_driven_development(&mut self, ctx: &mut ModelContext<Self>) {
         self.set_intention(OnboardingIntention::AgentDrivenDevelopment, ctx);
     }
@@ -832,7 +838,13 @@ impl OnboardingStateModel {
         let theme_picker_last = FeatureFlag::OpenWarpNewSettingsModes.is_enabled();
 
         let is_last_step = if theme_picker_last {
-            matches!(self.step, OnboardingStep::ThemePicker)
+            // The agent paths now complete directly from their final visible
+            // slide (Agent / ThirdParty); the terminal path still ends on the
+            // ThemePicker slide.
+            matches!(
+                self.step,
+                OnboardingStep::Agent | OnboardingStep::ThirdParty | OnboardingStep::ThemePicker
+            )
         } else {
             matches!(self.step, OnboardingStep::Project)
         };
@@ -870,23 +882,13 @@ impl OnboardingStateModel {
                         }
                     }
                 },
-                OnboardingStep::Agent => {
-                    if ai_setup_flow {
-                        self.set_step(OnboardingStep::AiAccess, ctx)
-                    } else {
-                        self.set_step(OnboardingStep::ThirdParty, ctx)
-                    }
-                }
+                // The "Get AI access", "Customize", and "Choose a theme" slides
+                // are skipped for now: both agent paths complete directly from
+                // their final visible slide, defaulting to the Dark theme (applied
+                // by AgentOnboardingView) and "set up later" for AI access.
+                OnboardingStep::Agent => self.complete(ctx),
                 OnboardingStep::AiAccess => self.set_step(OnboardingStep::Customize, ctx),
-                OnboardingStep::ThirdParty => {
-                    if ai_setup_flow
-                        && matches!(self.intention, OnboardingIntention::AgentDrivenDevelopment)
-                    {
-                        self.set_step(OnboardingStep::Customize, ctx)
-                    } else {
-                        self.set_step(OnboardingStep::ThemePicker, ctx)
-                    }
-                }
+                OnboardingStep::ThirdParty => self.complete(ctx),
                 OnboardingStep::Project => self.set_step(OnboardingStep::ThemePicker, ctx),
                 OnboardingStep::ThemePicker => {}
             }
@@ -1012,34 +1014,25 @@ impl OnboardingStateModel {
             };
         }
 
-        // The Warp Agent path has the extra "Choose how to access AI" step, so it
-        // is one longer than the third-party-agent path.
-        let is_warp_agent_path =
-            !is_terminal && matches!(self.ai_setup_choice, AiSetupChoice::WarpAgent);
-        let step_count = if is_terminal {
-            3
-        } else if is_warp_agent_path {
-            6
-        } else {
-            5
-        };
+        // Both the agent (Intro/Intention → AiSetup → Agent|ThirdParty) and the
+        // terminal (Intention → Customize → ThemePicker) paths are three steps.
+        // The "Get AI access", "Customize", and "Choose a theme" slides are
+        // skipped on the agent path.
+        let step_count = 3;
         let step_index = match self.step {
             OnboardingStep::Intro | OnboardingStep::Intention => 0,
             OnboardingStep::AiSetup => 1,
-            OnboardingStep::Agent => 2,
-            OnboardingStep::AiAccess => 3,
+            OnboardingStep::Agent | OnboardingStep::ThirdParty => 2,
             OnboardingStep::Customize => {
                 if is_terminal {
                     1
-                } else if is_warp_agent_path {
-                    4
                 } else {
-                    3
+                    2
                 }
             }
-            OnboardingStep::ThirdParty => 2,
-            // Unreachable in the new flow; keep the legacy position.
-            OnboardingStep::Project => 3,
+            // Skipped on the agent path / unreachable; keep terminal ThemePicker
+            // as the final dot and use a safe fallback for the others.
+            OnboardingStep::AiAccess | OnboardingStep::Project => 2,
             OnboardingStep::ThemePicker => step_count - 1,
         };
         (step_index, step_count)
