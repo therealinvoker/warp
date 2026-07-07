@@ -35,7 +35,6 @@ use super::settings_page::{
 use super::SettingsSection;
 use crate::ai::ambient_agents::github_auth_url::settings_github_auth_url_with_next;
 use crate::appearance::Appearance;
-use crate::channel::ChannelState;
 use crate::github::{GithubConnection, GithubConnectionEvent};
 
 const PAGE_TITLE_TEXT: &str = "GitHub";
@@ -85,23 +84,31 @@ impl GithubSettingsPageView {
         }
     }
 
-    /// Open the connect flow. First connect prefers the backend's
-    /// install-start hop, which redirects to the GitHub App install page with
-    /// OAuth-during-installation — one GitHub visit both authorizes and picks
-    /// repos. A bare github.com install link (served when the user has no
-    /// admin workspace, or the App isn't configured) carries no signed state,
-    /// so the combined callback couldn't bind the user; those fall back to the
-    /// plain OAuth auth URL. Every base is wrapped with a `next=` deep link
-    /// back to this page — the backend folds it into the signed state.
+    /// Open the connect flow, preferring the backend's install-start hop: it
+    /// redirects to the GitHub App install page with OAuth-during-installation,
+    /// so one GitHub visit both authorizes and picks repos. The hop covers
+    /// reconnects too — repo-selection updates also return to the combined
+    /// callback with a fresh code. A bare github.com install link (served when
+    /// the user has no admin workspace, or the App isn't configured) carries no
+    /// signed state, so the combined callback couldn't bind the user; those
+    /// fall back to the plain OAuth auth URL. The base is wrapped with a
+    /// `next=` deep link back to this page — the backend folds it into the
+    /// signed state.
     fn connect(&mut self, ctx: &mut ViewContext<Self>) {
         let state = GithubConnection::as_ref(ctx).state().clone();
         let install_hop = state
             .app_install_link
             .clone()
-            .filter(|link| !state.connected && link.contains("/github/install/start"));
-        let base = install_hop
-            .or(state.auth_url.clone())
-            .unwrap_or_else(|| format!("{}/oauth/connect/github", ChannelState::server_root_url()));
+            .filter(|link| link.contains("/github/install/start"));
+        let Some(base) = install_hop.or(state.auth_url.clone()) else {
+            // Nothing state-bound to open — the connection info is missing or
+            // stale. The historical `{server}/oauth/connect/github` fallback
+            // needs a browser session this backend doesn't have (it 404s), so
+            // re-fetch instead; the page shows any load error and the next
+            // click gets a fresh URL.
+            self.refresh(ctx);
+            return;
+        };
         let url = settings_github_auth_url_with_next(&base);
         ctx.open_url(&url);
     }
