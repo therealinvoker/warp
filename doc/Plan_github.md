@@ -47,18 +47,43 @@ NOT a path — Railway has no persistent file). Backend degrades gracefully with
 any of these unset ("GitHub integration not configured" is a per-server-instance
 message, not per-tenant). Full setup: `harness-backend/docs/github-app-setup.md`.
 
-## Next: Task 17 — single-step connect (Option B)
+## Task 17 — single-step connect (Option B): BUILT, awaiting deploy
 
 **Problem**: connecting is two GitHub visits today (authorize, then separately install/pick repos). Collapse into one.
 
-**Approach**: use GitHub's native OAuth-during-installation so one flow authorizes AND installs. Three coordinated parts, must ship together:
-1. **App config**: enable "Request user authorization (OAuth) during installation" on the `trybang` App.
-2. **Client** (`app/src/settings_view/github_page.rs`): `connect()` opens the install URL (`app_install_link`) instead of `/github/oauth/start`; keep the `next=` deep-link (`github_auth_url.rs`).
-3. **Backend** (`src/routes/githubOauth.js` / `githubWebhooks.js`): `/github/setup` handles the combined callback — GitHub redirects with both `installation_id` and OAuth `code`; claim the installation and exchange the code (store token) in one handler.
+**Approach** (as built — one correction vs the original plan): with GitHub's
+"Request user authorization (OAuth) during installation" enabled, GitHub
+redirects post-install to the App's **Callback URL** (`/github/oauth/callback`)
+with `code` + `installation_id` + `state`, NOT to the Setup URL. So the
+combined handler lives in the OAuth callback; `/github/setup` stays for the
+legacy two-step flow during rollout.
 
-**Result**: one "Connect GitHub" click -> one GitHub page (authorize + pick repos) -> back in the app, connected and installed.
+Built (client commit `ddcd4d3f`, backend commit `b24cd1d`, local only):
+1. **Backend**: new `/github/install/start` hop — GitHub only round-trips
+   `state` on install URLs, so the hop folds the client's `next=` deep link
+   into a fresh signed `gh_install` state, then redirects to the install page.
+   `buildInstallUrl` points at the hop. `/github/oauth/callback` accepts
+   `gh_tx` or `gh_install` state and, when `installation_id` is present,
+   stores the token AND claims the installation (claim logic shared with
+   `/github/setup`). Also fixed: `/github/oauth/start` was dropping the
+   client's `next=` (tx minted with `next:null`), so the deep link back into
+   the app never fired; it now re-signs the tx with `next` embedded.
+   Tests: 122/122 (`test/github-install-flow.test.mjs` added).
+2. **Client** (`github_page.rs`): first connect opens `app_install_link`
+   (now the hop) wrapped with `next=`; falls back to plain OAuth when the
+   link is a bare github.com URL (no signed state — non-admin users) or on
+   reconnect.
 
-**Sequencing/risk**: flip the App checkbox as the code deploys, not before (it changes the live flow and would break the current two-step connect mid-testing). Backend change = one prod push when ready. Verify end-to-end against a test repo.
+**To ship (manual)**:
+1. Push harness-backend `main` (auto-deploys prod).
+2. Immediately flip "Request user authorization (OAuth) during installation"
+   on the `trybang` App; confirm the Callback URL is
+   `https://api.trybang.ai/github/oauth/callback`. Order matters: backend
+   first (it handles both old and new flows), checkbox second.
+3. Ship/run the client build; verify end-to-end against a test repo
+   (connect from Settings > GitHub -> one GitHub page -> back in app,
+   connected + installed; check org-lock conflict page and non-admin
+   fallback still work).
 
 ## Remaining after Task 17
 
