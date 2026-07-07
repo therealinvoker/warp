@@ -6,6 +6,7 @@ pub(crate) mod download;
 pub mod harness_support;
 pub mod integrations;
 pub mod managed_mcp;
+pub mod marketplace;
 pub mod managed_secrets;
 pub mod object;
 pub(crate) mod presigned_upload;
@@ -27,6 +28,7 @@ use channel_versions::ChannelVersions;
 use chrono::{DateTime, FixedOffset};
 use instant::Instant;
 use managed_mcp::ManagedMcpClient;
+use marketplace::MarketplaceClient;
 use object::ObjectClient;
 use parking_lot::Mutex;
 use referral::ReferralsClient;
@@ -1322,6 +1324,10 @@ impl ServerApiProvider {
     }
 
     #[cfg_attr(target_family = "wasm", expect(dead_code))]
+    pub fn get_marketplace_client(&self) -> Arc<dyn MarketplaceClient> {
+        self.server_api.clone()
+    }
+
     pub fn get_managed_mcp_client(&self) -> Arc<dyn ManagedMcpClient> {
         self.server_api.clone()
     }

@@ -2568,6 +2568,47 @@ type RemoveMCPAllowlistEntryOutput implements Response {
 
 union RemoveMCPAllowlistEntryResult = RemoveMCPAllowlistEntryOutput | UserFacingError
 
+enum MarketplaceEntryKind {
+  MCP
+  PLUGIN
+}
+
+enum MarketplaceSourceKind {
+  MCP_REGISTRY
+  OPEN_VSX
+  ORG
+}
+
+"""
+One normalized marketplace directory entry. MCP entries carry a ready-to-use
+mcpTemplateJson; plugin entries carry an extensionId and/or bundleUrl.
+"""
+type MarketplaceSearchEntry {
+  bundleUrl: String
+  description: String!
+  entryId: ID!
+  extensionId: String
+  iconUrl: String
+  kind: MarketplaceEntryKind!
+  mcpTemplateJson: String
+  publisher: String
+  sourceLabel: String!
+  title: String!
+  version: String
+}
+
+input SearchMarketplaceInput {
+  query: String
+  source: MarketplaceSourceKind!
+}
+
+type SearchMarketplaceOutput implements Response {
+  entries: [MarketplaceSearchEntry!]!
+  responseContext: ResponseContext!
+}
+
+union SearchMarketplaceResult = SearchMarketplaceOutput | UserFacingError
+
 type MemberSpendLimit {
   maxMonthlySpendCents: Int!
   principalType: PrincipalType!
@@ -3298,6 +3339,7 @@ type RootQuery {
   rerankFragments(input: RerankFragmentsInput!, requestContext: RequestContext!): RerankFragmentsResult!
 
   """Retrieve execution history for a scheduled agent."""
+  searchMarketplace(input: SearchMarketplaceInput!, requestContext: RequestContext!): SearchMarketplaceResult!
   scheduledAgentHistory(input: ScheduledAgentHistoryInput!, requestContext: RequestContext!): ScheduledAgentHistoryResult!
   simpleIntegrations(input: SimpleIntegrationsInput!, requestContext: RequestContext!): SimpleIntegrationsResult!
   suggestCloudEnvironmentImage(input: SuggestCloudEnvironmentImageInput!, requestContext: RequestContext!): SuggestCloudEnvironmentImageResult!
