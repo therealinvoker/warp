@@ -193,14 +193,19 @@ impl GithubConnection {
                                 is_public: r.is_public,
                             })
                             .collect();
-                        me.state.app_install_link = Some(info.app_install_link);
+                        // The schema field is non-null; the backend sends ""
+                        // when there is no usable install link (e.g. no App
+                        // slug configured).
+                        me.state.app_install_link =
+                            Some(info.app_install_link).filter(|link| !link.is_empty());
                         me.state.auth_url = None;
                     }
                     Ok(UserGithubInfoResult::GithubAuthRequiredOutput(auth)) => {
                         me.state.connected = false;
                         me.state.username = None;
                         me.state.installed_repos.clear();
-                        me.state.app_install_link = Some(auth.app_install_link);
+                        me.state.app_install_link =
+                            Some(auth.app_install_link).filter(|link| !link.is_empty());
                         me.state.auth_url = Some(auth.auth_url);
                     }
                     Ok(UserGithubInfoResult::Unknown) => {
