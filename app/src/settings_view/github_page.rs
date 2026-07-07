@@ -1,9 +1,12 @@
 //! GitHub integration settings page.
 //!
 //! Shows the user's GitHub connection status (username + installed repos) and
-//! exposes connect / manage-installation / disconnect actions. The connect
-//! flow reuses the existing server-mediated OAuth round-trip (auth URL + the
-//! `next=` deep link, here targeting [`GithubAuthRedirectTarget::SettingsGithub`]).
+//! exposes connect / manage-installation / disconnect actions. First connect
+//! goes through the backend's install-start hop (GitHub App install with
+//! OAuth-during-installation: authorize + pick repos in one visit); reconnect
+//! and stateless fallbacks use the server-mediated OAuth round-trip. Both
+//! carry the `next=` deep link, here targeting
+//! [`GithubAuthRedirectTarget::SettingsGithub`].
 //!
 //! Connection state lives on the [`GithubConnection`] singleton; this page
 //! observes it and re-renders on [`GithubConnectionEvent::StateChanged`]. The
@@ -82,12 +85,22 @@ impl GithubSettingsPageView {
         }
     }
 
-    /// Open the connect flow: prefer the backend-provided auth URL (wrapped
-    /// with a `next=` deep link back to this page), falling back to the
-    /// generic connect endpoint.
+    /// Open the connect flow. First connect prefers the backend's
+    /// install-start hop, which redirects to the GitHub App install page with
+    /// OAuth-during-installation — one GitHub visit both authorizes and picks
+    /// repos. A bare github.com install link (served when the user has no
+    /// admin workspace, or the App isn't configured) carries no signed state,
+    /// so the combined callback couldn't bind the user; those fall back to the
+    /// plain OAuth auth URL. Every base is wrapped with a `next=` deep link
+    /// back to this page — the backend folds it into the signed state.
     fn connect(&mut self, ctx: &mut ViewContext<Self>) {
-        let auth_url = GithubConnection::as_ref(ctx).state().auth_url.clone();
-        let base = auth_url
+        let state = GithubConnection::as_ref(ctx).state().clone();
+        let install_hop = state
+            .app_install_link
+            .clone()
+            .filter(|link| !state.connected && link.contains("/github/install/start"));
+        let base = install_hop
+            .or(state.auth_url.clone())
             .unwrap_or_else(|| format!("{}/oauth/connect/github", ChannelState::server_root_url()));
         let url = settings_github_auth_url_with_next(&base);
         ctx.open_url(&url);
