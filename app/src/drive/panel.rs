@@ -19,6 +19,8 @@ use super::items::WarpDriveItemId;
 use super::{CloudObjectTypeAndId, DriveObjectType};
 use crate::ai::document::ai_document_model::AIDocumentId;
 use crate::ai::facts::CloudAIFactModel;
+use crate::ai::mcp::templatable::CloudTemplatableMCPServerModel;
+use crate::ai::mcp::TemplatableMCPServer;
 use crate::cloud_object::model::persistence::CloudModel;
 use crate::cloud_object::model::view::CloudViewModel;
 use crate::cloud_object::{
@@ -26,6 +28,7 @@ use crate::cloud_object::{
 };
 use crate::env_vars::manager::EnvVarCollectionSource;
 use crate::env_vars::CloudEnvVarCollection;
+use crate::marketplace_plugins::{CloudMarketplacePlugin, CloudMarketplacePluginModel, MarketplacePlugin};
 use crate::notebooks::manager::NotebookSource;
 use crate::notebooks::CloudNotebook;
 use crate::server::cloud_objects::update_manager::{InitiatedBy, UpdateManager};
@@ -86,6 +89,7 @@ pub enum DrivePanelEvent {
     OpenNotebook(NotebookSource),
     OpenEnvVarCollection(EnvVarCollectionSource),
     OpenWorkflowInPane(WorkflowOpenSource, WorkflowViewMode),
+    OpenMarketplacePlugin(CloudObjectTypeAndId),
     FocusWarpDrive,
     AttachPlanAsContext(AIDocumentId),
 }
@@ -259,12 +263,23 @@ impl DrivePanel {
                     env_var_collection.map(|env_var_collection| env_var_collection.id)
                 });
 
+                let is_marketplace_plugin = object
+                    .map(|object| {
+                        let plugin: Option<&CloudMarketplacePlugin> = object.into();
+                        plugin.is_some()
+                    })
+                    .unwrap_or(false);
+
                 if let Some(notebook_id) = notebook_id {
                     self.open_existing_notebook(notebook_id, ctx);
                 } else if let Some(workflow) = workflow {
                     self.open_workflow_modal_with_existing(workflow.id, ctx);
                 } else if let Some(env_var_collection_id) = env_var_collection_id {
                     self.open_existing_env_var_collection(env_var_collection_id, ctx);
+                } else if is_marketplace_plugin {
+                    ctx.emit(DrivePanelEvent::OpenMarketplacePlugin(
+                        *cloud_object_type_and_id,
+                    ));
                 }
             }
             DriveIndexEvent::DuplicateObject(cloud_object_type_and_id) => {
@@ -344,6 +359,70 @@ impl DrivePanel {
                 }
                 None => {
                     log::error!("Cannot identify an AI rule owner from {space:?}");
+                }
+            },
+            DriveIndexEvent::CreateMCPServer {
+                space,
+                title,
+                initial_folder_id,
+            } => match Self::new_object_owner(*space, initial_folder_id.as_ref(), ctx) {
+                Some(owner) => {
+                    // Seed a minimal single-server template named after the
+                    // dialog input; the user fills in the config afterwards.
+                    let mut server_map = serde_json::Map::new();
+                    server_map.insert(title.clone(), serde_json::json!({ "command": "" }));
+                    let template_json = serde_json::Value::Object(server_map).to_string();
+                    match TemplatableMCPServer::from_user_json(&template_json) {
+                        Ok(mut servers) if !servers.is_empty() => {
+                            let server = servers.remove(0);
+                            let client_id = ClientId::default();
+                            UpdateManager::handle(ctx).update(ctx, |update_manager, ctx| {
+                                update_manager.create_object(
+                                    CloudTemplatableMCPServerModel::new(server),
+                                    owner,
+                                    client_id,
+                                    CloudObjectEventEntrypoint::ManagementUI,
+                                    true,
+                                    *initial_folder_id,
+                                    InitiatedBy::User,
+                                    ctx,
+                                );
+                            });
+                        }
+                        _ => {
+                            log::error!(
+                                "Could not construct an MCP server template for drive creation"
+                            );
+                        }
+                    }
+                }
+                None => {
+                    log::error!("Cannot identify an MCP server owner from {space:?}");
+                }
+            },
+            DriveIndexEvent::CreateMarketplacePlugin {
+                space,
+                title,
+                initial_folder_id,
+            } => match Self::new_object_owner(*space, initial_folder_id.as_ref(), ctx) {
+                Some(owner) => {
+                    let plugin = MarketplacePlugin::from_user_input(title);
+                    let client_id = ClientId::default();
+                    UpdateManager::handle(ctx).update(ctx, |update_manager, ctx| {
+                        update_manager.create_object(
+                            CloudMarketplacePluginModel::new(plugin),
+                            owner,
+                            client_id,
+                            CloudObjectEventEntrypoint::ManagementUI,
+                            true,
+                            *initial_folder_id,
+                            InitiatedBy::User,
+                            ctx,
+                        );
+                    });
+                }
+                None => {
+                    log::error!("Cannot identify a marketplace plugin owner from {space:?}");
                 }
             },
             DriveIndexEvent::AttachPlanAsContext(id) => {

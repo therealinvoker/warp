@@ -32,6 +32,8 @@ const BUTTON_MARGIN_BETWEEN: f32 = 8.;
 const NOTEBOOK_TITLE: &str = "Notebook name";
 const FOLDER_TITLE: &str = "Folder name";
 const ENV_VAR_COLLECTION_TITLE: &str = "Collection name";
+const MCP_SERVER_TITLE: &str = "MCP server name";
+const MARKETPLACE_PLUGIN_TITLE: &str = "Plugin id or URL";
 const CREATE_BUTTON_TEXT: &str = "Create";
 const CANCEL_BUTTON_TEXT: &str = "Cancel";
 const RENAME_BUTTON_TEXT: &str = "Rename";
@@ -142,12 +144,13 @@ impl CloudObjectNamingDialog {
             DriveObjectType::Notebook { .. } => NOTEBOOK_TITLE,
             DriveObjectType::Folder => FOLDER_TITLE,
             DriveObjectType::EnvVarCollection => ENV_VAR_COLLECTION_TITLE,
+            DriveObjectType::MCPServer => MCP_SERVER_TITLE,
+            DriveObjectType::MarketplacePlugin => MARKETPLACE_PLUGIN_TITLE,
             // workflows and ai facts aren't a part of this dialog
             DriveObjectType::Workflow
             | DriveObjectType::AgentModeWorkflow
             | DriveObjectType::AIFact
             | DriveObjectType::AIFactCollection
-            | DriveObjectType::MCPServer
             | DriveObjectType::MCPServerCollection => "",
         };
 

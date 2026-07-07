@@ -9,11 +9,12 @@ use warp_graphql::object::CloudObjectWithDescendants;
 
 use crate::{
     AIExecutionProfile, AIFact, AmbientAgentEnvironment, CloudFolderModel, CloudNotebookModel,
-    CloudWorkflowModel, EnvVarCollection, JsonSerializer, MCPServer, Preference,
+    CloudWorkflowModel, EnvVarCollection, JsonSerializer, MCPServer, MarketplacePlugin, Preference,
     ScheduledAmbientAgent, ServerAIExecutionProfile, ServerAIFact, ServerAmbientAgentEnvironment,
-    ServerCloudAgentConfig, ServerEnvVarCollection, ServerFolder, ServerMCPServer, ServerNotebook,
-    ServerPreference, ServerScheduledAmbientAgent, ServerTemplatableMCPServer, ServerWorkflow,
-    ServerWorkflowEnum, TemplatableMCPServer, WorkflowEnum,
+    ServerCloudAgentConfig, ServerEnvVarCollection, ServerFolder, ServerMCPServer,
+    ServerMarketplacePlugin, ServerNotebook, ServerPreference, ServerScheduledAmbientAgent,
+    ServerTemplatableMCPServer, ServerWorkflow, ServerWorkflowEnum, TemplatableMCPServer,
+    WorkflowEnum,
 };
 
 /// A cloud object from the server.
@@ -32,6 +33,7 @@ pub enum ServerCloudObject {
     AmbientAgentEnvironment(ServerAmbientAgentEnvironment),
     ScheduledAmbientAgent(ServerScheduledAmbientAgent),
     CloudAgentConfig(ServerCloudAgentConfig),
+    MarketplacePlugin(ServerMarketplacePlugin),
 }
 
 impl ServerCloudObject {
@@ -58,6 +60,9 @@ impl ServerCloudObject {
                 &scheduled_ambient_agent.metadata
             }
             ServerCloudObject::CloudAgentConfig(cloud_agent_config) => &cloud_agent_config.metadata,
+            ServerCloudObject::MarketplacePlugin(marketplace_plugin) => {
+                &marketplace_plugin.metadata
+            }
         }
     }
 
@@ -84,6 +89,9 @@ impl ServerCloudObject {
                 scheduled_ambient_agent.id.uid()
             }
             ServerCloudObject::CloudAgentConfig(cloud_agent_config) => cloud_agent_config.id.uid(),
+            ServerCloudObject::MarketplacePlugin(marketplace_plugin) => {
+                marketplace_plugin.id.uid()
+            }
         }
     }
 }
@@ -133,6 +141,10 @@ where
             value.downcast_ref::<ServerCloudAgentConfig>()
         {
             ServerCloudObject::CloudAgentConfig(server_cloud_agent_config.clone())
+        } else if let Some(server_marketplace_plugin) =
+            value.downcast_ref::<ServerMarketplacePlugin>()
+        {
+            ServerCloudObject::MarketplacePlugin(server_marketplace_plugin.clone())
         } else {
             panic!("Unknown server object type");
         }
@@ -316,6 +328,11 @@ fn server_gso_to_cloud_object(
         warp_graphql::generic_string_object::GenericStringObjectFormat::JsonScheduledAmbientAgent => {
             Ok(ServerCloudObject::ScheduledAmbientAgent(
                 GenericServerObject::<GenericStringObjectId, GenericStringModel<ScheduledAmbientAgent, JsonSerializer>>::try_from_gql(gso)?,
+            ))
+        }
+        warp_graphql::generic_string_object::GenericStringObjectFormat::JsonMarketplacePlugin => {
+            Ok(ServerCloudObject::MarketplacePlugin(
+                GenericServerObject::<GenericStringObjectId, GenericStringModel<MarketplacePlugin, JsonSerializer>>::try_from_gql(gso)?,
             ))
         }
         // Formats unknown to this client build (e.g. the server-only `JsonRunner`).

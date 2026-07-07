@@ -190,6 +190,7 @@ pub enum JsonObjectType {
     CloudEnvironment,
     ScheduledAmbientAgent,
     CloudAgentConfig,
+    MarketplacePlugin,
 }
 
 impl JsonObjectType {
@@ -205,6 +206,7 @@ impl JsonObjectType {
             JsonObjectType::CloudEnvironment => "CLOUDENVIRONMENT",
             JsonObjectType::ScheduledAmbientAgent => "SCHEDULEDAMBIENTAGENT",
             JsonObjectType::CloudAgentConfig => "CLOUDAGENTCONFIG",
+            JsonObjectType::MarketplacePlugin => "MARKETPLACEPLUGIN",
         }
     }
 }
@@ -224,6 +226,7 @@ impl TryFrom<&str> for JsonObjectType {
             "CLOUDENVIRONMENT" => Ok(JsonObjectType::CloudEnvironment),
             "SCHEDULEDAMBIENTAGENT" => Ok(JsonObjectType::ScheduledAmbientAgent),
             "CLOUDAGENTCONFIG" => Ok(JsonObjectType::CloudAgentConfig),
+            "MARKETPLACEPLUGIN" => Ok(JsonObjectType::MarketplacePlugin),
             _ => Err(anyhow!("could not convert unknown json object type")),
         }
     }
@@ -876,6 +879,9 @@ impl From<GenericStringObjectFormat>
             }
             GenericStringObjectFormat::Json(JsonObjectType::CloudAgentConfig) => {
                 unreachable!("JsonCloudAgentConfig is no longer present in GraphQL schema")
+            }
+            GenericStringObjectFormat::Json(JsonObjectType::MarketplacePlugin) => {
+                GraphQLFormat::JsonMarketplacePlugin
             }
         }
     }

@@ -8,6 +8,7 @@ pub mod folders;
 pub mod import;
 pub(crate) mod index;
 pub mod items;
+pub mod marketplace_plugin_modal;
 pub mod panel;
 pub mod settings;
 pub mod sharing;
@@ -60,6 +61,7 @@ pub enum DriveObjectType {
     EnvVarCollection,
     MCPServer,
     MCPServerCollection,
+    MarketplacePlugin,
 }
 
 impl From<DriveObjectType> for Icon {
@@ -80,6 +82,7 @@ impl From<DriveObjectType> for Icon {
             DriveObjectType::EnvVarCollection => Icon::EnvVarCollection,
             DriveObjectType::MCPServer => Icon::Dataflow,
             DriveObjectType::MCPServerCollection => Icon::Dataflow,
+            DriveObjectType::MarketplacePlugin => Icon::PackageCheck,
         }
     }
 }
@@ -96,6 +99,7 @@ impl fmt::Display for DriveObjectType {
             DriveObjectType::AIFactCollection => write!(f, "ai fact collection"),
             DriveObjectType::MCPServer => write!(f, "mcp server"),
             DriveObjectType::MCPServerCollection => write!(f, "mcp server collection"),
+            DriveObjectType::MarketplacePlugin => write!(f, "marketplace plugin"),
         }
     }
 }

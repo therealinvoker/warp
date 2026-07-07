@@ -262,6 +262,7 @@ use crate::context_chips::ChipRuntimeCapabilities;
 use crate::default_terminal::DefaultTerminal;
 use crate::drive::export::ExportManager;
 use crate::drive::import::modal::{ImportModal, ImportModalEvent};
+use crate::drive::marketplace_plugin_modal::{MarketplacePluginModal, MarketplacePluginModalEvent};
 use crate::drive::items::WarpDriveItemId;
 use crate::drive::settings::{WarpDriveSettings, WarpDriveSettingsChangedEvent};
 use crate::drive::workflows::arguments::ArgumentsState;
@@ -1041,6 +1042,7 @@ pub struct Workspace {
     mouse_states: WorkspaceMouseStates,
     settings_pane: ViewHandle<SettingsView>,
     import_modal: ViewHandle<ImportModal>,
+    marketplace_plugin_modal: ViewHandle<MarketplacePluginModal>,
     theme_chooser_view: ViewHandle<ThemeChooser>,
     previous_theme: Option<ThemeKind>,
     reward_modal: ViewHandle<Modal<RewardView>>,
@@ -1572,6 +1574,19 @@ impl Workspace {
         let modal = ctx.add_typed_action_view(ImportModal::new);
         ctx.subscribe_to_view(&modal, |me, _, event, ctx| {
             me.handle_import_modal_event(event, ctx);
+        });
+        modal
+    }
+
+    fn build_marketplace_plugin_modal(
+        ctx: &mut ViewContext<Self>,
+    ) -> ViewHandle<MarketplacePluginModal> {
+        let modal = ctx.add_typed_action_view(MarketplacePluginModal::new);
+        ctx.subscribe_to_view(&modal, |me, _, event, ctx| match event {
+            MarketplacePluginModalEvent::Close => {
+                me.focus_active_tab(ctx);
+                ctx.notify();
+            }
         });
         modal
     }
@@ -3214,6 +3229,7 @@ impl Workspace {
         let agent_toolbar_editor_modal = Self::build_agent_toolbar_editor_modal(ctx);
 
         let import_modal = Self::build_import_modal(ctx);
+        let marketplace_plugin_modal = Self::build_marketplace_plugin_modal(ctx);
 
         Self::observe_server_api(ctx);
 
@@ -3388,6 +3404,7 @@ impl Workspace {
             theme_creator_modal,
             theme_deletion_modal,
             import_modal,
+            marketplace_plugin_modal,
             window_id: ctx.window_id(),
             toast_stack,
             agent_toast_stack,
@@ -17556,6 +17573,13 @@ impl Workspace {
                     ctx
                 );
             }
+            DrivePanelEvent::OpenMarketplacePlugin(id) => {
+                let id = *id;
+                self.marketplace_plugin_modal.update(ctx, |modal, ctx| {
+                    modal.open(id, ctx);
+                });
+                ctx.notify();
+            }
             DrivePanelEvent::OpenMCPServerCollection => {
                 self.show_settings_with_section(Some(SettingsSection::MCPServers), ctx);
 
@@ -26858,6 +26882,10 @@ impl View for Workspace {
 
         if self.current_workspace_state.is_import_modal_open {
             stack.add_child(ChildView::new(&self.import_modal).finish());
+        }
+
+        if self.marketplace_plugin_modal.as_ref(app).is_open() {
+            stack.add_child(ChildView::new(&self.marketplace_plugin_modal).finish());
         }
 
         if self.current_workspace_state.is_theme_deletion_modal_open {

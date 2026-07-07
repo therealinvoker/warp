@@ -55,8 +55,8 @@ use crate::cloud_object::{
     ObjectDeleteResult, ObjectIdType, ObjectMetadataUpdateResult, ObjectPermissionsUpdateData,
     ObjectType, Owner, Revision, RevisionAndLastEditor, ServerAIExecutionProfile, ServerAIFact,
     ServerAmbientAgentEnvironment, ServerCloudAgentConfig, ServerCloudObject,
-    ServerEnvVarCollection, ServerMCPServer, ServerMetadata, ServerPermissions, ServerPreference,
-    ServerScheduledAmbientAgent, ServerTemplatableMCPServer, ServerWorkflowEnum, Space,
+    ServerEnvVarCollection, ServerMCPServer, ServerMarketplacePlugin, ServerMetadata,
+    ServerPermissions, ServerPreference, ServerScheduledAmbientAgent, ServerTemplatableMCPServer, ServerWorkflowEnum, Space,
     UpdateCloudObjectResult,
 };
 use crate::drive::drive_helpers::{
@@ -68,6 +68,7 @@ use crate::drive::folders::{CloudFolderModel, FolderId};
 use crate::drive::sharing::SharingAccessLevel;
 use crate::drive::CloudObjectTypeAndId;
 use crate::env_vars::{CloudEnvVarCollectionModel, EnvVarCollection};
+use crate::marketplace_plugins::{CloudMarketplacePluginModel, MarketplacePlugin};
 use crate::network::{NetworkStatus, NetworkStatusEvent, NetworkStatusKind};
 use crate::notebooks::{CloudNotebookModel, NotebookId};
 use crate::persistence::ModelEvent;
@@ -1013,6 +1014,21 @@ impl UpdateManager {
                         ctx,
                     ));
                 }
+                GenericStringObjectFormat::Json(JsonObjectType::MarketplacePlugin) => {
+                    let typed_objects = objects
+                        .iter()
+                        .filter_map(|obj| {
+                            let server_obj: Option<&ServerMarketplacePlugin> = obj.into();
+                            server_obj.cloned()
+                        })
+                        .collect::<Vec<_>>();
+                    sqlite_events.push(Self::handle_object_updates(
+                        typed_objects,
+                        force_refresh,
+                        !is_first_load,
+                        ctx,
+                    ));
+                }
             }
         }
 
@@ -1866,7 +1882,8 @@ impl UpdateManager {
             | ServerCloudObject::TemplatableMCPServer(_)
             | ServerCloudObject::AmbientAgentEnvironment(_)
             | ServerCloudObject::ScheduledAmbientAgent(_)
-            | ServerCloudObject::CloudAgentConfig(_) => {}
+            | ServerCloudObject::CloudAgentConfig(_)
+            | ServerCloudObject::MarketplacePlugin(_) => {}
         }
     }
 
@@ -1962,6 +1979,21 @@ impl UpdateManager {
         self.update_object(
             CloudEnvVarCollectionModel::new(env_var_collection),
             env_var_collection_id,
+            revision_ts,
+            ctx,
+        );
+    }
+
+    pub fn update_marketplace_plugin(
+        &mut self,
+        plugin: MarketplacePlugin,
+        plugin_id: SyncId,
+        revision_ts: Option<Revision>,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        self.update_object(
+            CloudMarketplacePluginModel::new(plugin),
+            plugin_id,
             revision_ts,
             ctx,
         );

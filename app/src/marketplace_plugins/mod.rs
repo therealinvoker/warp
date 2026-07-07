@@ -1,6 +1,10 @@
+//! App-side integration for marketplace plugin drive objects (e.g. Cursor
+//! extensions). The payload model lives in `cloud_object_models`; this module
+//! wires it into the app's cloud object machinery (sync queue, drive
+//! rendering).
+
 pub use cloud_object_models::{
-    CloudTemplatableMCPServer, CloudTemplatableMCPServerModel, GalleryData, JsonTemplate,
-    ServerOrigin, TemplatableMCPServer, TemplateVariable,
+    CloudMarketplacePlugin, CloudMarketplacePluginModel, MarketplacePlugin, PluginSource,
 };
 use warp_core::ui::appearance::Appearance;
 
@@ -10,24 +14,25 @@ use crate::cloud_object::{
     CloudObjectUuid, GenericStringObjectFormat, GenericStringObjectUniqueKey, JsonObjectType,
     Revision, UniquePer,
 };
-use crate::drive::items::templatable_mcp_server::WarpDriveTemplatableMCPServer;
+use crate::drive::items::marketplace_plugin::WarpDriveMarketplacePlugin;
 use crate::drive::items::WarpDriveItem;
+use crate::drive::CloudObjectTypeAndId;
 use crate::server::ids::SyncId;
 use crate::server::sync_queue::QueueItem;
 
-const UNIQUENESS_KEY_PREFIX: &str = "templatable_mcp_server";
+const UNIQUENESS_KEY_PREFIX: &str = "marketplace_plugin";
 
-impl CloudObjectUuid for TemplatableMCPServer {
+impl CloudObjectUuid for MarketplacePlugin {
     fn uuid(&self) -> uuid::Uuid {
         self.uuid
     }
 }
 
-impl StringModel for TemplatableMCPServer {
-    type CloudObjectType = CloudTemplatableMCPServer;
+impl StringModel for MarketplacePlugin {
+    type CloudObjectType = CloudMarketplacePlugin;
 
     fn model_type_name(&self) -> &'static str {
-        "MCP server"
+        "Marketplace plugin"
     }
 
     fn should_enforce_revisions() -> bool {
@@ -35,7 +40,7 @@ impl StringModel for TemplatableMCPServer {
     }
 
     fn model_format() -> GenericStringObjectFormat {
-        GenericStringObjectFormat::Json(JsonObjectType::TemplatableMCPServer)
+        GenericStringObjectFormat::Json(JsonObjectType::MarketplacePlugin)
     }
 
     fn should_show_activity_toasts() -> bool {
@@ -50,12 +55,16 @@ impl StringModel for TemplatableMCPServer {
         self.name.clone()
     }
 
+    fn set_display_name(&mut self, name: &str) {
+        self.name = name.to_owned();
+    }
+
     fn update_object_queue_item(
         &self,
         revision_ts: Option<Revision>,
         object: &Self::CloudObjectType,
     ) -> QueueItem {
-        QueueItem::UpdateTemplatableMCPServer {
+        QueueItem::UpdateMarketplacePlugin {
             model: object.model().clone().into(),
             id: object.id,
             revision: revision_ts.or_else(|| object.metadata.revision.clone()),
@@ -77,22 +86,20 @@ impl StringModel for TemplatableMCPServer {
         &self,
         id: SyncId,
         _appearance: &Appearance,
-        templatable_mcp_server: &CloudTemplatableMCPServer,
+        plugin: &CloudMarketplacePlugin,
     ) -> Option<Box<dyn WarpDriveItem>> {
-        Some(Box::new(WarpDriveTemplatableMCPServer::new(
-            crate::drive::CloudObjectTypeAndId::GenericStringObject {
-                object_type: GenericStringObjectFormat::Json(
-                    JsonObjectType::TemplatableMCPServer,
-                ),
+        Some(Box::new(WarpDriveMarketplacePlugin::new(
+            CloudObjectTypeAndId::GenericStringObject {
+                object_type: GenericStringObjectFormat::Json(JsonObjectType::MarketplacePlugin),
                 id,
             },
-            templatable_mcp_server.clone(),
+            plugin.clone(),
         )))
     }
 }
 
-impl JsonModel for TemplatableMCPServer {
+impl JsonModel for MarketplacePlugin {
     fn json_object_type() -> JsonObjectType {
-        JsonObjectType::TemplatableMCPServer
+        JsonObjectType::MarketplacePlugin
     }
 }

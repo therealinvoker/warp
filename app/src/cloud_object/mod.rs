@@ -982,8 +982,8 @@ pub use cloud_object_client::{
 };
 pub use cloud_object_models::{
     ServerAIExecutionProfile, ServerAIFact, ServerAmbientAgentEnvironment, ServerCloudAgentConfig,
-    ServerCloudObject, ServerEnvVarCollection, ServerFolder, ServerMCPServer, ServerNotebook,
-    ServerPreference, ServerScheduledAmbientAgent, ServerTemplatableMCPServer, ServerWorkflow,
+    ServerCloudObject, ServerEnvVarCollection, ServerFolder, ServerMCPServer,
+    ServerMarketplacePlugin, ServerNotebook, ServerPreference, ServerScheduledAmbientAgent, ServerTemplatableMCPServer, ServerWorkflow,
     ServerWorkflowEnum, TryFromGql,
 };
 

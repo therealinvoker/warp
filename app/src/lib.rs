@@ -48,6 +48,7 @@ mod linear;
 mod local_control;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod login_item;
+mod marketplace_plugins;
 mod menu;
 mod modal;
 mod network;
