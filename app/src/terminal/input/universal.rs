@@ -181,7 +181,7 @@ impl Input {
         if self.is_pane_focused(app) {
             // Focused: show background
             container = container
-                .with_background(internal_colors::fg_overlay_1(theme))
+                .with_background(internal_colors::fg_overlay_2(theme))
                 .with_border(Border::all(1.).with_border_fill(theme.outline()));
         } else {
             // Unfocused: no background

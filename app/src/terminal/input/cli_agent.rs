@@ -2,14 +2,15 @@ use warp_core::ui::color::contrast::MinimumAllowedContrast;
 use warp_core::ui::color::ContrastingColor;
 use warp_core::ui::theme::color::internal_colors;
 use warpui::elements::{
-    Border, Clipped, ConstrainedBox, Container, DispatchEventResult, DropTarget, Element,
-    EventHandler, Flex, Hoverable, ParentElement, SavePosition, Stack,
+    Clipped, ConstrainedBox, Container, DispatchEventResult, DropTarget, Element, EventHandler,
+    Flex, Hoverable, ParentElement, SavePosition, Stack,
 };
 use warpui::presenter::ChildView;
 use warpui::{AppContext, SingletonEntity as _, ViewContext};
 
 use super::common::{
-    add_input_suggestions_overlays, wrap_input_with_terminal_padding_and_focus_handler,
+    add_input_suggestions_overlays, floating_input_box,
+    wrap_input_with_terminal_padding_and_focus_handler,
 };
 use super::{
     Input, InputAction, InputDropTargetData, CLI_AGENT_RICH_INPUT_EDITOR_BOTTOM_PADDING,
@@ -94,8 +95,10 @@ impl Input {
             add_input_suggestions_overlays(self, &mut stack, appearance, menu_positioning, app);
         }
 
-        let mut input_container = Container::new(stack.finish()).with_border(
-            Border::top(1.0).with_border_fill(internal_colors::fg_overlay_2(appearance.theme())),
+        let mut input_container = floating_input_box(
+            stack.finish(),
+            internal_colors::fg_overlay_2(appearance.theme()).into_solid(),
+            appearance,
         );
 
         // When an alt screen CLI agent (e.g. OpenCode) is running, match

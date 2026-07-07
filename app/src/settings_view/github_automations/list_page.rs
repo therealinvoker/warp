@@ -372,7 +372,10 @@ impl GithubAutomationsListPageView {
     }
 
     fn add_provider_key(&mut self, ctx: &mut ViewContext<Self>) {
-        let provider = self.read_editor(&self.provider_editor, ctx).trim().to_string();
+        let provider = self
+            .read_editor(&self.provider_editor, ctx)
+            .trim()
+            .to_string();
         let key = self
             .read_editor(&self.provider_key_editor, ctx)
             .trim()
@@ -648,10 +651,9 @@ impl SettingsWidget for GithubAutomationsWidget {
             }
             LoadState::Loaded(data) => {
                 if data.automations.is_empty() {
-                    column.add_child(view.status_text(
-                        "No automations configured yet.".to_string(),
-                        appearance,
-                    ));
+                    column.add_child(
+                        view.status_text("No automations configured yet.".to_string(), appearance),
+                    );
                 } else {
                     for automation in &data.automations {
                         column.add_child(render_automation_row(
@@ -843,9 +845,7 @@ fn render_form(
         GithubAutomationActionType::Prompt => {
             column.add_child(field("Prompt", &view.editors.prompt))
         }
-        GithubAutomationActionType::Skill => {
-            column.add_child(field("Skill", &view.editors.skill))
-        }
+        GithubAutomationActionType::Skill => column.add_child(field("Skill", &view.editors.skill)),
     }
     column.add_child(field("Harness", &view.editors.harness));
     column.add_child(field("Model", &view.editors.model_id));
@@ -868,7 +868,11 @@ fn render_form(
         |ctx, _, _| ctx.dispatch_typed_action(GithubAutomationsPageAction::CancelForm),
         appearance,
     ));
-    column.add_child(Container::new(buttons.finish()).with_margin_top(8.).finish());
+    column.add_child(
+        Container::new(buttons.finish())
+            .with_margin_top(8.)
+            .finish(),
+    );
 
     Container::new(column.finish()).finish()
 }
@@ -932,10 +936,9 @@ fn render_provider_keys(
     } else {
         for key in keys {
             let mut row = Flex::row().with_cross_axis_alignment(CrossAxisAlignment::Center);
-            row.add_child(view.status_text(
-                format!("{} — ••••{}", key.provider, key.last4),
-                appearance,
-            ));
+            row.add_child(
+                view.status_text(format!("{} — ••••{}", key.provider, key.last4), appearance),
+            );
             let provider = key.provider.clone();
             row.add_child(
                 Container::new(view.render_button(

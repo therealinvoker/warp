@@ -4856,6 +4856,40 @@ impl TerminalView {
         }
     }
 
+    /// Switches a nested cloud-mode (ambient) session back to a local Agent
+    /// conversation: pops the cloud pane off the stack to reveal the parent
+    /// terminal, then starts a new agent conversation there. This mirrors the
+    /// pop in [`Self::exit_agent_view`] so the footer's Cloud Agent -> Agent
+    /// switch behaves symmetrically with Cloud Agent -> Terminal. Returns `true`
+    /// when the pop happened; root cloud panes (stack depth <= 1) have no parent
+    /// terminal to return to and return `false`.
+    fn switch_from_cloud_to_local_agent(
+        &mut self,
+        origin: AgentViewEntryOrigin,
+        ctx: &mut ViewContext<Self>,
+    ) -> bool {
+        if !self.is_ambient_agent_session(ctx) {
+            return false;
+        }
+        let Some(pane_stack) = self
+            .pane_stack
+            .as_ref()
+            .and_then(|h| h.upgrade(ctx))
+            .filter(|stack| stack.as_ref(ctx).depth() > 1)
+        else {
+            return false;
+        };
+        pane_stack.update(ctx, |stack, ctx| {
+            stack.pop(ctx);
+        });
+        let active_view = pane_stack.as_ref(ctx).active_view().clone();
+        active_view.update(ctx, |view, ctx| {
+            view.enter_agent_view_for_new_conversation(None, origin, ctx);
+        });
+        ctx.notify();
+        true
+    }
+
     /// Schedule a callback to run after the next
     /// [`BlocklistAIControllerEvent::FinishedReceivingOutput`] received, regardless of whether the
     /// conversation completed successfully, was cancelled, or encountered an error.
@@ -27252,14 +27286,22 @@ impl TypedActionView for TerminalView {
                 self.enter_cloud_agent_view(initial_prompt, ctx);
             }
             StartNewAgentConversation { origin } => {
-                self.input.update(ctx, |input, ctx| {
-                    input.handle_action(
-                        &InputAction::StartNewAgentConversation {
-                            origin: origin.clone(),
-                        },
-                        ctx,
-                    );
-                });
+                // When switching Cloud Agent -> Agent from a nested cloud-mode
+                // (ambient) session, the cloud composer pane can't host a local
+                // agent conversation, so entering agent view here would no-op.
+                // Mirror the Cloud Agent -> Terminal (ExitAgentView) behavior:
+                // pop back to the parent terminal and start the local agent
+                // conversation there. Otherwise fall through to the normal path.
+                if !self.switch_from_cloud_to_local_agent(origin.clone(), ctx) {
+                    self.input.update(ctx, |input, ctx| {
+                        input.handle_action(
+                            &InputAction::StartNewAgentConversation {
+                                origin: origin.clone(),
+                            },
+                            ctx,
+                        );
+                    });
+                }
             }
             OpenInlineHistoryMenu => {
                 self.input.update(ctx, |input, ctx| {

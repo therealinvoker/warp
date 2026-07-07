@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, USER_AGENT};
+use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderMap, HeaderValue, USER_AGENT};
 use reqwest::{Method, StatusCode};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -45,10 +45,7 @@ impl GithubClient {
 
     /// Construct a client against a custom base URL (used by tests and, later,
     /// GitHub Enterprise Server).
-    pub fn with_base_url(
-        token_provider: Arc<dyn TokenProvider>,
-        base_url: String,
-    ) -> Result<Self> {
+    pub fn with_base_url(token_provider: Arc<dyn TokenProvider>, base_url: String) -> Result<Self> {
         let http = reqwest::Client::builder()
             .timeout(REQUEST_TIMEOUT)
             .user_agent("warp-terminal")
@@ -66,17 +63,16 @@ impl GithubClient {
     }
 
     async fn auth_headers(&self) -> Result<HeaderMap> {
-        let token = self
-            .token_provider
-            .token()
-            .await
-            .map_err(Error::Token)?;
+        let token = self.token_provider.token().await.map_err(Error::Token)?;
         let mut headers = HeaderMap::new();
         let mut auth = HeaderValue::from_str(&format!("Bearer {}", token.token))
             .map_err(|_| Error::InvalidToken)?;
         auth.set_sensitive(true);
         headers.insert(AUTHORIZATION, auth);
-        headers.insert(ACCEPT, HeaderValue::from_static("application/vnd.github+json"));
+        headers.insert(
+            ACCEPT,
+            HeaderValue::from_static("application/vnd.github+json"),
+        );
         headers.insert(
             "X-GitHub-Api-Version",
             HeaderValue::from_static(GITHUB_API_VERSION),
@@ -98,7 +94,10 @@ impl GithubClient {
         let mut retried_rate_limit = false;
         loop {
             let headers = self.auth_headers().await?;
-            let mut req = self.http.request(method.clone(), self.url(path)).headers(headers);
+            let mut req = self
+                .http
+                .request(method.clone(), self.url(path))
+                .headers(headers);
             if let Some(body) = body {
                 req = req.json(body);
             }
@@ -284,12 +283,7 @@ impl GithubClient {
     }
 
     /// List issues for a repo. `state` is one of `open`, `closed`, `all`.
-    pub async fn list_issues(
-        &self,
-        owner: &str,
-        repo: &str,
-        state: &str,
-    ) -> Result<Vec<Issue>> {
+    pub async fn list_issues(&self, owner: &str, repo: &str, state: &str) -> Result<Vec<Issue>> {
         self.get(&format!(
             "repos/{owner}/{repo}/issues?state={state}&per_page=50"
         ))

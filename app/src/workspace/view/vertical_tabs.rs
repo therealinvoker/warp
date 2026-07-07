@@ -44,6 +44,8 @@ use crate::ai::agent_management::AgentNotificationsModel;
 use crate::ai::cloud_environments::CloudAmbientAgentEnvironment;
 use crate::ai::conversation_status_ui::render_status_element;
 use crate::appearance::Appearance;
+use crate::auth::AuthStateProvider;
+use crate::autoupdate::get_update_state;
 use crate::cloud_object::model::generic_string_model::StringModel;
 use crate::cloud_object::CloudObjectLookup as _;
 use crate::code::buffer_location::LocalOrRemotePath;
@@ -59,6 +61,7 @@ use crate::pane_group::{
     CodePane, NotebookPane, PaneGroup, PaneId, TabBarHoverIndex, TerminalPane, WorkflowPane,
 };
 use crate::safe_triangle::SafeTriangle;
+use crate::settings_view::SettingsSection;
 use crate::tab::{tab_position_id, SelectedTabColor, TabData};
 use crate::terminal::cli_agent_sessions::CLIAgentSessionsModel;
 use crate::terminal::session_settings::SessionSettings;
@@ -730,6 +733,9 @@ pub(super) struct VerticalTabsPanelState {
     new_terminal_button_mouse_state: MouseStateHandle,
     pub(super) search_query: String,
     settings_button_mouse_state: MouseStateHandle,
+    settings_launcher_mouse_state: MouseStateHandle,
+    account_button_mouse_state: MouseStateHandle,
+    update_badge_mouse_state: MouseStateHandle,
     panes_segment_mouse_state: MouseStateHandle,
     tabs_segment_mouse_state: MouseStateHandle,
     workspace_segment_mouse_state: MouseStateHandle,
@@ -779,6 +785,9 @@ impl Default for VerticalTabsPanelState {
             new_terminal_button_mouse_state: Default::default(),
             search_query: String::new(),
             settings_button_mouse_state: Default::default(),
+            settings_launcher_mouse_state: Default::default(),
+            account_button_mouse_state: Default::default(),
+            update_badge_mouse_state: Default::default(),
             panes_segment_mouse_state: Default::default(),
             tabs_segment_mouse_state: Default::default(),
             workspace_segment_mouse_state: Default::default(),
@@ -1489,7 +1498,6 @@ fn render_control_bar(
         .with_child(Shrinkable::new(1., text_input).finish())
         .finish();
 
-    let settings_button = render_settings_button(state, appearance);
     let new_tab_button = render_new_tab_button(state, workspace, appearance, app);
 
     Container::new(
@@ -1498,7 +1506,6 @@ fn render_control_bar(
             .with_cross_axis_alignment(CrossAxisAlignment::Center)
             .with_spacing(CONTROL_BAR_SPACING)
             .with_child(Shrinkable::new(1., search_bar).finish())
-            .with_child(settings_button)
             .with_child(new_tab_button)
             .finish(),
     )
@@ -1696,10 +1703,10 @@ fn render_settings_button(
                 stack.add_positioned_overlay_child(
                     tooltip,
                     OffsetPositioning::offset_from_parent(
-                        vec2f(0., 4.),
+                        vec2f(0., -4.),
                         ParentOffsetBounds::WindowByPosition,
-                        ParentAnchor::BottomMiddle,
-                        ChildAnchor::TopMiddle,
+                        ParentAnchor::TopMiddle,
+                        ChildAnchor::BottomMiddle,
                     ),
                 );
                 stack.finish()
@@ -1715,6 +1722,267 @@ fn render_settings_button(
     .finish();
 
     SavePosition::new(button, VERTICAL_TABS_SETTINGS_BUTTON_POSITION_ID).finish()
+}
+
+/// Settings launcher (gear) for the side-nav footer. Opens the full Settings
+/// pane. Styled like `render_settings_button`: transparent at rest with
+/// `sub_text`, `fg_overlay_2` background and `main_text` on hover.
+fn render_settings_launcher_button(
+    state: &VerticalTabsPanelState,
+    appearance: &Appearance,
+) -> Box<dyn Element> {
+    let theme = appearance.theme();
+    let sub_text = theme.sub_text_color(theme.background());
+    let main_text = theme.main_text_color(theme.background());
+    let ui_builder = appearance.ui_builder().clone();
+
+    Hoverable::new(
+        state.settings_launcher_mouse_state.clone(),
+        move |hover_state| {
+            let is_hovered = hover_state.is_hovered();
+            let icon = ConstrainedBox::new(
+                WarpIcon::Gear
+                    .to_warpui_icon(if is_hovered { main_text } else { sub_text })
+                    .finish(),
+            )
+            .with_width(16.)
+            .with_height(16.)
+            .finish();
+
+            let background = if is_hovered {
+                internal_colors::fg_overlay_2(theme)
+            } else {
+                ThemeFill::Solid(ColorU::transparent_black())
+            };
+
+            let button_container = Container::new(icon)
+                .with_padding(Padding::uniform(2.))
+                .with_background(background)
+                .with_corner_radius(CornerRadius::with_all(CONTROL_BAR_BUTTON_RADIUS))
+                .finish();
+
+            if is_hovered {
+                let tooltip = ui_builder.tool_tip("Settings".to_string()).build().finish();
+                let mut stack = Stack::new().with_child(button_container);
+                stack.add_positioned_overlay_child(
+                    tooltip,
+                    OffsetPositioning::offset_from_parent(
+                        vec2f(0., -4.),
+                        ParentOffsetBounds::WindowByPosition,
+                        ParentAnchor::TopMiddle,
+                        ChildAnchor::BottomMiddle,
+                    ),
+                );
+                stack.finish()
+            } else {
+                button_container
+            }
+        },
+    )
+    .on_click(|ctx, _, _| {
+        ctx.dispatch_typed_action(WorkspaceAction::ShowSettings);
+    })
+    .with_cursor(Cursor::PointingHand)
+    .finish()
+}
+
+/// Account quick-launch for the side-nav footer: shows the current user's
+/// display name (or "Sign in" when logged out) and opens the Account settings
+/// page on click. Styled like the other footer controls.
+fn render_account_button(
+    state: &VerticalTabsPanelState,
+    appearance: &Appearance,
+    app: &AppContext,
+) -> Box<dyn Element> {
+    const MAX_LABEL_CHARS: usize = 22;
+
+    let theme = appearance.theme();
+    let sub_text = theme.sub_text_color(theme.background());
+    let main_text = theme.main_text_color(theme.background());
+    let font_family = appearance.ui_font_family();
+
+    let auth_state = AuthStateProvider::as_ref(app).get();
+    let raw_label = if auth_state.is_anonymous_or_logged_out() {
+        "Sign in".to_string()
+    } else {
+        auth_state.username_for_display().unwrap_or_default()
+    };
+    // Truncate long emails/names so the footer never pushes the options/settings
+    // buttons off the right edge of the panel.
+    let label = if raw_label.chars().count() > MAX_LABEL_CHARS {
+        let truncated: String = raw_label.chars().take(MAX_LABEL_CHARS - 1).collect();
+        format!("{truncated}…")
+    } else {
+        raw_label
+    };
+
+    Hoverable::new(
+        state.account_button_mouse_state.clone(),
+        move |hover_state| {
+            let is_hovered = hover_state.is_hovered();
+            let content_color = if is_hovered { main_text } else { sub_text };
+            let background = if is_hovered {
+                internal_colors::fg_overlay_2(theme)
+            } else {
+                ThemeFill::Solid(ColorU::transparent_black())
+            };
+
+            let row = Flex::row()
+                .with_main_axis_size(MainAxisSize::Min)
+                .with_cross_axis_alignment(CrossAxisAlignment::Center)
+                .with_spacing(6.)
+                .with_child(
+                    ConstrainedBox::new(WarpIcon::User.to_warpui_icon(content_color).finish())
+                        .with_width(14.)
+                        .with_height(14.)
+                        .finish(),
+                )
+                .with_child(
+                    Clipped::new(
+                        Text::new_inline(label.clone(), font_family, 12.)
+                            .with_color(content_color.into())
+                            .finish(),
+                    )
+                    .finish(),
+                )
+                .finish();
+
+            Container::new(row)
+                .with_background(background)
+                .with_corner_radius(CornerRadius::with_all(CONTROL_BAR_BUTTON_RADIUS))
+                .with_horizontal_padding(6.)
+                .with_vertical_padding(2.)
+                .finish()
+        },
+    )
+    .on_click(|ctx, _, _| {
+        ctx.dispatch_typed_action(WorkspaceAction::ShowSettingsPage(SettingsSection::Account));
+    })
+    .with_cursor(Cursor::PointingHand)
+    .finish()
+}
+
+/// Small accent pill shown beside the username only when a downloaded update is
+/// ready. Clicking it applies the update and relaunches Warp.
+fn render_update_badge(
+    state: &VerticalTabsPanelState,
+    appearance: &Appearance,
+    app: &AppContext,
+) -> Option<Box<dyn Element>> {
+    if !(FeatureFlag::Autoupdate.is_enabled() && get_update_state(app).ready_for_update()) {
+        return None;
+    }
+
+    let theme = appearance.theme();
+    let accent: ColorU = AnsiColorIdentifier::Green
+        .to_ansi_color(&theme.terminal_colors().normal)
+        .into();
+    let font_family = appearance.ui_font_family();
+    let ui_builder = appearance.ui_builder().clone();
+
+    Some(
+        Hoverable::new(state.update_badge_mouse_state.clone(), move |hover_state| {
+            let is_hovered = hover_state.is_hovered();
+            let background = ThemeFill::Solid(coloru_with_opacity(
+                accent,
+                if is_hovered { 28 } else { 16 },
+            ));
+
+            let pill = Container::new(
+                Flex::row()
+                    .with_main_axis_size(MainAxisSize::Min)
+                    .with_cross_axis_alignment(CrossAxisAlignment::Center)
+                    .with_spacing(4.)
+                    .with_child(
+                        ConstrainedBox::new(
+                            WarpIcon::ArrowUp
+                                .to_warpui_icon(WarpThemeFill::Solid(accent))
+                                .finish(),
+                        )
+                        .with_width(11.)
+                        .with_height(11.)
+                        .finish(),
+                    )
+                    .with_child(
+                        Text::new_inline("Update".to_string(), font_family, 11.)
+                            .with_color(WarpThemeFill::Solid(accent).into())
+                            .finish(),
+                    )
+                    .finish(),
+            )
+            .with_background(background)
+            .with_corner_radius(CornerRadius::with_all(CONTROL_BAR_BUTTON_RADIUS))
+            .with_horizontal_padding(6.)
+            .with_vertical_padding(2.)
+            .finish();
+
+            if is_hovered {
+                let tooltip = ui_builder
+                    .tool_tip("Update and relaunch Warp".to_string())
+                    .build()
+                    .finish();
+                let mut stack = Stack::new().with_child(pill);
+                stack.add_positioned_overlay_child(
+                    tooltip,
+                    OffsetPositioning::offset_from_parent(
+                        vec2f(0., -4.),
+                        ParentOffsetBounds::WindowByPosition,
+                        ParentAnchor::TopMiddle,
+                        ChildAnchor::BottomMiddle,
+                    ),
+                );
+                stack.finish()
+            } else {
+                pill
+            }
+        })
+        .on_click(|ctx, _, _| {
+            ctx.dispatch_typed_action(WorkspaceAction::ApplyUpdate);
+        })
+        .with_cursor(Cursor::PointingHand)
+        .finish(),
+    )
+}
+
+/// Bottom-pinned footer for the side nav. The account quick-launch and update
+/// badge sit on the left, while the "View options" toggle and Settings gear are
+/// pinned to the right: `[username] [update]  …  [options] [settings]`.
+fn render_bottom_bar(
+    state: &VerticalTabsPanelState,
+    appearance: &Appearance,
+    app: &AppContext,
+) -> Box<dyn Element> {
+    let mut left = Flex::row()
+        .with_main_axis_size(MainAxisSize::Min)
+        .with_cross_axis_alignment(CrossAxisAlignment::Center)
+        .with_spacing(CONTROL_BAR_SPACING)
+        .with_child(render_account_button(state, appearance, app));
+    if let Some(update_badge) = render_update_badge(state, appearance, app) {
+        left = left.with_child(update_badge);
+    }
+
+    let right = Flex::row()
+        .with_main_axis_size(MainAxisSize::Min)
+        .with_cross_axis_alignment(CrossAxisAlignment::Center)
+        .with_spacing(CONTROL_BAR_SPACING)
+        .with_child(render_settings_button(state, appearance))
+        .with_child(render_settings_launcher_button(state, appearance));
+
+    Container::new(
+        Flex::row()
+            .with_main_axis_size(MainAxisSize::Max)
+            .with_cross_axis_alignment(CrossAxisAlignment::Center)
+            .with_spacing(CONTROL_BAR_SPACING)
+            .with_child(Expanded::new(1., left.finish()).finish())
+            .with_child(right.finish())
+            .finish(),
+    )
+    .with_padding(
+        Padding::uniform(CONTROL_BAR_VERTICAL_PADDING)
+            .with_left(GROUP_HORIZONTAL_PADDING)
+            .with_right(GROUP_HORIZONTAL_PADDING),
+    )
+    .finish()
 }
 
 fn render_new_tab_button(
@@ -1840,7 +2108,8 @@ fn render_vertical_tabs_panel(
             app,
         ))
         .with_child(render_new_session_buttons(state, appearance))
-        .with_child(Shrinkable::new(1., scrollable_groups).finish())
+        .with_child(Expanded::new(1., scrollable_groups).finish())
+        .with_child(render_bottom_bar(state, appearance, app))
         .finish();
 
     // Catch-all drop target so a pane dragged into any gap not covered by a
@@ -2209,6 +2478,11 @@ fn render_groups(
 /// non-empty path, so it can never collide with a real folder.
 const OTHER_FOLDER_KEY: &str = "";
 
+/// Collapse-map key for the Workspace-view "Settings" section (the Settings
+/// pane and its settings.toml editor). The leading NUL byte guarantees it can
+/// never collide with a real folder path key.
+const SETTINGS_FOLDER_KEY: &str = "\0settings";
+
 /// Buckets `visible_tabs` by folder (git repo root, working-dir fallback) and
 /// appends one collapsible folder section per bucket to `groups`, preserving
 /// first-appearance order. Tabs with no resolvable folder are grouped into an
@@ -2225,13 +2499,26 @@ fn render_workspace_folder_sections(
     let mut labels: HashMap<String, String> = HashMap::new();
     // Values are positions into `visible_tabs`, not raw tab indices.
     let mut buckets: HashMap<String, Vec<usize>> = HashMap::new();
+    let mut settings: Vec<usize> = Vec::new();
     let mut other: Vec<usize> = Vec::new();
 
     for (position, (tab_index, _)) in visible_tabs.iter().enumerate() {
         let pane_group_handle = &workspace.tabs[*tab_index].pane_group;
         let pane_group_id = pane_group_handle.id();
         let pane_group = pane_group_handle.as_ref(app);
-        match workspace_folder_for_tab(workspace, pane_group_id, pane_group, app) {
+        // The Settings pane and its settings.toml editor get their own top-level
+        // section (with a gear icon) rather than falling into the Cloud bucket.
+        if tab_is_settings_related(pane_group, app) {
+            settings.push(position);
+            continue;
+        }
+        // Fall back to the tab's inherited folder hint (set when a new terminal
+        // inherits the previous tab's directory) so a freshly created tab lands
+        // in its eventual folder instead of flashing in the Cloud bucket while
+        // the shell bootstraps.
+        let folder = workspace_folder_for_tab(workspace, pane_group_id, pane_group, app)
+            .or_else(|| workspace.tabs[*tab_index].pending_workspace_folder.clone());
+        match folder {
             Some((key, label)) => {
                 if !buckets.contains_key(&key) {
                     order.push(key.clone());
@@ -2253,6 +2540,23 @@ fn render_workspace_folder_sections(
             members,
             key,
             label,
+            None,
+            is_any_pane_dragging,
+            app,
+        ));
+    }
+
+    // Settings section renders as a top-level peer of the folder sections, with
+    // a gear icon, just above the Cloud bucket.
+    if !settings.is_empty() {
+        groups.add_child(render_workspace_folder_section(
+            state,
+            workspace,
+            visible_tabs,
+            &settings,
+            SETTINGS_FOLDER_KEY,
+            "Settings",
+            Some(WarpIcon::Gear),
             is_any_pane_dragging,
             app,
         ));
@@ -2266,6 +2570,7 @@ fn render_workspace_folder_sections(
             &other,
             OTHER_FOLDER_KEY,
             "Cloud",
+            None,
             is_any_pane_dragging,
             app,
         ));
@@ -2273,6 +2578,9 @@ fn render_workspace_folder_sections(
 
     // Drop hover states for folder headers that are no longer rendered.
     let mut live_keys: std::collections::HashSet<&str> = order.iter().map(String::as_str).collect();
+    if !settings.is_empty() {
+        live_keys.insert(SETTINGS_FOLDER_KEY);
+    }
     if !other.is_empty() {
         live_keys.insert(OTHER_FOLDER_KEY);
     }
@@ -2292,6 +2600,7 @@ fn render_workspace_folder_section(
     member_positions: &[usize],
     folder_key: &str,
     label: &str,
+    header_icon: Option<WarpIcon>,
     is_any_pane_dragging: bool,
     app: &AppContext,
 ) -> Box<dyn Element> {
@@ -2313,6 +2622,7 @@ fn render_workspace_folder_section(
         state,
         folder_key,
         label,
+        header_icon,
         is_collapsed,
         app,
     ));
@@ -2380,6 +2690,7 @@ fn render_workspace_folder_header(
     state: &VerticalTabsPanelState,
     folder_key: &str,
     label: &str,
+    header_icon: Option<WarpIcon>,
     is_collapsed: bool,
     app: &AppContext,
 ) -> Box<dyn Element> {
@@ -2398,11 +2709,13 @@ fn render_workspace_folder_header(
 
     let toggle_action = WorkspaceAction::ToggleWorkspaceFolderCollapsed(folder_key.to_string());
 
-    let folder_glyph = if is_collapsed {
+    // Sections with an explicit icon (e.g. Settings' gear) keep it in both
+    // states; directory sections use the folder glyph as the open/closed cue.
+    let folder_glyph = header_icon.unwrap_or(if is_collapsed {
         WarpIcon::FolderClosed
     } else {
         WarpIcon::Folder
-    };
+    });
     let folder_icon = ConstrainedBox::new(folder_glyph.to_warpui_icon(sub_text_color).finish())
         .with_width(TAB_GROUP_ICON_SIZE)
         .with_height(TAB_GROUP_ICON_SIZE)
@@ -4918,7 +5231,33 @@ fn resolved_terminal_working_directory(
 /// directory when it isn't inside a repo. `None` means the tab has no
 /// resolvable folder and belongs in the "Other" bucket. The label is the
 /// key's basename (e.g. `warp`).
-fn workspace_folder_for_tab(
+/// Whether the tab's focused pane is the Settings pane or its settings.toml
+/// editor, so Workspace view can group both under a dedicated top-level
+/// "Settings" section instead of the catch-all Cloud bucket.
+fn tab_is_settings_related(pane_group: &PaneGroup, app: &AppContext) -> bool {
+    let focused_pane_id = pane_group.focused_pane_id(app);
+    match pane_group.resolve_pane_type(focused_pane_id, app) {
+        TypedPane::Settings => true,
+        TypedPane::Code(code_pane) => code_pane
+            .file_view(app)
+            .as_ref(app)
+            .local_path(app)
+            .is_some_and(|path| path == crate::settings::user_preferences_toml_file_path()),
+        TypedPane::Terminal(_)
+        | TypedPane::CodeDiff
+        | TypedPane::File
+        | TypedPane::Notebook { .. }
+        | TypedPane::Workflow { .. }
+        | TypedPane::EnvVarCollection
+        | TypedPane::EnvironmentManagement
+        | TypedPane::AIFact
+        | TypedPane::AIDocument
+        | TypedPane::ExecutionProfileEditor
+        | TypedPane::Other => false,
+    }
+}
+
+pub(super) fn workspace_folder_for_tab(
     workspace: &Workspace,
     pane_group_id: EntityId,
     pane_group: &PaneGroup,

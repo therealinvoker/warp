@@ -615,9 +615,9 @@ impl IntegrationsClient for ServerApi {
             SetGithubProviderKeyResult::UserFacingError(error) => {
                 Err(anyhow!(get_user_facing_error_message(error)))
             }
-            SetGithubProviderKeyResult::Unknown => {
-                Err(anyhow!("Unknown response while setting GitHub provider key"))
-            }
+            SetGithubProviderKeyResult::Unknown => Err(anyhow!(
+                "Unknown response while setting GitHub provider key"
+            )),
         }
     }
 

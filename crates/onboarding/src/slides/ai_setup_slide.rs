@@ -129,8 +129,10 @@ impl AiSetupSlide {
         Flex::column()
             .with_main_axis_size(MainAxisSize::Min)
             .with_cross_axis_alignment(CrossAxisAlignment::Start)
-            // Offset icon built in padding to left align icon with title.
-            .with_child(Container::new(logo).with_margin_left(-7.).finish())
+            // Align the logo tile's left edge with the title. A previous negative
+            // left margin nudged the glyph but pushed the tile past the slide's
+            // left clip edge, shaving the pink (top-left) corner of the mark.
+            .with_child(logo)
             .with_child(Container::new(title).with_margin_top(11.).finish())
             .with_child(Container::new(subtitle).with_margin_top(16.).finish())
             .finish()

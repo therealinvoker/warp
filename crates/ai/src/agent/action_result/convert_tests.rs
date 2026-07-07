@@ -67,8 +67,7 @@ fn github_list_pr_comments_result_converts_to_api() {
         }
         .try_into()
         .unwrap();
-    let api::request::input::tool_call_result::Result::ListGithubPrComments(result) = result
-    else {
+    let api::request::input::tool_call_result::Result::ListGithubPrComments(result) = result else {
         panic!("expected list_github_pr_comments result");
     };
     assert!(matches!(

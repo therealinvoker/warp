@@ -517,24 +517,24 @@ impl TryFrom<ReadGithubPrResult> for api::request::input::tool_call_result::Resu
 
     fn try_from(result: ReadGithubPrResult) -> Result<Self, Self::Error> {
         match result {
-            ReadGithubPrResult::Success { pr_json } => Ok(
-                api::request::input::tool_call_result::Result::ReadGithubPr(
+            ReadGithubPrResult::Success { pr_json } => {
+                Ok(api::request::input::tool_call_result::Result::ReadGithubPr(
                     api::ReadGithubPrResult {
                         result: Some(api::read_github_pr_result::Result::Success(
                             api::read_github_pr_result::Success { pr_json },
                         )),
                     },
-                ),
-            ),
-            ReadGithubPrResult::Error(error) => Ok(
-                api::request::input::tool_call_result::Result::ReadGithubPr(
+                ))
+            }
+            ReadGithubPrResult::Error(error) => {
+                Ok(api::request::input::tool_call_result::Result::ReadGithubPr(
                     api::ReadGithubPrResult {
                         result: Some(api::read_github_pr_result::Result::Error(
                             api::read_github_pr_result::Error { message: error },
                         )),
                     },
-                ),
-            ),
+                ))
+            }
             ReadGithubPrResult::Cancelled => Err(ConvertToAPITypeError::Ignore),
         }
     }

@@ -459,9 +459,9 @@ impl AIAgentActionType {
             Self::ReadGithubPr { .. } => {
                 AIAgentActionResultType::ReadGithubPr(ReadGithubPrResult::Cancelled)
             }
-            Self::ListGithubPrComments { .. } => AIAgentActionResultType::ListGithubPrComments(
-                ListGithubPrCommentsResult::Cancelled,
-            ),
+            Self::ListGithubPrComments { .. } => {
+                AIAgentActionResultType::ListGithubPrComments(ListGithubPrCommentsResult::Cancelled)
+            }
             Self::CreateGithubPr(_) => {
                 AIAgentActionResultType::CreateGithubPr(CreateGithubPrResult::Cancelled)
             }
@@ -534,7 +534,10 @@ impl AIAgentActionType {
                 number,
             } => format!("List GitHub PR comments on {owner}/{repo}#{number}"),
             Self::CreateGithubPr(req) => {
-                format!("Create GitHub PR in {}/{}: {}", req.owner, req.repo, req.title)
+                format!(
+                    "Create GitHub PR in {}/{}: {}",
+                    req.owner, req.repo, req.title
+                )
             }
             Self::ReadGithubIssue {
                 owner,
@@ -781,7 +784,10 @@ impl Display for AIAgentActionType {
                 comment_id,
                 ..
             } => {
-                write!(f, "ReplyToPrComment: comment {comment_id} in {owner}/{repo}")
+                write!(
+                    f,
+                    "ReplyToPrComment: comment {comment_id} in {owner}/{repo}"
+                )
             }
         }
     }

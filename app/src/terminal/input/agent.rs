@@ -1,24 +1,24 @@
 use warp_cli::agent::Harness;
 use warp_core::settings::Setting;
 use warpui::elements::{
-    AnchorPair, Border, ConstrainedBox, Container, CrossAxisAlignment, DispatchEventResult,
-    DropTarget, Element, Empty, EventHandler, Expanded, Flex, Hoverable, MainAxisSize,
-    OffsetPositioning, OffsetType, ParentElement, PositionedElementOffsetBounds, PositioningAxis,
-    SavePosition, Stack, XAxisAnchor, YAxisAnchor,
+    AnchorPair, ConstrainedBox, Container, CrossAxisAlignment, DispatchEventResult, DropTarget,
+    Element, Empty, EventHandler, Expanded, Flex, Hoverable, MainAxisSize, OffsetPositioning,
+    OffsetType, ParentElement, PositionedElementOffsetBounds, PositioningAxis, SavePosition, Stack,
+    XAxisAnchor, YAxisAnchor,
 };
 use warpui::presenter::ChildView;
 use warpui::{AppContext, SingletonEntity as _};
 
 use super::common::{
     add_command_xray_overlay, add_input_suggestions_overlays, add_voltron_overlay,
-    add_workflow_info_overlay, maybe_add_buy_credits_banner,
+    add_workflow_info_overlay, floating_input_box, maybe_add_buy_credits_banner,
     wrap_input_with_terminal_padding_and_focus_handler,
 };
 use super::{Input, InputAction, InputDropTargetData};
 use crate::ai::blocklist::agent_view::shortcuts::{
     render_agent_shortcuts_view, AgentShortcutsViewContext,
 };
-use crate::ai::blocklist::agent_view::{agent_view_bg_fill, AgentViewState};
+use crate::ai::blocklist::agent_view::AgentViewState;
 use crate::ai::blocklist::InputType;
 use crate::ai::harness_availability::HarnessAvailabilityModel;
 use crate::appearance::Appearance;
@@ -201,7 +201,7 @@ impl Input {
             styles::default_border_color(appearance.theme())
         };
 
-        let mut input = Container::new(
+        let input = floating_input_box(
             Hoverable::new(self.hoverable_handle.clone(), |_| drop_target)
                 .on_hover(|is_hovered, ctx, _app, _position| {
                     ctx.dispatch_typed_action(InputAction::SetUDIHovered(is_hovered));
@@ -210,15 +210,11 @@ impl Input {
                     ctx.dispatch_typed_action(TerminalAction::MiddleClickOnInput)
                 })
                 .finish(),
+            border_color,
+            appearance,
         )
-        .with_border(Border::top(1.).with_border_color(border_color))
-        .with_padding_bottom(4.);
-
-        if self.agent_view_controller.as_ref(app).is_inline() {
-            input = input.with_background(agent_view_bg_fill(app));
-        }
-
-        let input = input.finish();
+        .with_padding_bottom(4.)
+        .finish();
 
         let mut column = Flex::column();
 
@@ -652,9 +648,9 @@ impl Input {
             .with_child(footer)
             .finish();
 
-        // Mirror the local agent input's border/background treatment: a top
-        // border only (no card border/corner radius), transparent background
-        // unless the agent view is inline.
+        // Mirror the local agent input's chrome via the shared floating-box
+        // helper: a slightly lighter-gray fill, rounded corners, and an
+        // all-around border (see `floating_input_box`).
         let border_color = if self.handoff_compose_state.as_ref(app).is_active() {
             appearance.theme().ansi_fg_magenta()
         } else if !self.ai_input_model.as_ref(app).is_ai_input_enabled()
@@ -671,14 +667,12 @@ impl Input {
             styles::default_border_color(appearance.theme())
         };
 
-        let mut input =
-            Container::new(SavePosition::new(stacked, &self.prompt_save_position_id()).finish())
-                .with_border(Border::top(1.).with_border_color(border_color))
-                .with_padding_bottom(4.);
-
-        if self.agent_view_controller.as_ref(app).is_inline() {
-            input = input.with_background(agent_view_bg_fill(app));
-        }
+        let input = floating_input_box(
+            SavePosition::new(stacked, &self.prompt_save_position_id()).finish(),
+            border_color,
+            appearance,
+        )
+        .with_padding_bottom(4.);
 
         input.finish()
     }

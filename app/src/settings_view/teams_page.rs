@@ -86,6 +86,11 @@ const TEAM_MEMBERS_HEADER_POSITION_ID: &str = "team_settings:team_members_header
 // Styling for team create page
 const TEAM_NAME_EDITOR_PLACEHOLDER_TEXT: &str = "Team name";
 const CREATE_TEAM_BUTTON_LEFT_PADDING: f32 = 10.;
+/// Fixed width for the team-name / invite-code inputs. A modest width keeps the
+/// adjacent "Create team" / "Join" button visible even when the settings pane is
+/// narrow (e.g. with Warp Drive open), instead of the input growing to fill the
+/// row and pushing the button off-screen.
+const TEAM_EDITOR_WIDTH: f32 = 240.;
 const CREATE_TEAM_DESCRIPTION: &str = "When you create a team, you can collaborate on agent-driven development by sharing cloud agent runs, environments, automations, and artifacts. You can also create a shared knowledge store for teammates and agents alike.";
 const JOIN_TEAM_DESCRIPTION: &str =
     "Have an invite code from an invite link or email? Enter it here to join an existing team.";
@@ -4905,14 +4910,13 @@ impl TeamsWidget {
         Flex::column()
             .with_child(
                 Flex::row()
-                    .with_main_axis_size(MainAxisSize::Max)
-                    .with_child(
-                        Shrinkable::new(
-                            1.,
-                            self.render_editor(appearance, view.create_team_editor.clone(), None),
-                        )
-                        .finish(),
-                    )
+                    .with_main_axis_size(MainAxisSize::Min)
+                    .with_cross_axis_alignment(CrossAxisAlignment::Center)
+                    .with_child(self.render_editor(
+                        appearance,
+                        view.create_team_editor.clone(),
+                        Some(TEAM_EDITOR_WIDTH),
+                    ))
                     .with_child(
                         Container::new(self.render_create_team_button(view, appearance, app))
                             .with_padding_left(CREATE_TEAM_BUTTON_LEFT_PADDING)
@@ -4944,14 +4948,13 @@ impl TeamsWidget {
         section.add_child(
             Container::new(
                 Flex::row()
-                    .with_main_axis_size(MainAxisSize::Max)
-                    .with_child(
-                        Shrinkable::new(
-                            1.,
-                            self.render_editor(appearance, view.join_team_editor.clone(), None),
-                        )
-                        .finish(),
-                    )
+                    .with_main_axis_size(MainAxisSize::Min)
+                    .with_cross_axis_alignment(CrossAxisAlignment::Center)
+                    .with_child(self.render_editor(
+                        appearance,
+                        view.join_team_editor.clone(),
+                        Some(TEAM_EDITOR_WIDTH),
+                    ))
                     .with_child(
                         Container::new(self.render_join_team_by_code_button(view, appearance, app))
                             .with_padding_left(CREATE_TEAM_BUTTON_LEFT_PADDING)

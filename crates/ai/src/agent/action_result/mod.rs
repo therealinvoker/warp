@@ -128,7 +128,9 @@ pub enum AIAgentActionResultType {
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
 pub enum ReadGithubPrResult {
     /// A JSON summary of the pull request.
-    Success { pr_json: String },
+    Success {
+        pr_json: String,
+    },
     Error(String),
     Cancelled,
 }
@@ -147,7 +149,9 @@ impl Display for ReadGithubPrResult {
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
 pub enum ListGithubPrCommentsResult {
     /// A JSON array of PR review comments.
-    Success { comments_json: String },
+    Success {
+        comments_json: String,
+    },
     Error(String),
     Cancelled,
 }
@@ -186,7 +190,9 @@ impl Display for CreateGithubPrResult {
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
 pub enum ReadGithubIssueResult {
     /// A JSON summary of the issue.
-    Success { issue_json: String },
+    Success {
+        issue_json: String,
+    },
     Error(String),
     Cancelled,
 }
@@ -205,7 +211,9 @@ impl Display for ReadGithubIssueResult {
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
 pub enum ListGithubIssuesResult {
     /// A JSON array of issues.
-    Success { issues_json: String },
+    Success {
+        issues_json: String,
+    },
     Error(String),
     Cancelled,
 }
@@ -917,9 +925,7 @@ impl AIAgentActionResultType {
                 "The local watchdog timed out while waiting for inbound events"
             }
             AIAgentActionResultType::ReadGithubPr(_) => "The GitHub pull request summary",
-            AIAgentActionResultType::ListGithubPrComments(_) => {
-                "The GitHub PR review comments"
-            }
+            AIAgentActionResultType::ListGithubPrComments(_) => "The GitHub PR review comments",
             AIAgentActionResultType::CreateGithubPr(_) => "The created GitHub pull request",
             AIAgentActionResultType::ReadGithubIssue(_) => "The GitHub issue",
             AIAgentActionResultType::ListGithubIssues(_) => "The GitHub issues list",
@@ -1004,9 +1010,7 @@ impl AIAgentActionResultType {
             | Self::CreateGithubPr(CreateGithubPrResult::Error(_))
             | Self::ReadGithubIssue(ReadGithubIssueResult::Error(_))
             | Self::ListGithubIssues(ListGithubIssuesResult::Error(_))
-            | Self::ReplyToPrComment(ReplyToPrCommentResult::Error(_)) => {
-                true
-            }
+            | Self::ReplyToPrComment(ReplyToPrCommentResult::Error(_)) => true,
             _ => false,
         }
     }

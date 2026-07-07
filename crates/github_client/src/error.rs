@@ -23,10 +23,7 @@ pub enum Error {
 
     /// The API returned a non-success status.
     #[error("GitHub API returned {status}: {message}")]
-    Status {
-        status: StatusCode,
-        message: String,
-    },
+    Status { status: StatusCode, message: String },
 }
 
 impl Error {

@@ -183,6 +183,12 @@ pub struct TabData {
     pub in_multi_selection: bool,
     /// True when this tab is pinned to the front of the tab list.
     pub pinned: bool,
+    /// Workspace-view folder (key, label) this tab should be grouped under
+    /// until its terminal reports a real working directory. Set when a new
+    /// terminal tab inherits the previous tab's directory, so it doesn't flash
+    /// in the "Cloud" bucket before the shell bootstraps. Cleared implicitly:
+    /// once the working directory resolves it takes precedence over this hint.
+    pub pending_workspace_folder: Option<(String, String)>,
 }
 
 const TAB_COLOR_ICON_PATH: &str = "bundled/svg/ellipse.svg";
@@ -203,6 +209,7 @@ impl TabData {
             group_id: None,
             in_multi_selection: false,
             pinned: false,
+            pending_workspace_folder: None,
         }
     }
 

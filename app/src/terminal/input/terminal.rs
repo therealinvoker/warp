@@ -1,6 +1,6 @@
 use warp_core::settings::Setting;
 use warpui::elements::{
-    Border, Clipped, Container, CrossAxisAlignment, DropTarget, Element, Flex, Hoverable,
+    Clipped, ConstrainedBox, Container, CrossAxisAlignment, DropTarget, Element, Flex, Hoverable,
     MainAxisSize, ParentElement, SavePosition, Stack,
 };
 use warpui::presenter::ChildView;
@@ -8,7 +8,7 @@ use warpui::{AppContext, SingletonEntity};
 
 use super::common::{
     add_command_xray_overlay, add_input_suggestions_overlays, add_voltron_overlay,
-    add_workflow_info_overlay, should_show_terminal_input_message_bar,
+    add_workflow_info_overlay, floating_input_box, should_show_terminal_input_message_bar,
     wrap_input_with_terminal_padding_and_focus_handler,
 };
 use super::{
@@ -19,10 +19,10 @@ use crate::appearance::Appearance;
 use crate::context_chips::spacing;
 use crate::features::FeatureFlag;
 use crate::settings::{AISettings, AppEditorSettings, InputModeSettings};
-use crate::terminal::block_list_settings::BlockListSettings;
 use crate::terminal::block_list_viewport::InputMode;
 use crate::terminal::settings::TerminalSettings;
 use crate::terminal::view::TerminalAction;
+use crate::view_components::action_button::ButtonSize;
 
 impl Input {
     /// Renders the terminal mode input when `FeatureFlag::AgentView` is enabled and there is no
@@ -54,11 +54,28 @@ impl Input {
             }
         }
 
+        // Persistent session-mode segmented control ("Agent | Cloud Agent | Terminal").
+        // Only shown when agent modes are actually usable so the plain terminal input is
+        // left untouched when AI is disabled.
+        let show_session_mode_control =
+            FeatureFlag::AgentView.is_enabled() && AISettings::as_ref(app).is_any_ai_enabled(app);
+        let show_message_bar = should_show_terminal_input_message_bar(&model, app);
+
         let prompt_elements = self
             .prompt_render_helper
             .render_universal_developer_input_prompt(&model, appearance, app);
 
-        column.add_child(prompt_elements);
+        // Once bootstrapped, the prompt row is just context chips (working directory, git
+        // branch, ...). When the session-mode footer is shown, move those chips into the
+        // footer below the editor so their placement matches the Agent footer; the
+        // pre-bootstrap "Starting…" status stays above the editor.
+        let move_chips_to_footer = show_session_mode_control && model.block_list().is_bootstrapped();
+        let mut footer_prompt_chips = None;
+        if move_chips_to_footer {
+            footer_prompt_chips = Some(prompt_elements);
+        } else {
+            column.add_child(prompt_elements);
+        }
 
         let terminal_spacing = TerminalSettings::as_ref(app)
             .terminal_input_spacing(appearance.line_height_ratio(), app);
@@ -70,13 +87,6 @@ impl Input {
                 )
                 .finish(),
         );
-
-        // Persistent session-mode segmented control ("Agent | Cloud Agent | Terminal").
-        // Only shown when agent modes are actually usable so the plain terminal input is
-        // left untouched when AI is disabled.
-        let show_session_mode_control =
-            FeatureFlag::AgentView.is_enabled() && AISettings::as_ref(app).is_any_ai_enabled(app);
-        let show_message_bar = should_show_terminal_input_message_bar(&model, app);
 
         if show_session_mode_control {
             let include_cloud_agent = FeatureFlag::CloudMode.is_enabled();
@@ -90,43 +100,38 @@ impl Input {
                     appearance,
                 ));
 
-            // Show the "⌘↑ attach `?` output as agent context" hint inline, to the right of the
-            // Terminal segment, instead of on its own row below the control.
-            if show_message_bar {
-                mode_row = mode_row.with_child(
-                    Container::new(
-                        Clipped::new(ChildView::new(&self.terminal_input_message_bar).finish())
-                            .finish(),
-                    )
-                    .with_margin_left(8.)
-                    .finish(),
-                );
+            // Context chips (working directory, git branch, ...) moved down from the prompt
+            // row, placed to the right of the segmented control to mirror the Agent footer.
+            if let Some(chips) = footer_prompt_chips.take() {
+                mode_row =
+                    mode_row.with_child(Container::new(chips).with_margin_left(8.).finish());
             }
 
             // Match the Agent footer's vertical spacing exactly: no top padding (the gap from the
             // editor comes from the editor's own `margin_top`, shared with the agent render path)
             // and an 8px bottom padding identical to the agent footer container
             // (`Container::new(content).with_padding_bottom(8.0)` in agent_input_footer/mod.rs).
+            //
+            // The agent footer's row height is driven by its `AgentInputButton`-sized chips
+            // (model selector, send, etc.), which vertically center the segmented control. The
+            // terminal footer has no such chips, so reserve the same row height and center the
+            // control here — otherwise it collapses to the control's own height and sits lower
+            // (closer to the pane bottom) than in agent mode.
+            let footer_row_height = ButtonSize::AgentInputButton.button_height(appearance, app);
             column.add_child(
-                Container::new(mode_row.finish())
-                    .with_padding_bottom(8.0)
-                    .finish(),
+                Container::new(
+                    ConstrainedBox::new(mode_row.finish())
+                        .with_min_height(footer_row_height)
+                        .finish(),
+                )
+                .with_padding_bottom(8.0)
+                .finish(),
             );
-        }
-
-        if show_message_bar && !show_session_mode_control {
-            // Fallback: keep the hint on its own row below the input when the segmented control
-            // isn't shown, so the hint's Terminal-mode visibility matches its prior condition.
-            column.add_child(
-                Clipped::new(ChildView::new(&self.terminal_input_message_bar).finish()).finish(),
-            );
-        } else if !show_message_bar
-            && !show_session_mode_control
-            && !(matches!(input_mode, InputMode::PinnedToTop)
-                && self
-                    .suggestions_mode_model
-                    .as_ref(app)
-                    .is_inline_menu_open())
+        } else if !(matches!(input_mode, InputMode::PinnedToTop)
+            && self
+                .suggestions_mode_model
+                .as_ref(app)
+                .is_inline_menu_open())
         {
             column.add_child(
                 Container::new(Flex::row().finish())
@@ -200,18 +205,19 @@ impl Input {
             })
             .finish();
 
-        let show_block_dividers = *BlockListSettings::as_ref(app).show_block_dividers.value();
+        let input = floating_input_box(
+            hoverable_input,
+            styles::default_border_color(appearance.theme()),
+            appearance,
+        )
+        .with_padding_bottom(4.)
+        .finish();
 
-        let input = if show_block_dividers {
-            Container::new(hoverable_input)
-                .with_border(
-                    Border::top(1.)
-                        .with_border_color(styles::default_border_color(appearance.theme())),
-                )
-                .finish()
-        } else {
-            hoverable_input
-        };
+        // Contextual hints (e.g. "⌘↑ attach output as agent context") render above the input
+        // box here, matching where the Agent input renders its message bar.
+        let message_bar_above = show_message_bar.then(|| {
+            Clipped::new(ChildView::new(&self.terminal_input_message_bar).finish()).finish()
+        });
 
         let mut column = Flex::column();
         let is_slash_commands = self.suggestions_mode_model.as_ref(app).is_slash_commands();
@@ -252,6 +258,7 @@ impl Input {
                             None
                         },
                         Some(ChildView::new(&self.agent_status_view).finish()),
+                        message_bar_above,
                         Some(input),
                     ]
                     .into_iter()
@@ -261,6 +268,7 @@ impl Input {
             InputMode::PinnedToTop => {
                 column.add_children(
                     [
+                        message_bar_above,
                         Some(input),
                         Some(ChildView::new(&self.agent_status_view).finish()),
                         if hide_menu {
@@ -312,7 +320,15 @@ impl Input {
                     }
                 }
 
-                column.add_children([ChildView::new(&self.agent_status_view).finish(), input]);
+                column.add_children(
+                    [
+                        Some(ChildView::new(&self.agent_status_view).finish()),
+                        message_bar_above,
+                        Some(input),
+                    ]
+                    .into_iter()
+                    .flatten(),
+                );
 
                 if !hide_menu {
                     if is_slash_commands && should_render_below {
@@ -345,7 +361,10 @@ pub mod styles {
     use pathfinder_color::ColorU;
     use warp_core::ui::theme::WarpTheme;
 
+    use crate::ui_components::blended_colors;
+
     pub fn default_border_color(theme: &WarpTheme) -> ColorU {
-        theme.outline().into()
+        // Match the Agent input box border (`agent::styles::default_border_color`).
+        blended_colors::neutral_2(theme)
     }
 }

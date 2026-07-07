@@ -90,10 +90,10 @@ pub(crate) mod environments_page;
 mod execution_profile_view;
 mod features;
 mod features_page;
-#[cfg(feature = "github_integration")]
-pub mod github_page;
 #[cfg(feature = "github_automations")]
 pub mod github_automations;
+#[cfg(feature = "github_integration")]
+pub mod github_page;
 pub(crate) mod handoff_environment_creation_modal;
 pub mod keybindings;
 mod main_page;
@@ -1276,9 +1276,8 @@ impl SettingsView {
 
         // GitHub automations page (gated on GithubAutomations).
         #[cfg(feature = "github_automations")]
-        let github_automations_page_handle = FeatureFlag::GithubAutomations
-            .is_enabled()
-            .then(|| {
+        let github_automations_page_handle =
+            FeatureFlag::GithubAutomations.is_enabled().then(|| {
                 ctx.add_typed_action_view(
                     github_automations::list_page::GithubAutomationsListPageView::new,
                 )

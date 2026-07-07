@@ -12,7 +12,7 @@ mod error;
 pub mod token;
 pub mod types;
 
-pub use client::{GithubClient, DEFAULT_BASE_URL, GITHUB_API_VERSION};
+pub use client::{DEFAULT_BASE_URL, GITHUB_API_VERSION, GithubClient};
 pub use error::{Error, Result};
 pub use token::{GithubToken, TokenProvider};
 

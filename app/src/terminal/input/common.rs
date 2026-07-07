@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use pathfinder_color::ColorU;
 use pathfinder_geometry::vector::vec2f;
 use vim::vim::{VimMode, VimState};
 use warp_completer::completer::Description;
@@ -152,6 +153,34 @@ pub(super) fn wrap_input_with_terminal_padding_and_focus_handler(
             .with_padding_left(terminal_padding)
             .finish()
     }
+}
+
+/// Shared corner radius (px) for the floating input box.
+pub(super) const FLOATING_INPUT_CORNER_RADIUS: f32 = 8.;
+/// Shared edge margin (px) so the floating input box sits off the surrounding edges.
+pub(super) const FLOATING_INPUT_MARGIN: f32 = 6.;
+
+/// Wraps input content in the shared "floating rounded box" chrome used by every
+/// input variant (agent, cloud agent, terminal, CLI agent): a slightly
+/// lighter-gray fill, rounded corners, an all-around border, and a small margin
+/// so the box floats off the surrounding edges. Returned unfinished so callers
+/// can add mode-specific padding/background overrides before finishing.
+pub(super) fn floating_input_box(
+    content: Box<dyn Element>,
+    border_color: ColorU,
+    appearance: &Appearance,
+) -> Container {
+    let theme = appearance.theme();
+    Container::new(content)
+        .with_background(theme.surface_overlay_2())
+        .with_border(Border::all(1.).with_border_color(border_color))
+        .with_corner_radius(CornerRadius::with_all(Radius::Pixels(
+            FLOATING_INPUT_CORNER_RADIUS,
+        )))
+        .with_margin_left(FLOATING_INPUT_MARGIN)
+        .with_margin_right(FLOATING_INPUT_MARGIN)
+        .with_margin_top(FLOATING_INPUT_MARGIN)
+        .with_margin_bottom(FLOATING_INPUT_MARGIN)
 }
 
 /// Renders the selected workflow info overlay over the input.

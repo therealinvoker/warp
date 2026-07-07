@@ -119,8 +119,9 @@ use warpui::{
 use self::vertical_tabs::telemetry::{VerticalTabsDisplayOption, VerticalTabsTelemetryEvent};
 use self::vertical_tabs::{
     htab_group_position_id, pane_summary_kind, render_detail_sidecar, render_settings_popup,
-    render_summary_pane_kind_icons, show_before_indicator, vtab_group_position_id, SummaryPaneKind,
-    SummaryPaneKindIcons, VerticalTabsPanelState, VERTICAL_TABS_SETTINGS_BUTTON_POSITION_ID,
+    render_summary_pane_kind_icons, show_before_indicator, vtab_group_position_id,
+    workspace_folder_for_tab, SummaryPaneKind, SummaryPaneKindIcons, VerticalTabsPanelState,
+    VERTICAL_TABS_SETTINGS_BUTTON_POSITION_ID,
 };
 #[cfg(all(feature = "local_fs", not(target_family = "wasm")))]
 use super::action::AutoCloudHandoffTrigger;
@@ -12596,9 +12597,31 @@ impl Workspace {
         let active_tab = self.tabs.get(self.active_tab_index);
         let active_tab_selected_color = active_tab.map(|tab| tab.selected_color);
         let active_tab_default_color = active_tab.and_then(|tab| tab.default_directory_color);
+        // Capture the active tab's pane group so we can inherit its Workspace-view
+        // folder as a hint for the new tab (see `inherited_folder` below).
+        let active_tab_pane_group = active_tab.map(|tab| tab.pane_group.clone());
 
         let is_new_terminal = matches!(panes_layout, PanesLayout::SingleTerminal(_));
         let is_restoration = matches!(panes_layout, PanesLayout::Snapshot(_));
+
+        // When a new terminal tab inherits the previous tab's directory, seed it
+        // with that tab's Workspace-view folder so it groups correctly right away
+        // instead of flashing in the "Cloud" bucket until the shell bootstraps.
+        let inherited_folder = if is_new_terminal {
+            let wd_config = &SessionSettings::as_ref(ctx).working_directory_config;
+            let inherits_previous_dir = wd_config.config_for_source(NewSessionSource::Tab).mode
+                == WorkingDirectoryMode::PreviousDir;
+            if inherits_previous_dir {
+                active_tab_pane_group.as_ref().and_then(|handle| {
+                    workspace_folder_for_tab(self, handle.id(), handle.as_ref(ctx), ctx)
+                })
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         let new_pane_group = ctx.add_typed_action_view(|ctx| {
             let mut pane_group = PaneGroup::new_with_panes_layout(
                 self.tips_completed.clone(),
@@ -12629,6 +12652,9 @@ impl Workspace {
             self.new_tab_index_and_group(ctx)
         };
         self.tabs.insert(insert_idx, TabData::new(new_pane_group));
+        if let Some(folder) = inherited_folder {
+            self.tabs[insert_idx].pending_workspace_folder = Some(folder);
+        }
         self.tab_mru_order
             .push(self.tabs[insert_idx].pane_group.id());
         self.activate_tab_internal(insert_idx, ctx);
@@ -26300,10 +26326,10 @@ impl View for Workspace {
                     .finish(),
                 OffsetPositioning::offset_from_save_position_element(
                     VERTICAL_TABS_SETTINGS_BUTTON_POSITION_ID,
-                    vec2f(0., 4.),
+                    vec2f(0., -4.),
                     PositionedElementOffsetBounds::WindowByPosition,
-                    PositionedElementAnchor::BottomLeft,
-                    ChildAnchor::TopLeft,
+                    PositionedElementAnchor::TopLeft,
+                    ChildAnchor::BottomLeft,
                 ),
             );
         }

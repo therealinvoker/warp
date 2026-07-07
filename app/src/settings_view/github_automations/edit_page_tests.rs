@@ -1,7 +1,11 @@
 use super::*;
 use crate::github::automations::{GithubAutomationActionType, GithubAutomationTriggerType};
 
-fn values<'a>(state: &'a AutomationFormState, name: &str, prompt: &str) -> AutomationFormValues<'a> {
+fn values<'a>(
+    state: &'a AutomationFormState,
+    name: &str,
+    prompt: &str,
+) -> AutomationFormValues<'a> {
     AutomationFormValues {
         state,
         name: name.to_string(),
@@ -37,7 +41,10 @@ fn valid_prompt_automation_builds_input() {
     let input = v.validate(&[]).unwrap();
     assert_eq!(input.name, "My automation");
     assert!(input.enabled);
-    assert_eq!(input.trigger.event_type, GithubAutomationTriggerType::PrOpened);
+    assert_eq!(
+        input.trigger.event_type,
+        GithubAutomationTriggerType::PrOpened
+    );
     assert_eq!(input.action.action_type, GithubAutomationActionType::Prompt);
     assert_eq!(input.action.prompt.as_deref(), Some("review this PR"));
     assert!(input.id.is_none());

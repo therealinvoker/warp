@@ -157,7 +157,10 @@ async fn check_runs_unwraps_envelope() {
         .await;
 
     let client = client(&server, StubTokenProvider::new("tok"));
-    let runs = client.list_check_runs_for_ref("o", "r", "abc").await.unwrap();
+    let runs = client
+        .list_check_runs_for_ref("o", "r", "abc")
+        .await
+        .unwrap();
     assert_eq!(runs.len(), 2);
     assert_eq!(runs[0].conclusion.as_deref(), Some("success"));
     assert_eq!(runs[1].status, "in_progress");
