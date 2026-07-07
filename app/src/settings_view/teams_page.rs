@@ -33,8 +33,8 @@ use warpui::{
 
 use super::admin_actions::AdminActions;
 use super::settings_page::{
-    render_customer_type_badge, render_separator, render_sub_header, MatchData, PageType,
-    SettingsPageMeta, SettingsPageViewHandle, SettingsWidget,
+    render_customer_type_badge, render_separator, MatchData, PageType, SettingsPageMeta,
+    SettingsPageViewHandle, SettingsWidget,
 };
 use super::tab_menu::Tabs;
 use super::transfer_ownership_confirmation_modal::{
@@ -179,6 +179,12 @@ pub enum TeamsPageAction {
     CopyLink(String),
     CreateTeam,
     JoinTeam,
+    /// Switch the settings page (and the app's current workspace) to the given
+    /// team workspace, so a user who belongs to teams can reach and manage them
+    /// even while viewing in Personal mode.
+    SwitchToWorkspace {
+        workspace_uid: WorkspaceUid,
+    },
     ChangeInviteViewOption(TeamsInviteOption),
     DeletePendingEmailInvitation {
         team_uid: ServerId,
@@ -550,6 +556,9 @@ pub struct TeamsPageView {
     cloud_model: ModelHandle<CloudModel>,
     invite_view: TeamsInviteOption,
     team_members_mouse_state_handles: Vec<MouseStateHandle>,
+    /// One hover handle per workspace pill in the inline team switcher; kept in
+    /// sync with `user_workspaces.workspaces()` so handles are stable per render.
+    team_switcher_mouse_state_handles: Vec<MouseStateHandle>,
     team_approved_domains_mouse_state_handles: Vec<MouseStateHandle>,
     team_action_confirmation_dialog: ViewHandle<CloudActionConfirmationDialog>,
     show_team_action_confirmation_dialog: bool,
@@ -603,6 +612,9 @@ impl TypedActionView for TeamsPageView {
             TeamsPageAction::LeaveTeam => self.leave_team(ctx),
             TeamsPageAction::CreateTeam => self.create_team(ctx),
             TeamsPageAction::JoinTeam => self.join_team(ctx),
+            TeamsPageAction::SwitchToWorkspace { workspace_uid } => {
+                self.switch_to_workspace(*workspace_uid, ctx)
+            }
             TeamsPageAction::RemoveUserFromTeam { user_uid, team_uid } => {
                 if FeatureFlag::BillingAndUsagePageV2.is_enabled() {
                     self.show_team_action_confirmation(
@@ -1018,7 +1030,10 @@ impl TeamsPageView {
             }
         });
 
-        let page = PageType::new_monolith(TeamsWidget::default(), None, true);
+        // Render the standard 23px section title ("Teams") via the shared page-title
+        // path, matching every other settings section (GitHub, MCP Servers, etc.),
+        // rather than a smaller in-widget header.
+        let page = PageType::new_monolith(TeamsWidget::default(), Some("Teams"), true);
         TeamsPageView {
             page,
             auth_state: AuthStateProvider::as_ref(ctx).get().clone(),
@@ -1043,6 +1058,7 @@ impl TeamsPageView {
             cloud_model,
             invite_view: TeamsInviteOption::default(),
             team_members_mouse_state_handles,
+            team_switcher_mouse_state_handles: Vec::new(),
             team_approved_domains_mouse_state_handles,
             clipped_scroll_state: Default::default(),
             team_action_confirmation_dialog,
@@ -1557,9 +1573,21 @@ impl TeamsPageView {
 
     fn update_team_members_state(&mut self, ctx: &mut ViewContext<Self>) {
         self.update_team_member_mouse_state_handles(ctx);
+        self.update_team_switcher_mouse_state_handles(ctx);
         self.update_email_validator(ctx);
         self.update_team_name(ctx);
         self.update_email_editor_interaction_state(ctx);
+    }
+
+    /// Keeps one stable hover handle per workspace pill in the inline team
+    /// switcher, resized whenever the user's workspace list changes.
+    fn update_team_switcher_mouse_state_handles(&mut self, ctx: &mut ViewContext<Self>) {
+        let workspace_count = self.user_workspaces.as_ref(ctx).workspaces().len();
+        if self.team_switcher_mouse_state_handles.len() != workspace_count {
+            self.team_switcher_mouse_state_handles =
+                (0..workspace_count).map(|_| Default::default()).collect();
+        }
+        ctx.notify();
     }
 
     /// Disables the invite-by-email chip editor whenever the grow-team
@@ -1706,6 +1734,15 @@ impl TeamsPageView {
                 manager.leave_team(team_uid, CloudObjectEventEntrypoint::TeamSettings, ctx)
             });
         }
+    }
+
+    /// Makes `workspace_uid` the current workspace, flipping the Teams page to
+    /// that team's management view. Used by the inline team switcher.
+    fn switch_to_workspace(&mut self, workspace_uid: WorkspaceUid, ctx: &mut ViewContext<Self>) {
+        self.user_workspaces.update(ctx, |user_workspaces, ctx| {
+            user_workspaces.set_current_workspace_uid(workspace_uid, ctx);
+        });
+        ctx.notify();
     }
 
     fn create_team(&mut self, ctx: &mut ViewContext<Self>) {
@@ -2754,10 +2791,14 @@ impl TeamsWidget {
             left_side.add_child(ChildView::new(&view.rename_team_editor).finish());
         } else {
             left_side.add_child(
-                Text::new_inline(team.name.clone(), appearance.ui_font_family(), 24.)
-                    .with_style(Properties::default().weight(Weight::Bold))
-                    .with_color(appearance.theme().active_ui_text_color().into())
-                    .finish(),
+                Text::new_inline(
+                    team.name.clone(),
+                    appearance.ui_font_family(),
+                    SUBSECTION_HEADER_FONT_SIZE,
+                )
+                .with_style(Properties::default().weight(Weight::Bold))
+                .with_color(appearance.theme().active_ui_text_color().into())
+                .finish(),
             );
         }
 
@@ -4824,8 +4865,9 @@ impl TeamsWidget {
     ) -> Box<dyn Element> {
         let mut page = Flex::column();
 
-        // Title, subtitle, and description
-        page.add_child(render_sub_header(appearance, "Teams".to_string(), None));
+        // Subtitle and description. The "Teams" section title is rendered at the
+        // standard 23px size by the page framework (see `PageType::new_monolith`
+        // with `Some("Teams")`), so we don't render our own smaller title here.
         page.add_child(
             self.render_sub_header_with_subtext_color(appearance, "Create a team".to_string()),
         );
@@ -5206,6 +5248,87 @@ impl TeamsWidget {
         }
     }
 
+    /// Inline switcher listing every team the user belongs to. Lets a user who
+    /// is viewing in Personal mode (or on a different team) jump straight to a
+    /// team's management view instead of being stuck on the "Create a team"
+    /// form. Returns `None` when the user belongs to no teams.
+    fn render_team_switcher(
+        &self,
+        view: &TeamsPageView,
+        appearance: &Appearance,
+        app: &AppContext,
+    ) -> Option<Box<dyn Element>> {
+        let user_workspaces = view.user_workspaces.as_ref(app);
+        let workspaces = user_workspaces.workspaces();
+        if workspaces.is_empty() {
+            return None;
+        }
+        let current_uid = user_workspaces.current_workspace().map(|w| w.uid);
+
+        let mut row = Flex::row()
+            .with_main_axis_size(MainAxisSize::Min)
+            .with_cross_axis_alignment(CrossAxisAlignment::Center);
+        for (index, workspace) in workspaces.iter().enumerate() {
+            let selected = current_uid == Some(workspace.uid);
+            let variant = if selected {
+                ButtonVariant::Accent
+            } else {
+                ButtonVariant::Outlined
+            };
+            let handle = view
+                .team_switcher_mouse_state_handles
+                .get(index)
+                .cloned()
+                .unwrap_or_default();
+            let mut button = appearance
+                .ui_builder()
+                .button(variant, handle)
+                .with_centered_text_label(workspace.name.clone())
+                .with_style(UiComponentStyles {
+                    height: Some(32.),
+                    ..Default::default()
+                });
+            if selected {
+                button = button.with_style(UiComponentStyles {
+                    font_color: Some(
+                        appearance
+                            .theme()
+                            .main_text_color(appearance.theme().accent())
+                            .into_solid(),
+                    ),
+                    ..Default::default()
+                });
+            }
+            let built = button.build();
+            let element = if selected {
+                built.finish()
+            } else {
+                let workspace_uid = workspace.uid;
+                built
+                    .with_cursor(Cursor::PointingHand)
+                    .on_click(move |ctx, _, _| {
+                        ctx.dispatch_typed_action(TeamsPageAction::SwitchToWorkspace {
+                            workspace_uid,
+                        })
+                    })
+                    .finish()
+            };
+            row.add_child(
+                Container::new(element)
+                    .with_padding_right(8.)
+                    .with_padding_top(8.)
+                    .finish(),
+            );
+        }
+
+        Some(
+            Flex::column()
+                .with_child(self.render_subsubsection_header("Your teams".to_owned(), appearance))
+                .with_child(Container::new(row.finish()).with_padding_top(4.).finish())
+                .finish(),
+        )
+    }
+
     fn render_create_team_button(
         &self,
         view: &TeamsPageView,
@@ -5347,8 +5470,27 @@ impl SettingsWidget for TeamsWidget {
                 .finish()
         };
 
+        // Show the inline team switcher (when the user belongs to teams) above
+        // the create/manage content, so existing teams are always reachable —
+        // even while viewing in Personal mode.
+        let switcher = if NetworkStatus::as_ref(app).is_online() {
+            self.render_team_switcher(view, appearance, app)
+        } else {
+            None
+        };
+
+        let mut content_column = Flex::column();
+        if let Some(switcher) = switcher {
+            content_column.add_child(
+                Container::new(switcher)
+                    .with_padding_bottom(20.)
+                    .finish(),
+            );
+        }
+        content_column.add_child(content);
+
         let mut stack = Stack::new();
-        stack.add_child(Flex::column().with_child(content).finish());
+        stack.add_child(content_column.finish());
 
         if view.transfer_ownership_modal_state.is_open() {
             stack.add_positioned_overlay_child(

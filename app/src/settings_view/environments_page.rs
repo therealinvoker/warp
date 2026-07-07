@@ -31,7 +31,7 @@ use super::delete_environment_confirmation_dialog::{
 };
 use super::settings_page::{
     MatchData, PageType, SettingsPageEvent, SettingsPageMeta, SettingsPageViewHandle,
-    SettingsWidget, CONTENT_FONT_SIZE,
+    SettingsWidget, CONTENT_FONT_SIZE, HEADER_FONT_SIZE,
 };
 use super::update_environment_form::{
     EnvironmentFormInitArgs, EnvironmentFormValues, UpdateEnvironmentForm,
@@ -1068,12 +1068,9 @@ impl EnvironmentsPageWidget {
             .with_main_axis_size(MainAxisSize::Min)
             .with_spacing(SECTION_SPACING);
 
-        // Page title + description
-        let title = Text::new(
-            PAGE_TITLE_TEXT,
-            appearance.ui_font_family(),
-            appearance.ui_font_size() * 1.5,
-        )
+        // Page title + description. Uses the shared 23px page-title size so it
+        // matches every other settings section (GitHub, Teams, etc.).
+        let title = Text::new(PAGE_TITLE_TEXT, appearance.ui_font_family(), HEADER_FONT_SIZE)
         .with_style(Properties::default().weight(Weight::Bold))
         .with_color(theme.active_ui_text_color().into())
         .finish();

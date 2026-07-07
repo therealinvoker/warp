@@ -1494,7 +1494,7 @@ impl AppearanceSettingsPageView {
             vec![Box::new(AltScreenPaddingWidget::default())],
         ));
 
-        PageType::new_categorized(categories, None)
+        PageType::new_categorized(categories, Some("Appearance"))
     }
 
     fn set_alt_screen_padding_editor_text(&mut self, ctx: &mut ViewContext<Self>) {

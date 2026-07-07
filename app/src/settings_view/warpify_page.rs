@@ -161,7 +161,7 @@ impl WarpifyPageView {
         {
             categories.push(
                 Category::new("SSH", vec![Box::new(SSHWidget::default())])
-                    .with_subtitle("Warpify your interactive SSH sessions."),
+                    .with_subtitle("Bangify your interactive SSH sessions."),
             );
         }
         PageType::new_categorized(categories, None)
@@ -481,7 +481,7 @@ impl TitleWidget {
     fn render_top_of_page(&self, appearance: &Appearance, _app: &AppContext) -> Box<dyn Element> {
         let warpify_description = vec![
             FormattedTextFragment::plain_text(
-                "Configure whether Warp attempts to “Warpify” (add support for blocks, \
+                "Configure whether Warp attempts to “Bangify” (add support for blocks, \
                     input modes, etc) certain shells. ",
             ),
             FormattedTextFragment::hyperlink(
@@ -505,7 +505,7 @@ impl TitleWidget {
         .finish();
 
         Flex::column()
-            .with_child(render_page_title("Warpify", HEADER_FONT_SIZE, appearance))
+            .with_child(render_page_title("Bangify", HEADER_FONT_SIZE, appearance))
             .with_child(warpify_description)
             .finish()
     }
@@ -627,7 +627,7 @@ impl SettingsWidget for SSHWidget {
             &WarpifySettings::as_ref(app).enable_ssh_warpification,
             move || {
                 render_body_item::<WarpifyPageAction>(
-                    "Warpify SSH Sessions".into(),
+                    "Bangify SSH Sessions".into(),
                     None,
                     LocalOnlyIconState::for_setting(
                         EnableSshWarpification::storage_key(),

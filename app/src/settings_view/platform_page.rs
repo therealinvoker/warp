@@ -23,7 +23,7 @@ use super::platform::{
 };
 use super::settings_page::{
     MatchData, PageType, SettingsPageMeta, SettingsPageViewHandle, SettingsWidget,
-    CONTENT_FONT_SIZE, SUBHEADER_FONT_SIZE,
+    CONTENT_FONT_SIZE, HEADER_FONT_SIZE, SUBHEADER_FONT_SIZE,
 };
 use super::SettingsSection;
 use crate::appearance::Appearance;
@@ -524,11 +524,15 @@ impl PlatformPageWidget {
             Flex::row()
                 .with_cross_axis_alignment(CrossAxisAlignment::Center)
                 .with_child(
-                    Text::new_inline("Oz Cloud API Keys", appearance.ui_font_family(), 16.)
-                        .with_style(Properties::default().weight(Weight::Bold))
-                        .with_color(appearance.theme().active_ui_text_color().into())
-                        .with_clip(ClipConfig::end())
-                        .finish(),
+                    Text::new_inline(
+                        "Oz Cloud API Keys",
+                        appearance.ui_font_family(),
+                        HEADER_FONT_SIZE,
+                    )
+                    .with_style(Properties::default().weight(Weight::Bold))
+                    .with_color(appearance.theme().active_ui_text_color().into())
+                    .with_clip(ClipConfig::end())
+                    .finish(),
                 )
                 .with_child(Shrinkable::new(1.0, Empty::new().finish()).finish())
                 .with_child(

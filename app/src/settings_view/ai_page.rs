@@ -44,7 +44,7 @@ use super::remove_custom_endpoint_confirmation_dialog::{
 };
 use super::set_default_model_modal::{SetDefaultModelModalBody, SetDefaultModelModalBodyEvent};
 use super::settings_page::{
-    build_sub_header, build_toggle_element, render_body_item_label,
+    build_page_title_header, build_sub_header, build_toggle_element, render_body_item_label,
     render_body_item_label_with_icon, render_custom_size_header, render_dropdown_item,
     render_dropdown_item_label, render_full_pane_width_ai_button, render_input_list,
     render_separator, render_settings_info_banner, InputListItem, LocalOnlyIconState, MatchData,
@@ -166,7 +166,10 @@ use crate::{
 };
 
 const CONTENT_FONT_SIZE: f32 = 12.;
-const PRIMARY_HEADER_FONT_SIZE: f32 = 24.;
+/// Matches the shared settings page-title size (`settings_page::HEADER_FONT_SIZE`)
+/// so this page's "Warp Agent" heading is the same size as every other settings
+/// section title (GitHub, Teams, MCP Servers, etc.).
+const PRIMARY_HEADER_FONT_SIZE: f32 = 23.;
 
 const AI_SETTINGS_DROPDOWN_WIDTH: f32 = 250.;
 const AI_SETTINGS_DROPDOWN_MAX_HEIGHT: f32 = 250.;
@@ -592,7 +595,7 @@ pub fn init_actions_from_parent_view<T: Action + Clone>(
     ToggleSettingActionPair::add_toggle_setting_action_pairs_as_bindings(
         vec![
             ToggleSettingActionPair::new(
-                "Warp credit fallback",
+                "Bang credit fallback",
                 builder(SettingsAction::AI(
                     AISettingsPageAction::ToggleCanUseWarpCreditsForFallback,
                 )),
@@ -2184,7 +2187,7 @@ impl AISettingsPageView {
         let current_default = Self::active_base_model_display_name(ctx);
         let description = format!(
             "You added your own {provider_name} API key, but your default model is currently set \
-             to {current_default}, which won't work without Warp credits. Would you like to change \
+             to {current_default}, which won't work without Bang credits. Would you like to change \
              your default model?"
         );
         self.show_set_default_model_modal(description, choices, ctx);
@@ -2230,7 +2233,7 @@ impl AISettingsPageView {
         let current_default = Self::active_base_model_display_name(ctx);
         let description = format!(
             "You added the \"{}\" custom endpoint, but your default model is currently set to \
-             {current_default}, which won't work without Warp credits. Would you like to change \
+             {current_default}, which won't work without Bang credits. Would you like to change \
              your default model?",
             endpoint.name
         );
@@ -2811,7 +2814,7 @@ impl AISettingsPageView {
                 }
             }
             Some(AISubpage::WarpAgent) => {
-                // Oz page: global toggle + Active AI + Input + Other
+                // Oz page: global toggle + Custom inference (top) + Active AI + Input + Other
                 widgets.push(Box::new(GlobalAIWidget::default()));
                 if ai_settings
                     .intelligent_autosuggestions_enabled_internal
@@ -2842,12 +2845,17 @@ impl AISettingsPageView {
                 if voice_supported {
                     widgets.push(Box::new(VoiceWidget::default()));
                 }
-                widgets.push(Box::new(CloudHandoffWidget::default()));
-                widgets.push(Box::new(ApiKeysWidget::new(ctx)));
-                widgets.push(Box::new(AwsBedrockWidget::new(ctx)));
+                // Custom inference and its follow-ups (Custom Routers, then Cloud
+                // handoff) sit directly under the "Agent" title/toggle. Inserted
+                // after the last `ai_settings` borrow to avoid aliasing ctx.
+                widgets.insert(1, Box::new(ApiKeysWidget::new(ctx)));
+                let mut top_index = 2;
                 if FeatureFlag::CustomModelRouters.is_enabled() {
-                    widgets.push(Box::new(CustomModelRoutersWidget));
+                    widgets.insert(top_index, Box::new(CustomModelRoutersWidget));
+                    top_index += 1;
                 }
+                widgets.insert(top_index, Box::new(CloudHandoffWidget::default()));
+                widgets.push(Box::new(AwsBedrockWidget::new(ctx)));
                 widgets.push(Box::new(AgentAttributionWidget::default()));
                 widgets.push(Box::new(OtherAIWidget::default()));
                 if FeatureFlag::AgentModeComputerUse.is_enabled() {
@@ -4702,6 +4710,25 @@ fn render_ai_list(
         .finish()
 }
 
+/// Renders a widget's primary header. When the AI page is showing a single
+/// concrete subpage (Profiles, Knowledge, Third party CLI agents, …) this header
+/// is that subpage's title, so it uses the standard 23px page-title size to match
+/// every other settings section. When the page shows every widget at once (the
+/// search / show-all view, `active_subpage == None`) the same header acts as one
+/// section among many, so it stays at the 16px subheader size.
+fn subpage_primary_header(
+    view: &AISettingsPageView,
+    appearance: &Appearance,
+    text: impl Into<Cow<'static, str>>,
+    color_override: Option<crate::themes::theme::Fill>,
+) -> Container {
+    if view.active_subpage.is_some() {
+        build_page_title_header(appearance, text, color_override)
+    } else {
+        build_sub_header(appearance, text, color_override)
+    }
+}
+
 #[derive(Default)]
 struct GlobalAIWidget {
     switch_state: SwitchStateHandle,
@@ -4735,14 +4762,10 @@ impl SettingsWidget for GlobalAIWidget {
             .with_main_axis_alignment(MainAxisAlignment::SpaceBetween)
             .with_cross_axis_alignment(CrossAxisAlignment::Center)
             .with_child(
-                Text::new_inline(
-                    "Warp Agent",
-                    appearance.ui_font_family(),
-                    PRIMARY_HEADER_FONT_SIZE,
-                )
-                .with_style(Properties::default().weight(Weight::Bold))
-                .with_color(appearance.theme().active_ui_text_color().into())
-                .finish(),
+                Text::new_inline("Agent", appearance.ui_font_family(), PRIMARY_HEADER_FONT_SIZE)
+                    .with_style(Properties::default().weight(Weight::Bold))
+                    .with_color(appearance.theme().active_ui_text_color().into())
+                    .finish(),
             );
 
         if is_ai_disabled_due_to_remote_session_org_policy {
@@ -5476,7 +5499,8 @@ impl SettingsWidget for AgentsWidget {
             // Legacy layout: show Agents header + Models + Permissions
             let mut agents_header = Flex::column();
             agents_header.add_child(
-                build_sub_header(
+                subpage_primary_header(
+                    view,
                     appearance,
                     "Agents",
                     Some(styles::header_font_color(is_any_ai_enabled, app)),
@@ -5522,7 +5546,8 @@ impl AgentsWidget {
 
         let header_and_description = Flex::column()
             .with_child(
-                build_sub_header(
+                subpage_primary_header(
+                    view,
                     appearance,
                     "Profiles",
                     Some(styles::header_font_color(is_any_ai_enabled, app)),
@@ -6999,7 +7024,8 @@ impl SettingsWidget for AIFactWidget {
         let ai_settings = AISettings::as_ref(app);
         let is_any_ai_enabled = ai_settings.is_any_ai_enabled(app);
 
-        let header = build_sub_header(
+        let header = subpage_primary_header(
+            view,
             appearance,
             "Knowledge",
             Some(styles::header_font_color(is_any_ai_enabled, app)),
@@ -7439,7 +7465,8 @@ impl SettingsWidget for CLIAgentWidget {
 
         let mut column = Flex::column()
             .with_child(
-                build_sub_header(
+                subpage_primary_header(
+                    view,
                     appearance,
                     "Third party CLI agents",
                     Some(styles::header_font_color(true, app)),
@@ -8374,7 +8401,7 @@ impl ApiKeysWidget {
         let appearance = Appearance::as_ref(app);
         let text_fragments = vec![
             FormattedTextFragment::plain_text(
-                "Use your own API keys from model providers for Warp Agent. You can also add custom endpoints to use third-party models. Custom endpoints must support the OpenAI-compatible Chat Completions API. API keys are stored only on your device, never on Warp's servers. They're used to make requests to your chosen model provider. Using auto models or models from providers you have not provided API keys for will consume Warp credits. ",
+                "Use your own API keys from model providers for Warp Agent. You can also add custom endpoints to use third-party models. Custom endpoints must support the OpenAI-compatible Chat Completions API. API keys are stored only on your device, never on Warp's servers. They're used to make requests to your chosen model provider. Using auto models or models from providers you have not provided API keys for will consume Bang credits. ",
             ),
             FormattedTextFragment::hyperlink("Learn more", CUSTOM_INFERENCE_LEARN_MORE_URL),
         ];
@@ -8700,7 +8727,7 @@ impl ApiKeysWidget {
         let ai_settings = AISettings::as_ref(app);
 
         let toggle = render_ai_setting_toggle::<CanUseWarpCreditsForFallback>(
-            "Warp credit fallback",
+            "Bang credit fallback",
             AISettingsPageAction::ToggleCanUseWarpCreditsForFallback,
             *ai_settings.can_use_warp_credits_for_fallback,
             ai_settings.is_any_ai_enabled(app),
@@ -8710,7 +8737,7 @@ impl ApiKeysWidget {
         );
 
         let description = render_ai_setting_description(
-            "When enabled, agent requests may be routed to one of Warp's provided models in the event of an error. Warp will prioritize using your API keys over your Warp credits.",
+            "When enabled, agent requests may be routed to one of Warp's provided models in the event of an error. Warp will prioritize using your API keys over your Bang credits.",
             ai_settings.is_any_ai_enabled(app),
             app,
         );

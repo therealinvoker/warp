@@ -812,8 +812,8 @@ pub fn init(app: &mut AppContext) {
         .with_linux_or_windows_key_binding("alt-shift-F"),
         EditableBinding::new(
             TOGGLE_WARP_DRIVE_BINDING_NAME,
-            BindingDescription::new("Toggle Warp Drive")
-                .with_custom_description(bindings::MAC_MENUS_CONTEXT, "Warp Drive"),
+            BindingDescription::new("Toggle Bang drive")
+                .with_custom_description(bindings::MAC_MENUS_CONTEXT, "Bang drive"),
             WorkspaceAction::ToggleWarpDrive,
         )
         .with_context_predicate(id!("Workspace") & id!(flags::ENABLE_WARP_DRIVE)),

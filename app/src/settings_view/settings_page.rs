@@ -302,6 +302,29 @@ pub fn build_sub_header(
     .with_margin_bottom(SUBHEADER_MARGIN_BOTTOM)
 }
 
+/// Like [`build_sub_header`] but at the standard page-title size
+/// ([`HEADER_FONT_SIZE`], 23px). Used by pages/subpages that render their own
+/// title inline (optionally dimmed) instead of going through the [`PageType`]
+/// title path, so their title matches every other settings section.
+pub fn build_page_title_header(
+    appearance: &Appearance,
+    text_name: impl Into<Cow<'static, str>>,
+    color_override: Option<Fill>,
+) -> Container {
+    let color = color_override.unwrap_or(appearance.theme().active_ui_text_color());
+    Container::new(
+        Align::new(
+            Text::new_inline(text_name, appearance.ui_font_family(), HEADER_FONT_SIZE)
+                .with_style(Properties::default().weight(Weight::Bold))
+                .with_color(color.into())
+                .finish(),
+        )
+        .left()
+        .finish(),
+    )
+    .with_margin_bottom(PAGE_TITLE_MARGIN_BOTTOM)
+}
+
 pub fn render_sub_header_with_description(
     appearance: &Appearance,
     text_name: impl Into<Cow<'static, str>>,
@@ -1634,14 +1657,41 @@ impl<V: warpui::View> PageType<V> {
     pub(super) fn render_page(&self, view: &V, app: &AppContext) -> Box<dyn Element> {
         let appearance = Appearance::as_ref(app);
         let page = match self.get_filtered() {
-            FilteredPageType::Monolith { widget, title, .. } => {
+            FilteredPageType::Monolith {
+                widget,
+                title,
+                vertical_scroll_state,
+                horizontal_scroll_state,
+            } => {
+                // Non-scrollable monolith pages (`new_monolith(.., false)`) are
+                // placed under a bounded height by `SettingsView` (cross-axis
+                // stretch). Scrollable ones lay out under an unbounded vertical
+                // constraint inside their scrollable.
+                let is_non_scrollable =
+                    vertical_scroll_state.is_none() && horizontal_scroll_state.is_none();
                 let mut page = Empty::new().finish();
                 if let Some(widget) = widget {
                     if widget.should_render(app) {
                         if let Some(title) = title {
+                            let widget_el = widget.render_widget(view, false, appearance, app);
+                            // When a non-scrollable page's widget fills the height
+                            // with a flexible child (e.g. Keyboard shortcuts, which
+                            // scrolls its own binding list), it must receive the
+                            // bounded remaining height via `Expanded`; otherwise it
+                            // is measured under an infinite constraint and its
+                            // flexible child panics. Scrollable pages keep intrinsic
+                            // sizing so the outer scrollable can handle overflow.
                             let col = Flex::column()
-                                .with_child(render_page_title(title, HEADER_FONT_SIZE, appearance))
-                                .with_child(widget.render_widget(view, false, appearance, app));
+                                .with_child(render_page_title(
+                                    title,
+                                    HEADER_FONT_SIZE,
+                                    appearance,
+                                ));
+                            let col = if is_non_scrollable {
+                                col.with_child(Expanded::new(1., widget_el).finish())
+                            } else {
+                                col.with_child(widget_el)
+                            };
                             page = col.finish();
                         } else {
                             page = widget.render_widget(view, false, appearance, app);

@@ -542,32 +542,19 @@ impl OneTimeModalModel {
     }
 
     fn check_and_trigger_openwarp_launch_modal(&mut self, ctx: &mut ModelContext<Self>) -> bool {
-        // Only show if the feature flag is enabled.
-        if !FeatureFlag::OpenWarpLaunchModal.is_enabled() {
-            return false;
-        }
-
-        let general_settings = GeneralSettings::as_ref(ctx);
-        let openwarp_modal_shown = *general_settings
-            .did_check_to_trigger_openwarp_launch_modal
-            .value();
-
-        if openwarp_modal_shown {
-            return false;
-        }
-
+        // Fork: the "Warp is now open-source" launch popup is disabled and never
+        // opens. We still mark it as checked so it stays consistent with the
+        // one-time-modal bookkeeping, then return `false` so the remaining
+        // one-time modals evaluate normally on their own gates.
         GeneralSettings::handle(ctx).update(ctx, |settings, ctx| {
             if let Err(e) = settings
                 .did_check_to_trigger_openwarp_launch_modal
                 .set_value(true, ctx)
             {
-                log::warn!("Failed to mark OpenWarp launch modal as dismissed: {e}");
+                log::warn!("Failed to mark OpenWarp launch modal as checked: {e}");
             }
         });
-
-        let should_show_openwarp_modal = !matches!(ChannelState::channel(), Channel::Integration);
-        self.set_openwarp_launch_modal_open(should_show_openwarp_modal, ctx);
-        should_show_openwarp_modal
+        false
     }
 
     fn check_and_trigger_orchestration_launch_modal(

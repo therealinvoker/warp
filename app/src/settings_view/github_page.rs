@@ -281,7 +281,11 @@ impl SettingsWidget for GithubSettingsWidget {
             let summary = format!(
                 "{} accessible {} · {} enabled for automations",
                 total,
-                if total == 1 { "repository" } else { "repositories" },
+                if total == 1 {
+                    "repository"
+                } else {
+                    "repositories"
+                },
                 enabled,
             );
             column.add_child(

@@ -20324,7 +20324,7 @@ impl Workspace {
                     {
                         ToolPanelView::ProjectExplorer => "Project explorer",
                         ToolPanelView::GlobalSearch { .. } => "Global search",
-                        ToolPanelView::WarpDrive => "Warp Drive",
+                        ToolPanelView::WarpDrive => "Bang drive",
                         ToolPanelView::ConversationListView => "Agent conversations",
                         ToolPanelView::CodeReview => "Code review",
                     }
@@ -20379,7 +20379,7 @@ impl Workspace {
             {
                 ToolPanelView::ProjectExplorer => "Project explorer",
                 ToolPanelView::GlobalSearch { .. } => "Global search",
-                ToolPanelView::WarpDrive => "Warp Drive",
+                ToolPanelView::WarpDrive => "Bang drive",
                 ToolPanelView::ConversationListView => "Agent conversations",
                 ToolPanelView::CodeReview => "Code review",
             }

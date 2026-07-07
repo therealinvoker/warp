@@ -668,11 +668,13 @@ impl LLMPreferences {
             me.rebuild_custom_model_routers(ctx);
         }
 
-        // In agent mode eval builds, eagerly kick off a fetch of the model list from the server
-        // so that it's available by the time test steps like `set_preferred_agent_mode_llm` run.
-        // In production, this is handled reactively (on auth complete, network online, etc.)
-        // to avoid duplicate requests at startup.
-        #[cfg(feature = "agent_mode_evals")]
+        // Eagerly kick off a fetch of the model list from the server so the picker reflects the
+        // current server catalog. This is required (not just an eval convenience) because this
+        // singleton can be created lazily on first access — potentially *after* the reactive
+        // `AuthComplete` / network-online events have already fired during startup. In that case
+        // the subscriptions above never run and we would otherwise stay on the stale cached list
+        // forever. Mirrors `HarnessAvailabilityModel::new`, which refreshes eagerly for the same
+        // reason. The reactive subscriptions still handle subsequent refreshes.
         me.refresh_available_models(ctx);
 
         me

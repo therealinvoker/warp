@@ -307,8 +307,8 @@ impl Display for SettingsSection {
             SettingsSection::Github => write!(f, "GitHub"),
             SettingsSection::GithubAutomations => write!(f, "GitHub Automations"),
             SettingsSection::Scripting => write!(f, "Scripting"),
-            SettingsSection::WarpDrive => write!(f, "Warp Drive"),
-            SettingsSection::WarpAgent => write!(f, "Warp Agent"),
+            SettingsSection::WarpDrive => write!(f, "Bang drive"),
+            SettingsSection::WarpAgent => write!(f, "Agent"),
             SettingsSection::AgentProfiles => write!(f, "Profiles"),
             SettingsSection::AgentMCPServers => write!(f, "MCP servers"),
             SettingsSection::Knowledge => write!(f, "Knowledge"),
@@ -317,6 +317,7 @@ impl Display for SettingsSection {
             SettingsSection::EditorAndCodeReview => write!(f, "Editor and Code Review"),
             SettingsSection::CloudEnvironments => write!(f, "Environments"),
             SettingsSection::OzCloudAPIKeys => write!(f, "Oz Cloud API Keys"),
+            SettingsSection::Warpify => write!(f, "Terminal"),
             _ => write!(f, "{self:?}"),
         }
     }
@@ -325,7 +326,23 @@ impl Display for SettingsSection {
 impl SettingsSection {
     /// Returns true if this section is a subpage under any umbrella.
     pub fn is_subpage(&self) -> bool {
-        self.is_ai_subpage() || self.is_code_subpage() || self.is_cloud_platform_subpage()
+        self.is_ai_subpage()
+            || self.is_code_subpage()
+            || self.is_cloud_platform_subpage()
+            || self.is_custom_subpage()
+    }
+
+    /// Returns true if this section is a subpage under the "Custom" umbrella.
+    pub fn is_custom_subpage(&self) -> bool {
+        matches!(
+            self,
+            Self::Appearance
+                | Self::Features
+                | Self::Keybindings
+                | Self::Scripting
+                | Self::SharedBlocks
+                | Self::Warpify
+        )
     }
 
     /// Returns true if this section is a subpage under the "Agents" umbrella.
@@ -347,7 +364,10 @@ impl SettingsSection {
 
     /// Returns true if this section is a subpage under the "Cloud platform" umbrella.
     pub fn is_cloud_platform_subpage(&self) -> bool {
-        matches!(self, Self::CloudEnvironments | Self::OzCloudAPIKeys)
+        matches!(
+            self,
+            Self::CloudEnvironments | Self::OzCloudAPIKeys | Self::WarpDrive
+        )
     }
 
     /// Maps subpage sections back to their parent page section for page lookup.
@@ -360,8 +380,9 @@ impl SettingsSection {
             s if s.is_ai_subpage() => Self::AI,
             // Code subpages render within the Code page.
             s if s.is_code_subpage() => Self::Code,
-            // CloudEnvironments and OzCloudAPIKeys ARE their own backing pages
-            // (1:1 mapping), so they return themselves.
+            // Cloud platform subpages (CloudEnvironments, OzCloudAPIKeys,
+            // WarpDrive) ARE their own backing pages (1:1 mapping), so they
+            // return themselves.
             other => *other,
         }
     }
@@ -384,7 +405,11 @@ impl SettingsSection {
 
     /// The ordered list of Cloud platform subpage sections.
     pub fn cloud_platform_subpages() -> &'static [Self] {
-        &[Self::CloudEnvironments, Self::OzCloudAPIKeys]
+        &[
+            Self::CloudEnvironments,
+            Self::OzCloudAPIKeys,
+            Self::WarpDrive,
+        ]
     }
 }
 
@@ -409,10 +434,10 @@ impl FromStr for SettingsSection {
             "Scripting" => Ok(Self::Scripting),
             "Shared blocks" => Ok(Self::SharedBlocks),
             "Teams" => Ok(Self::Teams),
-            "Warpify" => Ok(Self::Warpify),
-            "WarpDrive" | "Warp Drive" => Ok(Self::WarpDrive),
+            "Warpify" | "Terminal" => Ok(Self::Warpify),
+            "WarpDrive" | "Warp Drive" | "Bang drive" => Ok(Self::WarpDrive),
             // This page was called "Oz" at one point, keep for backward compatibility.
-            "Oz" | "Warp Agent" => Ok(Self::WarpAgent),
+            "Oz" | "Warp Agent" | "Agent" => Ok(Self::WarpAgent),
             "Profiles" | "AgentProfiles" => Ok(Self::AgentProfiles),
             "MCP servers" | "AgentMCPServers" => Ok(Self::AgentMCPServers),
             "Knowledge" => Ok(Self::Knowledge),
@@ -1348,15 +1373,37 @@ impl SettingsView {
             settings_pages.push(SettingsPage::new(github_automations_page_handle));
         }
 
+        // The "Custom" umbrella groups the terminal-customization pages
+        // (Appearance, Features, Keyboard shortcuts, Shared blocks, Terminal).
+        // Scripting, when enabled, sits alongside Shared blocks.
+        let mut custom_subpages = vec![
+            SettingsSection::Appearance,
+            SettingsSection::Features,
+            SettingsSection::Keybindings,
+        ];
+        if FeatureFlag::WarpControlCli.is_enabled() {
+            custom_subpages.push(SettingsSection::Scripting);
+        }
+        custom_subpages.push(SettingsSection::SharedBlocks);
+        custom_subpages.push(SettingsSection::Warpify);
+
         // Build sidebar nav items. AI page is presented as an "Agents" umbrella
         // with subpages; the actual AI SettingsPage is hidden from direct sidebar listing.
         let mut nav_items = vec![
             SettingsNavItem::Page(SettingsSection::Account),
+            SettingsNavItem::Page(SettingsSection::Teams),
             SettingsNavItem::Umbrella(SettingsUmbrella::new(
                 "Agents",
                 SettingsSection::ai_subpages().to_vec(),
             )),
-            SettingsNavItem::Page(SettingsSection::BillingAndUsage),
+            SettingsNavItem::Umbrella(SettingsUmbrella::new(
+                "Cloud platform",
+                vec![
+                    SettingsSection::CloudEnvironments,
+                    SettingsSection::OzCloudAPIKeys,
+                    SettingsSection::WarpDrive,
+                ],
+            )),
             SettingsNavItem::Umbrella(SettingsUmbrella::new(
                 "Code",
                 vec![
@@ -1364,55 +1411,34 @@ impl SettingsView {
                     SettingsSection::EditorAndCodeReview,
                 ],
             )),
-            SettingsNavItem::Umbrella(SettingsUmbrella::new(
-                "Cloud platform",
-                vec![
-                    SettingsSection::CloudEnvironments,
-                    SettingsSection::OzCloudAPIKeys,
-                ],
-            )),
-            SettingsNavItem::Page(SettingsSection::Teams),
-            SettingsNavItem::Page(SettingsSection::Appearance),
-            SettingsNavItem::Page(SettingsSection::Features),
-            SettingsNavItem::Page(SettingsSection::Keybindings),
-            SettingsNavItem::Page(SettingsSection::Warpify),
+            SettingsNavItem::Umbrella(SettingsUmbrella::new("Custom", custom_subpages)),
+            SettingsNavItem::Page(SettingsSection::BillingAndUsage),
             SettingsNavItem::Page(SettingsSection::Referrals),
-            SettingsNavItem::Page(SettingsSection::SharedBlocks),
-            SettingsNavItem::Page(SettingsSection::WarpDrive),
             SettingsNavItem::Page(SettingsSection::Privacy),
             SettingsNavItem::Page(SettingsSection::About),
         ];
 
-        if FeatureFlag::WarpControlCli.is_enabled() {
-            let shared_blocks_index = nav_items
+        // GitHub settings nav entry (gated on GithubIntegration). Placed just
+        // before the Code umbrella so Code sits directly beneath GitHub.
+        if FeatureFlag::GithubIntegration.is_enabled() {
+            let code_index = nav_items
                 .iter()
                 .position(|item| {
-                    matches!(item, SettingsNavItem::Page(SettingsSection::SharedBlocks))
+                    matches!(item, SettingsNavItem::Umbrella(u) if u.label == "Code")
                 })
                 .unwrap_or(nav_items.len());
-            nav_items.insert(
-                shared_blocks_index,
-                SettingsNavItem::Page(SettingsSection::Scripting),
-            );
+            nav_items.insert(code_index, SettingsNavItem::Page(SettingsSection::Github));
         }
 
-        // GitHub settings nav entry (gated on GithubIntegration). Placed just
-        // before Teams so it sits alongside other integration/account settings.
-        if FeatureFlag::GithubIntegration.is_enabled() {
-            let teams_index = nav_items
-                .iter()
-                .position(|item| matches!(item, SettingsNavItem::Page(SettingsSection::Teams)))
-                .unwrap_or(nav_items.len());
-            nav_items.insert(teams_index, SettingsNavItem::Page(SettingsSection::Github));
-        }
-
-        // GitHub automations nav entry, placed just after GitHub (before Teams).
-        // Visibility is finalized by `should_render` on the page, which also
-        // checks the tier's `githubPolicy.automationsEnabled`.
+        // GitHub automations nav entry, placed just after GitHub (before the
+        // Code umbrella). Visibility is finalized by `should_render` on the page,
+        // which also checks the tier's `githubPolicy.automationsEnabled`.
         if FeatureFlag::GithubAutomations.is_enabled() {
             let insert_index = nav_items
                 .iter()
-                .position(|item| matches!(item, SettingsNavItem::Page(SettingsSection::Teams)))
+                .position(|item| {
+                    matches!(item, SettingsNavItem::Umbrella(u) if u.label == "Code")
+                })
                 .unwrap_or(nav_items.len());
             nav_items.insert(
                 insert_index,

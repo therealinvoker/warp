@@ -3008,7 +3008,7 @@ impl FeaturesPageView {
             Category::new("System", system_widgets),
         ];
 
-        PageType::new_categorized(categories, None)
+        PageType::new_categorized(categories, Some("Features"))
     }
 
     fn update_code_editor_line_number_mode_dropdown(

@@ -40,8 +40,8 @@ use warpui::{
 #[cfg(feature = "local_fs")]
 use super::features::external_editor::ExternalEditorView;
 use super::settings_page::{
-    build_sub_header, render_body_item, render_separator, Category, MatchData, PageType,
-    SettingsPageMeta, SettingsPageViewHandle, SettingsWidget, HEADER_PADDING,
+    build_page_title_header, render_body_item, render_separator, Category, MatchData, PageType,
+    SettingsPageMeta, SettingsPageViewHandle, SettingsWidget, HEADER_FONT_SIZE, HEADER_PADDING,
     TOGGLE_BUTTON_RIGHT_PADDING,
 };
 use super::{
@@ -1207,7 +1207,7 @@ impl CodePageWidget {
             ui_builder
                 .span(CODE_FEATURE_NAME)
                 .with_style(UiComponentStyles {
-                    font_size: Some(24.0),
+                    font_size: Some(HEADER_FONT_SIZE),
                     font_weight: Some(Weight::Bold),
                     font_color: Some(theme.active_ui_text_color().into()),
                     ..Default::default()
@@ -2458,7 +2458,7 @@ impl CodePageWidget {
     }
 }
 
-/// A simple widget that renders a subheader title for a Code subpage.
+/// A simple widget that renders the standard 23px page title for a Code subpage.
 struct CodeSubpageHeaderWidget {
     title: &'static str,
 }
@@ -2476,7 +2476,7 @@ impl SettingsWidget for CodeSubpageHeaderWidget {
         appearance: &Appearance,
         _app: &AppContext,
     ) -> Box<dyn Element> {
-        build_sub_header(appearance, self.title, None)
+        build_page_title_header(appearance, self.title, None)
             .with_padding_bottom(HEADER_PADDING)
             .finish()
     }

@@ -510,7 +510,15 @@ impl KeybindingsView {
 
         let search_bar = ctx.add_typed_action_view(|_| SearchBar::new(search_editor.clone()));
 
-        let page = PageType::new_monolith(KeybindingsWidget::default(), None, false);
+        // Render the standard 23px "Keyboard shortcuts" section title via the page
+        // framework, matching every other settings section. The widget below keeps
+        // its "Configure keyboard shortcuts" subheader (which carries the
+        // not-synced-to-cloud indicator).
+        let page = PageType::new_monolith(
+            KeybindingsWidget::default(),
+            Some("Keyboard shortcuts"),
+            false,
+        );
         Self {
             page,
             clipped_scroll_state: Default::default(),

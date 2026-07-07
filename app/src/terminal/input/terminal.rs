@@ -69,7 +69,8 @@ impl Input {
         // branch, ...). When the session-mode footer is shown, move those chips into the
         // footer below the editor so their placement matches the Agent footer; the
         // pre-bootstrap "Starting…" status stays above the editor.
-        let move_chips_to_footer = show_session_mode_control && model.block_list().is_bootstrapped();
+        let move_chips_to_footer =
+            show_session_mode_control && model.block_list().is_bootstrapped();
         let mut footer_prompt_chips = None;
         if move_chips_to_footer {
             footer_prompt_chips = Some(prompt_elements);
@@ -103,8 +104,7 @@ impl Input {
             // Context chips (working directory, git branch, ...) moved down from the prompt
             // row, placed to the right of the segmented control to mirror the Agent footer.
             if let Some(chips) = footer_prompt_chips.take() {
-                mode_row =
-                    mode_row.with_child(Container::new(chips).with_margin_left(8.).finish());
+                mode_row = mode_row.with_child(Container::new(chips).with_margin_left(8.).finish());
             }
 
             // Match the Agent footer's vertical spacing exactly: no top padding (the gap from the

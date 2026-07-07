@@ -1,9 +1,9 @@
-use warpui::assets::asset_cache::AssetSource;
+use onboarding::slides::brand::bang_logo_mark;
 use warpui::elements::{
-    Align, CacheOption, ConstrainedBox, Container, CrossAxisAlignment, Element, Flex, Image,
-    MainAxisAlignment, MouseStateHandle, ParentElement, Wrap,
+    Align, Container, CrossAxisAlignment, Element, Flex, MainAxisAlignment, MouseStateHandle,
+    ParentElement, Wrap,
 };
-use warpui::ui_components::components::UiComponent;
+use warpui::ui_components::components::{UiComponent, UiComponentStyles};
 use warpui::{AppContext, Entity, View, ViewContext, ViewHandle};
 
 use super::settings_page::{
@@ -13,7 +13,6 @@ use super::settings_page::{
 use super::SettingsSection;
 use crate::appearance::Appearance;
 use crate::channel::ChannelState;
-use crate::themes::theme::ColorScheme;
 use crate::workspace::WorkspaceAction;
 
 pub struct AboutPageView {
@@ -60,14 +59,7 @@ impl SettingsWidget for AboutPageWidget {
         appearance: &Appearance,
         _app: &AppContext,
     ) -> Box<dyn Element> {
-        let theme = appearance.theme();
         let ui_builder = appearance.ui_builder();
-
-        let image_path = if theme.inferred_color_scheme() == ColorScheme::LightOnDark {
-            "bundled/svg/warp-logo-with-light-title.svg"
-        } else {
-            "bundled/svg/warp-logo-with-dark-title.svg"
-        };
 
         let version = ChannelState::app_version().unwrap_or("v#.##.###");
 
@@ -97,25 +89,30 @@ impl SettingsWidget for AboutPageWidget {
                     .finish(),
             ]);
 
+        let wordmark = ui_builder
+            .span("Bang".to_string())
+            .with_style(UiComponentStyles {
+                font_family_id: Some(appearance.ui_font_family()),
+                font_size: Some(44.),
+                ..Default::default()
+            })
+            .build()
+            .finish();
+
+        let brand_row = Flex::row()
+            .with_cross_axis_alignment(CrossAxisAlignment::Center)
+            .with_child(bang_logo_mark(64.))
+            .with_child(Container::new(wordmark).with_padding_left(16.).finish())
+            .finish();
+
         Align::new(
             Flex::column()
                 .with_cross_axis_alignment(CrossAxisAlignment::Center)
-                .with_child(
-                    ConstrainedBox::new(
-                        Image::new(
-                            AssetSource::Bundled { path: image_path },
-                            CacheOption::BySize,
-                        )
-                        .finish(),
-                    )
-                    .with_max_height(100.)
-                    .with_max_width(350.)
-                    .finish(),
-                )
+                .with_child(brand_row)
                 .with_child(version_row.finish())
                 .with_child(
                     ui_builder
-                        .span("Copyright 2026 Warp")
+                        .span("Copyright 2026 Bang")
                         .build()
                         .with_margin_top(16.)
                         .finish(),
