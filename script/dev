@@ -6,6 +6,13 @@
 # All other args are forwarded to ./script/run.
 set -e
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")"/.. && pwd)"
+
+# Pin common agent skills to whatever skills-lock.json currently has installed.
+# Skips script/run's per-launch fetch of warpdotdev/common-skills@main and the
+# "skills have been updated" prompt. To adopt upstream skill updates, run
+# `npx --yes skills@1.5.6 update -p -y`, commit skills-lock.json, then relaunch.
+export WARP_SKIP_COMMON_SKILLS_INSTALL=1
+
 TARGET="local"
 ARGS=()
 for a in "$@"; do
