@@ -119,7 +119,11 @@ impl GithubSettingsPageView {
             .app_install_link
             .clone()
         {
-            ctx.open_url(&link);
+            // Wrap with the `next=` deep link so the backend routes the
+            // browser back to this page after GitHub returns (the bare
+            // github.com fallback link ignores the param; harmless there).
+            let url = settings_github_auth_url_with_next(&link);
+            ctx.open_url(&url);
         }
     }
 
