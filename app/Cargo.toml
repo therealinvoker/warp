@@ -1039,10 +1039,11 @@ identifier = "dev.warp.WarpOss"
 name = "Bang"
 resources = ["assets/onboarding"]
 icon = [
-    "channels/oss/icon/1024x1024.png",
     "channels/oss/icon/512x512.png",
     "channels/oss/icon/256x256.png",
     "channels/oss/icon/128x128.png",
+    "channels/oss/icon/32x32.png",
+    "channels/oss/icon/16x16.png",
     "channels/oss/icon/icon.ico",
 ]
 short_description = "The open-source, cloud-backed terminal for individuals and teams."
