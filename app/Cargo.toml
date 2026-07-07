@@ -1036,9 +1036,15 @@ prompt_cache_expiry_warning = []
 category = "public.app-category.developer-tools"
 copyright = "© 2025, Denver Technologies, Inc"
 identifier = "dev.warp.WarpOss"
-name = "WarpOss"
+name = "Bang"
 resources = ["assets/onboarding"]
-icon = ["channels/oss/icon/no-padding/512x512.png", "channels/oss/icon/no-padding/icon.ico"]
+icon = [
+    "channels/oss/icon/1024x1024.png",
+    "channels/oss/icon/512x512.png",
+    "channels/oss/icon/256x256.png",
+    "channels/oss/icon/128x128.png",
+    "channels/oss/icon/icon.ico",
+]
 short_description = "The open-source, cloud-backed terminal for individuals and teams."
 
 [package.metadata.bundle.bin.stable]
