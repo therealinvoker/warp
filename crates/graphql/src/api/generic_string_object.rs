@@ -30,6 +30,8 @@ pub enum GenericStringObjectFormat {
     JsonCloudEnvironment,
     #[cynic(rename = "JsonScheduledAmbientAgent")]
     JsonScheduledAmbientAgent,
+    #[cynic(rename = "JsonMarketplacePlugin")]
+    JsonMarketplacePlugin,
     /// Fallback for GSO formats this client build does not recognize (for example
     /// server-only formats such as `JsonRunner`). Without this, decoding a Drive
     /// sync response that contains an unknown format fails for the entire response.
@@ -62,6 +64,7 @@ impl std::fmt::Display for GenericStringObjectFormat {
             GenericStringObjectFormat::JsonTemplatableMCPServer => "JsonTemplatableMCPServer",
             GenericStringObjectFormat::JsonCloudEnvironment => "JsonCloudEnvironment",
             GenericStringObjectFormat::JsonScheduledAmbientAgent => "JsonScheduledAmbientAgent",
+            GenericStringObjectFormat::JsonMarketplacePlugin => "JsonMarketplacePlugin",
             GenericStringObjectFormat::Unknown => "Unknown",
         };
         write!(f, "{s}")

@@ -128,6 +128,7 @@ use crate::ai::document::ai_document_model::AIDocumentId;
 use crate::ai::execution_profiles::AIExecutionProfile;
 use crate::ai::facts::AIFact;
 use crate::ai::mcp::{MCPServer, TemplatableMCPServer};
+use crate::marketplace_plugins::MarketplacePlugin;
 use crate::channel::ChannelState;
 use crate::cloud_object::model::generic_string_model::{
     GenericStringModel, GenericStringObjectId, Serializer, StringModel,
@@ -829,6 +830,13 @@ impl ObjectClient for ServerApi {
                                 parse_server_gso::<ScheduledAmbientAgent, JsonSerializer>(
                                     &mut updated_generic_string_objects,
                                     GenericStringObjectFormat::Json(JsonObjectType::ScheduledAmbientAgent),
+                                    gso,
+                                );
+                            }
+                            warp_graphql::generic_string_object::GenericStringObjectFormat::JsonMarketplacePlugin => {
+                                parse_server_gso::<MarketplacePlugin, JsonSerializer>(
+                                    &mut updated_generic_string_objects,
+                                    GenericStringObjectFormat::Json(JsonObjectType::MarketplacePlugin),
                                     gso,
                                 );
                             }

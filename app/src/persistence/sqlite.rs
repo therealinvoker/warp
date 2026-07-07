@@ -2434,6 +2434,7 @@ fn box_persisted_generic_string_object(
         PersistedGenericStringObject::AIExecutionProfile(object) => Box::new(object),
         PersistedGenericStringObject::CloudEnvironment(object) => Box::new(object),
         PersistedGenericStringObject::ScheduledAmbientAgent(object) => Box::new(object),
+        PersistedGenericStringObject::MarketplacePlugin(object) => Box::new(object),
     }
 }
 

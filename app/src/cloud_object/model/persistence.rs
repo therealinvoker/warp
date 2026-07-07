@@ -533,6 +533,9 @@ impl CloudModel {
             ServerCloudObject::CloudAgentConfig(cloud_agent_config) => {
                 self.upsert_from_server_object(cloud_agent_config, ctx);
             }
+            ServerCloudObject::MarketplacePlugin(marketplace_plugin) => {
+                self.upsert_from_server_object(marketplace_plugin, ctx);
+            }
         }
     }
 

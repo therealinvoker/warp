@@ -39,6 +39,7 @@ use crate::cloud_object::{
 use crate::drive::folders::CloudFolderModel;
 use crate::drive::CloudObjectTypeAndId;
 use crate::env_vars::CloudEnvVarCollectionModel;
+use crate::marketplace_plugins::CloudMarketplacePluginModel;
 use crate::notebooks::CloudNotebookModel;
 use crate::server::cloud_objects::update_manager::InitiatedBy;
 use crate::settings::cloud_preferences::CloudPreferenceModel;
@@ -215,6 +216,11 @@ pub enum QueueItem {
     },
     UpdateCloudAgentConfig {
         model: Arc<CloudAgentConfigModel>,
+        id: SyncId,
+        revision: Option<Revision>,
+    },
+    UpdateMarketplacePlugin {
+        model: Arc<CloudMarketplacePluginModel>,
         id: SyncId,
         revision: Option<Revision>,
     },
@@ -449,7 +455,8 @@ impl SyncQueue {
             | QueueItem::UpdateTemplatableMCPServer { id, .. }
             | QueueItem::UpdateCloudEnvironment { id, .. }
             | QueueItem::UpdateScheduledAmbientAgent { id, .. }
-            | QueueItem::UpdateCloudAgentConfig { id, .. } => self.get_update_dependencies(id),
+            | QueueItem::UpdateCloudAgentConfig { id, .. }
+            | QueueItem::UpdateMarketplacePlugin { id, .. } => self.get_update_dependencies(id),
 
             // Update workflow requests should depend on existing requests to that object, as well as
             // any enums or env vars they reference.
@@ -568,6 +575,7 @@ impl SyncQueue {
                 | QueueItem::UpdateCloudEnvironment { id, .. }
                 | QueueItem::UpdateScheduledAmbientAgent { id, .. }
                 | QueueItem::UpdateCloudAgentConfig { id, .. }
+                | QueueItem::UpdateMarketplacePlugin { id, .. }
                     if id.uid() == item_id =>
                 {
                     Some(QueueDependency::QueueItem(*queue_item_id))
@@ -676,7 +684,8 @@ impl SyncQueue {
                 | QueueItem::UpdateTemplatableMCPServer { id, revision, .. }
                 | QueueItem::UpdateCloudEnvironment { id, revision, .. }
                 | QueueItem::UpdateScheduledAmbientAgent { id, revision, .. }
-                | QueueItem::UpdateCloudAgentConfig { id, revision, .. } => {
+                | QueueItem::UpdateCloudAgentConfig { id, revision, .. }
+                | QueueItem::UpdateMarketplacePlugin { id, revision, .. } => {
                     Self::maybe_update_queue_item_with_new_revision(
                         &self.client_id_to_server,
                         id,
@@ -852,6 +861,20 @@ impl SyncQueue {
                     );
                 }
                 QueueItem::UpdateTemplatableMCPServer {
+                    model,
+                    id,
+                    revision,
+                } => {
+                    self.update_object(
+                        model.clone(),
+                        id,
+                        revision,
+                        object_client,
+                        dequeued_item_id,
+                        ctx,
+                    );
+                }
+                QueueItem::UpdateMarketplacePlugin {
                     model,
                     id,
                     revision,
@@ -1306,6 +1329,13 @@ impl SyncQueue {
                             }
                             JsonObjectType::ScheduledAmbientAgent => {
                                 CloudScheduledAmbientAgentModel::send_create_request(
+                                    object_client_clone,
+                                    create_request,
+                                )
+                                .await
+                            }
+                            JsonObjectType::MarketplacePlugin => {
+                                CloudMarketplacePluginModel::send_create_request(
                                     object_client_clone,
                                     create_request,
                                 )
@@ -1930,6 +1960,9 @@ impl SyncQueue {
                     self.handle_update_failure_response(id, item_id, ctx);
                 }
                 QueueItem::UpdateCloudAgentConfig { id, .. } => {
+                    self.handle_update_failure_response(id, item_id, ctx);
+                }
+                QueueItem::UpdateMarketplacePlugin { id, .. } => {
                     self.handle_update_failure_response(id, item_id, ctx);
                 }
                 QueueItem::RecordObjectAction {

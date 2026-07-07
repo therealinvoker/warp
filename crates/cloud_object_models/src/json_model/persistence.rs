@@ -13,10 +13,10 @@ use diesel::result::Error;
 use crate::{
     CloudAIExecutionProfile, CloudAIExecutionProfileModel, CloudAIFact, CloudAIFactModel,
     CloudAmbientAgentEnvironment, CloudAmbientAgentEnvironmentModel, CloudEnvVarCollection,
-    CloudEnvVarCollectionModel, CloudMCPServer, CloudMCPServerModel, CloudPreference,
-    CloudPreferenceModel, CloudScheduledAmbientAgent, CloudScheduledAmbientAgentModel,
-    CloudTemplatableMCPServer, CloudTemplatableMCPServerModel, CloudWorkflowEnum,
-    CloudWorkflowEnumModel,
+    CloudEnvVarCollectionModel, CloudMCPServer, CloudMCPServerModel, CloudMarketplacePlugin,
+    CloudMarketplacePluginModel, CloudPreference, CloudPreferenceModel, CloudScheduledAmbientAgent,
+    CloudScheduledAmbientAgentModel, CloudTemplatableMCPServer, CloudTemplatableMCPServerModel,
+    CloudWorkflowEnum, CloudWorkflowEnumModel,
 };
 
 pub enum PersistedGenericStringObject {
@@ -29,6 +29,7 @@ pub enum PersistedGenericStringObject {
     AIExecutionProfile(CloudAIExecutionProfile),
     CloudEnvironment(CloudAmbientAgentEnvironment),
     ScheduledAmbientAgent(CloudScheduledAmbientAgent),
+    MarketplacePlugin(CloudMarketplacePlugin),
 }
 
 pub fn read_generic_string_objects(
@@ -153,6 +154,19 @@ pub fn read_generic_string_objects(
                     model.ok().map(|model| {
                         PersistedGenericStringObject::ScheduledAmbientAgent(
                             CloudScheduledAmbientAgent::new(
+                                object_id,
+                                model,
+                                to_cloud_object_metadata(metadata),
+                                cloud_object_permissions,
+                            ),
+                        )
+                    })
+                }
+                JsonObjectType::MarketplacePlugin => {
+                    let model = CloudMarketplacePluginModel::deserialize_owned(&object.data);
+                    model.ok().map(|model| {
+                        PersistedGenericStringObject::MarketplacePlugin(
+                            CloudMarketplacePlugin::new(
                                 object_id,
                                 model,
                                 to_cloud_object_metadata(metadata),

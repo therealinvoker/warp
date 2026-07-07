@@ -161,6 +161,8 @@ const NOTEBOOK_LABEL: &str = "Notebook";
 const WORKFLOW_LABEL: &str = "Workflow";
 const AGENT_MODE_WORKFLOW_LABEL: &str = "Prompt";
 const ENV_VAR_COLLECTION_LABEL: &str = "Environment variables";
+const MCP_SERVER_LABEL: &str = "MCP server";
+const MARKETPLACE_PLUGIN_LABEL: &str = "Marketplace plugin";
 const INDEX_FOLDER_LABEL: &str = "New folder";
 const INDEX_NOTEBOOK_LABEL: &str = "New notebook";
 const INDEX_WORKFLOW_LABEL: &str = "New workflow";
@@ -369,8 +371,14 @@ impl DriveIndexAction {
         initial_folder_id: Option<SyncId>,
     ) -> Self {
         match (space, object_type) {
-            // creating a folder requires a name, which is entered from the cloud object dialog
-            (_, DriveObjectType::Folder) => DriveIndexAction::OpenCloudObjectNamingDialog {
+            // creating a folder, MCP server, or marketplace plugin requires a
+            // name, which is entered from the cloud object dialog
+            (
+                _,
+                DriveObjectType::Folder
+                | DriveObjectType::MCPServer
+                | DriveObjectType::MarketplacePlugin,
+            ) => DriveIndexAction::OpenCloudObjectNamingDialog {
                 object_type,
                 space,
                 cloud_object_type_and_id: None,
@@ -384,7 +392,6 @@ impl DriveIndexAction {
                 | DriveObjectType::AgentModeWorkflow
                 | DriveObjectType::AIFactCollection
                 | DriveObjectType::AIFact
-                | DriveObjectType::MCPServer
                 | DriveObjectType::MCPServerCollection,
             ) => DriveIndexAction::CreateObject {
                 object_type,
@@ -442,6 +449,16 @@ pub enum DriveIndexEvent {
     CreateAIFact {
         space: Space,
         fact: AIFact,
+        initial_folder_id: Option<SyncId>,
+    },
+    CreateMCPServer {
+        space: Space,
+        title: String,
+        initial_folder_id: Option<SyncId>,
+    },
+    CreateMarketplacePlugin {
+        space: Space,
+        title: String,
         initial_folder_id: Option<SyncId>,
     },
     OpenAIFactCollection,
@@ -3479,7 +3496,22 @@ impl DriveIndex {
                 }
             }
             DriveObjectType::MCPServer => {
-                todo!()
+                if let Some(title) = title {
+                    ctx.emit(DriveIndexEvent::CreateMCPServer {
+                        space,
+                        title,
+                        initial_folder_id,
+                    })
+                }
+            }
+            DriveObjectType::MarketplacePlugin => {
+                if let Some(title) = title {
+                    ctx.emit(DriveIndexEvent::CreateMarketplacePlugin {
+                        space,
+                        title,
+                        initial_folder_id,
+                    })
+                }
             }
             DriveObjectType::AIFactCollection | DriveObjectType::MCPServerCollection => {}
         }
@@ -3666,6 +3698,23 @@ impl DriveIndex {
         ctx.notify();
     }
 
+    /// Whether the "Marketplace plugin" entry should be offered for this
+    /// space. Personal drives are always allowed; team drives respect the
+    /// workspace's MCP governance `allow_plugin_import` setting (absent
+    /// governance settings mean self-managed, which allows imports).
+    fn plugin_import_allowed_for_space(space: &Space, app: &AppContext) -> bool {
+        match space {
+            Space::Team { team_uid } => UserWorkspaces::as_ref(app)
+                .workspaces()
+                .iter()
+                .find(|workspace| workspace.teams.iter().any(|team| team.uid == *team_uid))
+                .and_then(|workspace| workspace.settings.mcp_governance_settings.as_ref())
+                .map(|governance| governance.allow_plugin_import)
+                .unwrap_or(true),
+            Space::Personal | Space::Shared => true,
+        }
+    }
+
     fn toggle_new_assets_menu(&mut self, space: &Space, ctx: &mut ViewContext<Self>) {
         let section_key = DriveIndexSection::Space(*space);
         let was_open = self
@@ -3746,6 +3795,32 @@ impl DriveIndex {
                     .with_icon(Icon::EnvVarCollection)
                     .into_item(),
             );
+
+            if FeatureFlag::McpServer.is_enabled() {
+                menu_items.push(
+                    MenuItemFields::new(MCP_SERVER_LABEL)
+                        .with_on_select_action(DriveIndexAction::create_object(
+                            DriveObjectType::MCPServer,
+                            *space,
+                            None,
+                        ))
+                        .with_icon(Icon::Dataflow)
+                        .into_item(),
+                );
+            }
+
+            if Self::plugin_import_allowed_for_space(space, ctx) {
+                menu_items.push(
+                    MenuItemFields::new(MARKETPLACE_PLUGIN_LABEL)
+                        .with_on_select_action(DriveIndexAction::create_object(
+                            DriveObjectType::MarketplacePlugin,
+                            *space,
+                            None,
+                        ))
+                        .with_icon(Icon::PackageCheck)
+                        .into_item(),
+                );
+            }
 
             menu_items.push(
                 MenuItemFields::new(IMPORT_LABEL)
@@ -4118,6 +4193,7 @@ impl DriveIndex {
             DriveObjectType::AIFactCollection => "Rules",
             DriveObjectType::MCPServer => "MCP Server",
             DriveObjectType::MCPServerCollection => "MCP Servers",
+            DriveObjectType::MarketplacePlugin => "Marketplace Plugins",
         };
         let name_styles = UiComponentStyles {
             font_family_id: Some(appearance.ui_font_family()),
@@ -5375,7 +5451,10 @@ impl TypedActionView for DriveIndex {
 
                 let is_rename = cloud_object_type_and_id.is_some();
                 match *object_type {
-                    DriveObjectType::Notebook { .. } | DriveObjectType::Folder => {
+                    DriveObjectType::Notebook { .. }
+                    | DriveObjectType::Folder
+                    | DriveObjectType::MCPServer
+                    | DriveObjectType::MarketplacePlugin => {
                         self.cloud_object_naming_dialog.open(
                             *object_type,
                             *space,
@@ -5397,7 +5476,7 @@ impl TypedActionView for DriveIndex {
                     DriveObjectType::AIFact | DriveObjectType::AIFactCollection => {
                         log::error!("Use DriveIndexAction::OpenAIFactCollection to open the pane view instead");
                     }
-                    DriveObjectType::MCPServer | DriveObjectType::MCPServerCollection => {
+                    DriveObjectType::MCPServerCollection => {
                         log::error!(
                             "Use DriveIndexAction::OpenMCPServerCollection to open the pane view instead"
                         );

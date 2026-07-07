@@ -43,6 +43,15 @@ pub fn warp_drive_icon_color(
             // Match File Tree styling - use text_sub color
             blended_colors::text_sub(appearance.theme(), appearance.theme().background())
         }
+        DriveObjectType::MarketplacePlugin => {
+            let color: Fill = appearance.theme().terminal_colors().normal.green.into();
+            color
+                .on_background(
+                    appearance.theme().surface_1(),
+                    MinimumAllowedContrast::NonText,
+                )
+                .into()
+        }
         DriveObjectType::AIFactCollection
         | DriveObjectType::AIFact
         | DriveObjectType::MCPServer
