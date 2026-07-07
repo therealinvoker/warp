@@ -258,11 +258,10 @@ impl From<ObjectType> for warp_graphql::object::ObjectType {
             ObjectType::Notebook => warp_graphql::object::ObjectType::Notebook,
             ObjectType::Workflow => warp_graphql::object::ObjectType::Workflow,
             ObjectType::Folder => warp_graphql::object::ObjectType::Folder,
-            ObjectType::GenericStringObject(GenericStringObjectFormat::Json(
-                JsonObjectType::EnvVarCollection,
-            )) => warp_graphql::object::ObjectType::GenericStringObject,
-            ObjectType::GenericStringObject(gso) => {
-                todo!("Moving is not implemented for {:?}", gso);
+            // All JSON formats map to the single GraphQL GenericStringObject
+            // type; the server distinguishes them by the object's own format.
+            ObjectType::GenericStringObject(GenericStringObjectFormat::Json(_)) => {
+                warp_graphql::object::ObjectType::GenericStringObject
             }
         }
     }

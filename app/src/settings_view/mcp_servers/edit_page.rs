@@ -22,7 +22,8 @@ use warpui::elements::{
     ParentElement, ParentOffsetBounds, Radius, Shrinkable, Stack, Text,
 };
 use warpui::platform::Cursor;
-use warpui::ui_components::components::UiComponent;
+use warpui::ui_components::button::ButtonVariant;
+use warpui::ui_components::components::{UiComponent, UiComponentStyles};
 use warpui::{
     AppContext, Element, Entity, SingletonEntity, TypedActionView, View, ViewContext, ViewHandle,
 };
@@ -75,6 +76,8 @@ pub enum MCPServersEditPageViewEvent {
 
 #[derive(Debug, Clone)]
 pub enum MCPServersEditPageViewAction {
+    /// Selects which drive space (personal or a team) a NEW server is created in.
+    SelectNewServerSpace(Space),
     Back,
     Reinstall,
     Save,
@@ -111,6 +114,11 @@ impl ServerModel {
 
 pub struct MCPServersEditPageView {
     server_card_item_id: Option<ServerCardItemId>,
+    /// The drive space a NEW server will be created in ("Add to" picker).
+    new_server_space: Space,
+    /// Picker options rebuilt when the page is (re)opened: personal plus one
+    /// entry per team the user belongs to.
+    space_options: Vec<(Space, String, MouseStateHandle)>,
     server_model: ServerModel,
     save_button: ViewHandle<ActionButton>,
     reinstall_button: ViewHandle<ActionButton>,
@@ -201,6 +209,8 @@ impl MCPServersEditPageView {
 
         Self {
             server_card_item_id: None,
+            new_server_space: Space::Personal,
+            space_options: Vec::new(),
             server_model: ServerModel::None,
             save_button,
             reinstall_button,
@@ -223,6 +233,8 @@ impl MCPServersEditPageView {
         ctx: &mut ViewContext<Self>,
     ) {
         self.server_card_item_id = item_id;
+        self.new_server_space = Space::Personal;
+        self.space_options = Self::build_space_options(ctx);
         match item_id {
             Some(ServerCardItemId::TemplatableMCP(template_uuid)) => {
                 let cloud_templatable_mcp_server = TemplatableMCPServerManager::as_ref(ctx)
@@ -467,6 +479,72 @@ impl MCPServersEditPageView {
             .unwrap_or(false);
 
         is_author && is_shared
+    }
+
+    fn build_space_options(app: &AppContext) -> Vec<(Space, String, MouseStateHandle)> {
+        let mut options = vec![(
+            Space::Personal,
+            "Personal".to_string(),
+            MouseStateHandle::default(),
+        )];
+        for workspace in UserWorkspaces::as_ref(app).workspaces() {
+            for team in &workspace.teams {
+                options.push((
+                    Space::Team { team_uid: team.uid },
+                    team.name.clone(),
+                    MouseStateHandle::default(),
+                ));
+            }
+        }
+        options
+    }
+
+    /// "Add to" picker shown only when creating a new server: personal drive
+    /// or one of the user's team drives. Team-owned servers sync to every
+    /// member of that team.
+    fn render_space_picker(&self, app: &AppContext) -> Box<dyn Element> {
+        let appearance = Appearance::as_ref(app);
+        let theme = appearance.theme();
+
+        let mut row = Flex::row()
+            .with_cross_axis_alignment(CrossAxisAlignment::Center)
+            .with_spacing(8.);
+        row.add_child(
+            appearance
+                .ui_builder()
+                .span("Add to")
+                .with_style(UiComponentStyles {
+                    font_color: Some(theme.sub_text_color(theme.surface_2()).into()),
+                    ..Default::default()
+                })
+                .build()
+                .finish(),
+        );
+
+        for (space, name, mouse_state) in &self.space_options {
+            let selected = *space == self.new_server_space;
+            let variant = if selected {
+                ButtonVariant::Accent
+            } else {
+                ButtonVariant::Outlined
+            };
+            let space = *space;
+            row.add_child(
+                appearance
+                    .ui_builder()
+                    .button(variant, mouse_state.clone())
+                    .with_centered_text_label(name.clone())
+                    .build()
+                    .on_click(move |ctx, _, _| {
+                        ctx.dispatch_typed_action(
+                            MCPServersEditPageViewAction::SelectNewServerSpace(space),
+                        )
+                    })
+                    .finish(),
+            );
+        }
+
+        row.finish()
     }
 
     fn render_editor(&self, app: &AppContext) -> Box<dyn Element> {
@@ -789,6 +867,9 @@ impl View for MCPServersEditPageView {
         if !Self::is_editable(self.server_card_item_id, app) {
             main_content.add_child(ChildView::new(&self.editing_disabled_banner).finish());
         }
+        if self.server_card_item_id.is_none() {
+            main_content.add_child(self.render_space_picker(app));
+        }
         main_content.add_child(Shrinkable::new(1., editor).finish());
         main_content.add_child(footer);
 
@@ -816,6 +897,10 @@ impl TypedActionView for MCPServersEditPageView {
         ctx: &mut ViewContext<Self>,
     ) {
         match action {
+            MCPServersEditPageViewAction::SelectNewServerSpace(space) => {
+                self.new_server_space = *space;
+                ctx.notify();
+            }
             MCPServersEditPageViewAction::Back => {
                 ctx.emit(MCPServersEditPageViewEvent::Back);
             }
@@ -921,13 +1006,14 @@ impl TypedActionView for MCPServersEditPageView {
                         return;
                     }
 
+                    let new_server_space = self.new_server_space;
                     for parsed_server in parsed_servers {
                         TemplatableMCPServerManager::handle(ctx).update(
                             ctx,
                             |templatable_manager, ctx| {
                                 templatable_manager.create_templatable_mcp_server(
                                     parsed_server.templatable_mcp_server.clone(),
-                                    Space::Personal,
+                                    new_server_space,
                                     InitiatedBy::User,
                                     ctx,
                                 );
