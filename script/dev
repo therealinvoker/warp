@@ -1,0 +1,25 @@
+#!/bin/bash
+# script/dev — Bang dev launcher.
+#
+# Defaults to the LOCAL harness backend with an isolated data profile.
+# Pass --prod / --production to target the production Bang backend instead.
+# All other args are forwarded to ./script/run.
+set -e
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")"/.. && pwd)"
+TARGET="local"
+ARGS=()
+for a in "$@"; do
+  case "$a" in
+    --prod|--production) TARGET="prod" ;;
+    *) ARGS+=("$a") ;;
+  esac
+done
+if [ "$TARGET" = prod ]; then
+  export WARP_SERVER_ROOT_URL="https://api.trybang.ai"
+  export WARP_DATA_PROFILE="production-harness"
+else
+  export WARP_SERVER_ROOT_URL="http://localhost:8088"
+  export WARP_DATA_PROFILE="local-harness"
+fi
+echo "[script/dev] target=$TARGET  WARP_SERVER_ROOT_URL=$WARP_SERVER_ROOT_URL  WARP_DATA_PROFILE=$WARP_DATA_PROFILE"
+exec "$ROOT/script/run" "${ARGS[@]}"
