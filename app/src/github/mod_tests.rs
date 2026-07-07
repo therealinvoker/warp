@@ -17,6 +17,7 @@ fn installed_repo_full_name() {
         owner: "warpdotdev".to_string(),
         repo: "warp".to_string(),
         is_public: true,
+        automation_enabled: false,
     };
     assert_eq!(repo.full_name(), "warpdotdev/warp");
 }
@@ -29,6 +30,7 @@ fn is_repo_installed_is_case_insensitive() {
             owner: "WarpDotDev".to_string(),
             repo: "Warp".to_string(),
             is_public: false,
+            automation_enabled: true,
         }],
         ..Default::default()
     };

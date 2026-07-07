@@ -3032,6 +3032,11 @@ input RepoMetadata {
 }
 
 type RepoResult {
+  """
+  Whether this repo is enabled for ambient agents (in a workspace-claimed
+  installation). Nullable for rollout compatibility; absent means false.
+  """
+  automationEnabled: Boolean
   isPublic: Boolean!
   owner: String!
   repo: String!

@@ -77,7 +77,7 @@ impl GithubSettingsPageView {
         );
 
         Self {
-            page: PageType::new_monolith(GithubSettingsWidget, Some(PAGE_TITLE_TEXT), false),
+            page: PageType::new_monolith(GithubSettingsWidget, Some(PAGE_TITLE_TEXT), true),
             connect_mouse_state: MouseStateHandle::default(),
             manage_mouse_state: MouseStateHandle::default(),
             refresh_mouse_state: MouseStateHandle::default(),
@@ -238,9 +238,10 @@ impl SettingsWidget for GithubSettingsWidget {
     ) -> Box<dyn Element> {
         let state = GithubConnection::as_ref(app).state().clone();
 
-        // Content-sized: this monolith page is not dual-scrollable
-        // (new_monolith(..., false)), so it lays out under an unbounded vertical
-        // constraint. A Max main-axis flex panics there; size to content instead.
+        // Content-sized: this monolith page is dual-scrollable
+        // (new_monolith(..., true)), so its content lays out under an unbounded
+        // vertical constraint inside the scrollable. A Max main-axis flex panics
+        // there; size to content instead and let the scrollable handle overflow.
         let mut column = Flex::column()
             .with_cross_axis_alignment(CrossAxisAlignment::Start)
             .with_main_axis_size(MainAxisSize::Min);
@@ -267,27 +268,35 @@ impl SettingsWidget for GithubSettingsWidget {
             );
         }
 
-        // Installed repos (when connected).
+        // Repos the user can see through the App (when connected). The list
+        // is the user's own GitHub visibility; "automations" marks repos in a
+        // workspace-claimed installation, which ambient agents may act on.
         if state.connected && !state.installed_repos.is_empty() {
-            column.add_child(
-                Container::new(view.render_status_text(
-                    format!(
-                        "{} installed {}",
-                        state.installed_repos.len(),
-                        if state.installed_repos.len() == 1 {
-                            "repository"
-                        } else {
-                            "repositories"
-                        }
-                    ),
-                    appearance,
-                ))
-                .with_margin_top(8.)
-                .finish(),
+            let total = state.installed_repos.len();
+            let enabled = state
+                .installed_repos
+                .iter()
+                .filter(|r| r.automation_enabled)
+                .count();
+            let summary = format!(
+                "{} accessible {} · {} enabled for automations",
+                total,
+                if total == 1 { "repository" } else { "repositories" },
+                enabled,
             );
-            for repo in state.installed_repos.iter().take(50) {
+            column.add_child(
+                Container::new(view.render_status_text(summary, appearance))
+                    .with_margin_top(8.)
+                    .finish(),
+            );
+            for repo in state.installed_repos.iter() {
+                let label = if repo.automation_enabled {
+                    format!("{} · automations", repo.full_name())
+                } else {
+                    repo.full_name()
+                };
                 column.add_child(
-                    Container::new(view.render_status_text(repo.full_name(), appearance))
+                    Container::new(view.render_status_text(label, appearance))
                         .with_margin_top(2.)
                         .with_margin_left(8.)
                         .finish(),

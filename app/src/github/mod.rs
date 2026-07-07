@@ -24,12 +24,16 @@ use crate::ai::ambient_agents::github_auth_notifier::{GitHubAuthEvent, GitHubAut
 use crate::server::server_api::integrations::IntegrationsClient;
 use crate::server::server_api::ServerApiProvider;
 
-/// A repo the connected installation can access.
+/// A repo the connected user can see through the GitHub App.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstalledRepo {
     pub owner: String,
     pub repo: String,
     pub is_public: bool,
+    /// Whether the repo is enabled for ambient agents (it belongs to a
+    /// workspace-claimed installation). User-driven agents are scoped by the
+    /// user's own GitHub access instead.
+    pub automation_enabled: bool,
 }
 
 impl InstalledRepo {
@@ -191,6 +195,7 @@ impl GithubConnection {
                                 owner: r.owner,
                                 repo: r.repo,
                                 is_public: r.is_public,
+                                automation_enabled: r.automation_enabled.unwrap_or(false),
                             })
                             .collect();
                         // The schema field is non-null; the backend sends ""

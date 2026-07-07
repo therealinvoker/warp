@@ -26,6 +26,9 @@ pub struct RepoResult {
     pub owner: String,
     pub repo: String,
     pub is_public: bool,
+    /// Enabled for ambient agents (workspace-claimed installation). Nullable
+    /// for rollout compatibility; `None` means false.
+    pub automation_enabled: Option<bool>,
 }
 
 #[derive(cynic::InlineFragments, Debug, Clone)]
