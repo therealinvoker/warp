@@ -2128,7 +2128,10 @@ impl AISettingsPageView {
     /// key editor was committed.
     fn maybe_prompt_for_newly_added_provider_key(&mut self, ctx: &mut ViewContext<Self>) {
         let current = ApiKeyManager::as_ref(ctx).keys().clone();
-        let newly_added = [
+        let mut newly_added = None;
+        let mut key_saved = false;
+        let mut key_removed = false;
+        for (provider, previous_key, current_key) in [
             (
                 LLMProvider::OpenAI,
                 &self.last_seen_provider_keys.openai,
@@ -2144,21 +2147,48 @@ impl AISettingsPageView {
                 &self.last_seen_provider_keys.google,
                 &current.google,
             ),
-        ]
-        .into_iter()
-        .find_map(|(provider, previous_key, current_key)| {
-            let was_present = previous_key
+        ] {
+            let previous = previous_key
                 .as_deref()
-                .is_some_and(|key| !key.trim().is_empty());
-            let now_present = current_key
+                .map(str::trim)
+                .filter(|key| !key.is_empty());
+            let now = current_key
                 .as_deref()
-                .is_some_and(|key| !key.trim().is_empty());
-            (!was_present && now_present).then_some(provider)
-        });
+                .map(str::trim)
+                .filter(|key| !key.is_empty());
+            match (previous, now) {
+                (None, Some(_)) => {
+                    key_saved = true;
+                    newly_added.get_or_insert(provider);
+                }
+                (Some(before), Some(after)) if before != after => key_saved = true,
+                (Some(_), None) => key_removed = true,
+                _ => {}
+            }
+        }
         self.last_seen_provider_keys = current;
+
+        // Give explicit feedback that a key committed on blur/Enter was stored.
+        // Driven off `KeysUpdated` (not the editor event) so it fires however the
+        // field was committed, and only when a key actually changed.
+        if key_saved {
+            Self::show_settings_toast("API key saved", ctx);
+        } else if key_removed {
+            Self::show_settings_toast("API key removed", ctx);
+        }
+
         if let Some(provider) = newly_added {
             self.maybe_prompt_set_default_model_for_provider(provider, ctx);
         }
+    }
+
+    /// Shows a transient success toast, mirroring the custom-endpoint save path.
+    fn show_settings_toast(message: &str, ctx: &mut ViewContext<Self>) {
+        let window_id = ctx.window_id();
+        crate::ToastStack::handle(ctx).update(ctx, |toast_stack, ctx| {
+            let toast = crate::view_components::DismissibleToast::success(message.to_string());
+            toast_stack.add_ephemeral_toast(toast, window_id, ctx);
+        });
     }
 
     /// After a BYO provider key is added, offer to switch the default Agent Mode
