@@ -124,6 +124,7 @@ pub enum SettingsPageViewHandle {
     GithubAutomations(
         ViewHandle<super::github_automations::list_page::GithubAutomationsListPageView>,
     ),
+    Marketplace(ViewHandle<super::marketplace_page::MarketplacePageView>),
 }
 
 impl SettingsPageViewHandle {
@@ -152,6 +153,7 @@ impl SettingsPageViewHandle {
             Github(view_handle) => ChildView::new(view_handle).finish(),
             #[cfg(feature = "github_automations")]
             GithubAutomations(view_handle) => ChildView::new(view_handle).finish(),
+            Marketplace(view_handle) => ChildView::new(view_handle).finish(),
         }
     }
 }

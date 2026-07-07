@@ -97,7 +97,8 @@ pub mod github_page;
 pub(crate) mod handoff_environment_creation_modal;
 pub mod keybindings;
 mod main_page;
-pub mod mcp_servers;
+pub mod marketplace_page;
+mod mcp_servers;
 pub mod mcp_servers_page;
 mod nav;
 pub mod pane_manager;
@@ -258,6 +259,8 @@ pub enum SettingsSection {
     /// workspace provider keys). Gated on `FeatureFlag::GithubAutomations`,
     /// tier `githubPolicy.automationsEnabled`, and admin permissions for writes.
     GithubAutomations,
+    /// Marketplace directory browser (org manifests, MCP registry, Open VSX).
+    Marketplace,
     BillingAndUsage,
     Appearance,
     Features,
@@ -306,6 +309,7 @@ impl Display for SettingsSection {
             SettingsSection::MCPServers => write!(f, "MCP Servers"),
             SettingsSection::Github => write!(f, "GitHub"),
             SettingsSection::GithubAutomations => write!(f, "GitHub Automations"),
+            SettingsSection::Marketplace => write!(f, "Marketplace"),
             SettingsSection::Scripting => write!(f, "Scripting"),
             SettingsSection::WarpDrive => write!(f, "Bang drive"),
             SettingsSection::WarpAgent => write!(f, "Agent"),
@@ -424,6 +428,7 @@ impl FromStr for SettingsSection {
             "MCP Servers" => Ok(Self::MCPServers),
             "GitHub" | "Github" => Ok(Self::Github),
             "GitHub Automations" | "GithubAutomations" => Ok(Self::GithubAutomations),
+            "Marketplace" => Ok(Self::Marketplace),
             "Billing and usage" => Ok(Self::BillingAndUsage),
             "Appearance" => Ok(Self::Appearance),
             "Code" => Ok(Self::Code),
@@ -1128,6 +1133,7 @@ macro_rules! update_page {
             SettingsPageViewHandle::Github(handle) => $ctx.update_view(handle, $update),
             #[cfg(feature = "github_automations")]
             SettingsPageViewHandle::GithubAutomations(handle) => $ctx.update_view(handle, $update),
+            SettingsPageViewHandle::Marketplace(handle) => $ctx.update_view(handle, $update),
         }
     };
 }
@@ -1308,6 +1314,9 @@ impl SettingsView {
                 )
             });
 
+        let marketplace_page_handle =
+            ctx.add_typed_action_view(marketplace_page::MarketplacePageView::new);
+
         let font_family = Appearance::as_ref(ctx).ui_font_family();
         let search_editor = ctx.add_typed_action_view(|ctx| {
             let options = SingleLineEditorOptions {
@@ -1367,6 +1376,8 @@ impl SettingsView {
         if let Some(github_page_handle) = github_page_handle {
             settings_pages.push(SettingsPage::new(github_page_handle));
         }
+
+        settings_pages.push(SettingsPage::new(marketplace_page_handle));
 
         #[cfg(feature = "github_automations")]
         if let Some(github_automations_page_handle) = github_automations_page_handle {
@@ -1443,6 +1454,20 @@ impl SettingsView {
             nav_items.insert(
                 insert_index,
                 SettingsNavItem::Page(SettingsSection::GithubAutomations),
+            );
+        }
+
+        // Marketplace nav entry, placed just before the Code umbrella.
+        {
+            let insert_index = nav_items
+                .iter()
+                .position(|item| {
+                    matches!(item, SettingsNavItem::Umbrella(u) if u.label == "Code")
+                })
+                .unwrap_or(nav_items.len());
+            nav_items.insert(
+                insert_index,
+                SettingsNavItem::Page(SettingsSection::Marketplace),
             );
         }
 
@@ -2213,6 +2238,7 @@ impl SettingsView {
             SettingsPageViewHandle::Github(v) => v.as_ref(app).should_render(app),
             #[cfg(feature = "github_automations")]
             SettingsPageViewHandle::GithubAutomations(v) => v.as_ref(app).should_render(app),
+            SettingsPageViewHandle::Marketplace(v) => v.as_ref(app).should_render(app),
         }
     }
 
