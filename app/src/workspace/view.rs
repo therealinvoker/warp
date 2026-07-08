@@ -279,7 +279,8 @@ use crate::env_vars::CloudEnvVarCollection;
 use crate::experiments::{BlockOnboarding, Experiment};
 use crate::launch_configs::launch_config::WindowTemplate;
 use crate::launch_configs::save_modal::{LaunchConfigModalEvent, LaunchConfigSaveModal};
-use crate::marketplace_directory::{MarketplaceDirectoryEvent, MarketplaceDirectoryView};
+use crate::marketplace_directory::pane_manager::MarketplacePaneManager;
+use crate::pane_group::MarketplacePane;
 use crate::menu::{Event as MenuEvent, Menu, MenuItem, MenuItemFields, MenuSelectionSource};
 use crate::modal::{Modal, ModalEvent, ModalViewState};
 use crate::network::{NetworkStatus, NetworkStatusEvent};
@@ -1044,7 +1045,6 @@ pub struct Workspace {
     settings_pane: ViewHandle<SettingsView>,
     import_modal: ViewHandle<ImportModal>,
     marketplace_plugin_modal: ViewHandle<MarketplacePluginModal>,
-    marketplace_directory: ViewHandle<MarketplaceDirectoryView>,
     theme_chooser_view: ViewHandle<ThemeChooser>,
     previous_theme: Option<ThemeKind>,
     reward_modal: ViewHandle<Modal<RewardView>>,
@@ -1593,21 +1593,6 @@ impl Workspace {
         modal
     }
 
-    fn build_marketplace_directory(
-        ctx: &mut ViewContext<Self>,
-    ) -> ViewHandle<MarketplaceDirectoryView> {
-        let directory = ctx.add_typed_action_view(MarketplaceDirectoryView::new);
-        ctx.subscribe_to_view(&directory, |me, _, event, ctx| match event {
-            MarketplaceDirectoryEvent::Close => {
-                me.focus_active_tab(ctx);
-                ctx.notify();
-            }
-            MarketplaceDirectoryEvent::OpenCustomize => {
-                me.show_settings_with_section(None, ctx);
-            }
-        });
-        directory
-    }
 
     fn handle_import_modal_event(&mut self, event: &ImportModalEvent, ctx: &mut ViewContext<Self>) {
         match event {
@@ -3248,7 +3233,6 @@ impl Workspace {
 
         let import_modal = Self::build_import_modal(ctx);
         let marketplace_plugin_modal = Self::build_marketplace_plugin_modal(ctx);
-        let marketplace_directory = Self::build_marketplace_directory(ctx);
 
         Self::observe_server_api(ctx);
 
@@ -3424,7 +3408,6 @@ impl Workspace {
             theme_deletion_modal,
             import_modal,
             marketplace_plugin_modal,
-            marketplace_directory,
             window_id: ctx.window_id(),
             toast_stack,
             agent_toast_stack,
@@ -15144,6 +15127,46 @@ impl Workspace {
         });
     }
 
+    /// Opens the Marketplace as a main-canvas tab (mirroring the Settings
+    /// pane). If a pane already exists for the current window, re-syncs its
+    /// team list, refreshes every directory, and focuses it instead of
+    /// opening another one.
+    pub(crate) fn open_marketplace_pane(&mut self, ctx: &mut ViewContext<Self>) {
+        let manager = MarketplacePaneManager::handle(ctx);
+
+        if let Some(locator) = manager.as_ref(ctx).find_pane(ctx.window_id()) {
+            if let Some(tab) = self
+                .tabs
+                .iter()
+                .find(|tab| tab.pane_group.id() == locator.pane_group_id)
+            {
+                let pane_group = tab.pane_group.clone();
+                let marketplace_view = pane_group.read(ctx, |pane_group, ctx| {
+                    pane_group
+                        .downcast_pane_by_id::<MarketplacePane>(locator.pane_id)
+                        .map(|pane| pane.marketplace_view(ctx))
+                });
+                if let Some(marketplace_view) = marketplace_view {
+                    marketplace_view.update(ctx, |view, ctx| view.reopen(ctx));
+                }
+            }
+            self.focus_pane(locator, ctx);
+            return;
+        }
+
+        let panes_layout = PanesLayout::Snapshot(Box::new(PaneNodeSnapshot::Leaf(LeafSnapshot {
+            is_focused: true,
+            custom_vertical_tabs_title: None,
+            contents: LeafContents::Marketplace,
+        })));
+        self.add_tab_with_pane_layout(
+            panes_layout,
+            Arc::new(HashMap::new()),
+            Some("Marketplace".to_owned()),
+            ctx,
+        );
+    }
+
     fn show_handoff_environment_creation_modal(&mut self, ctx: &mut ViewContext<Self>) {
         // Capture the initiating source view now, before async creation begins.
         // If we waited until the Created callback, the user may have switched panes.
@@ -17601,10 +17624,7 @@ impl Workspace {
                 ctx.notify();
             }
             DrivePanelEvent::OpenMarketplaceDirectory => {
-                self.marketplace_directory.update(ctx, |directory, ctx| {
-                    directory.open(ctx);
-                });
-                ctx.notify();
+                self.open_marketplace_pane(ctx);
             }
             DrivePanelEvent::OpenMCPServerCollection => {
                 self.show_settings_with_section(Some(SettingsSection::MCPServers), ctx);
@@ -23890,10 +23910,7 @@ impl TypedActionView for Workspace {
             AddAmbientAgentTab => self.add_ambient_agent_tab(ctx),
             AddAgentTab => self.add_terminal_tab_with_new_agent_view(ctx),
             OpenMarketplaceDirectory => {
-                self.marketplace_directory.update(ctx, |directory, ctx| {
-                    directory.open(ctx);
-                });
-                ctx.notify();
+                self.open_marketplace_pane(ctx);
             }
             AddDockerSandboxTab => self.add_docker_sandbox_tab(ctx),
             StartAgentOnboardingTutorial(tutorial) => {
@@ -26918,10 +26935,6 @@ impl View for Workspace {
 
         if self.marketplace_plugin_modal.as_ref(app).is_open() {
             stack.add_child(ChildView::new(&self.marketplace_plugin_modal).finish());
-        }
-
-        if self.marketplace_directory.as_ref(app).is_open() {
-            stack.add_child(ChildView::new(&self.marketplace_directory).finish());
         }
 
         if self.current_workspace_state.is_theme_deletion_modal_open {

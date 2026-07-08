@@ -1,6 +1,6 @@
-//! The Bang Marketplace: a full-screen browsable directory overlay, modeled
-//! after Cursor's Marketplace — a left rail (search + sections + install
-//! target) and a searchable grid of cards.
+//! The Bang Marketplace: a browsable directory pane hosted in the main
+//! canvas (like Settings), modeled after Cursor's Marketplace — a left rail
+//! (search + sections + install target) and a searchable grid of cards.
 //!
 //! Data is live, served by the Bang backend's `SearchMarketplace` op across
 //! three directories:
@@ -14,20 +14,20 @@
 //! templatable MCP server cloud objects (installed locally too); plugin
 //! entries become `MarketplacePlugin` drive objects.
 
-use pathfinder_geometry::vector::vec2f;
-use warp_core::ui::theme::Fill;
+pub mod pane_manager;
+
 use warpui::elements::{
-    Align, Border, ChildAnchor, ChildView, Clipped, ConstrainedBox, Container, CornerRadius,
-    CrossAxisAlignment, Expanded, Flex, Hoverable, MainAxisAlignment, MainAxisSize,
-    MouseStateHandle, OffsetPositioning, Padding, ParentAnchor, ParentElement, ParentOffsetBounds,
-    Radius, Shrinkable, Stack, Text, Wrap,
+    Border, ChildView, Clipped, ConstrainedBox, Container, CornerRadius, CrossAxisAlignment,
+    Expanded, Flex, Hoverable, MainAxisSize, MouseStateHandle, Padding, ParentElement, Radius,
+    Shrinkable, Text, Wrap,
 };
 use warpui::fonts::Weight;
 use warpui::platform::Cursor;
+use warpui::text_layout::ClipConfig;
 use warpui::ui_components::components::{UiComponent, UiComponentStyles};
 use warpui::{
-    AppContext, Element, Entity, EventContext, SingletonEntity, TypedActionView, View, ViewContext,
-    ViewHandle,
+    AppContext, Element, Entity, EventContext, ModelHandle, SingletonEntity, TypedActionView, View,
+    ViewContext, ViewHandle,
 };
 
 use crate::ai::mcp::parsing::ParsedTemplatableMCPServerResult;
@@ -36,6 +36,9 @@ use crate::appearance::Appearance;
 use crate::cloud_object::{CloudObjectEventEntrypoint, Space};
 use crate::editor::{EditorView, Event as EditorEvent, SingleLineEditorOptions};
 use crate::marketplace_plugins::{CloudMarketplacePluginModel, MarketplacePlugin, PluginSource};
+use crate::pane_group::focus_state::PaneFocusHandle;
+use crate::pane_group::pane::view::{self, HeaderContent, StandardHeader, StandardHeaderOptions};
+use crate::pane_group::{BackingView, PaneConfiguration, PaneEvent};
 use crate::server::cloud_objects::update_manager::{InitiatedBy, UpdateManager};
 use crate::server::ids::ClientId;
 use crate::server::server_api::marketplace::{
@@ -45,22 +48,21 @@ use crate::server::server_api::ServerApiProvider;
 use crate::ui_components::avatar::{Avatar, AvatarContent};
 use crate::ui_components::blended_colors;
 use crate::view_components::DismissibleToast;
+use crate::workspace::WorkspaceAction;
 use crate::workspaces::user_workspaces::UserWorkspaces;
 use crate::ToastStack;
 
-const PANEL_WIDTH: f32 = 940.;
-const PANEL_HEIGHT: f32 = 660.;
-const PANEL_CORNER_RADIUS: f32 = 10.;
 const NAV_WIDTH: f32 = 216.;
 const CARD_WIDTH: f32 = 320.;
 const CARD_SPACING: f32 = 12.;
-const CLOSE_BUTTON_SIZE: f32 = 24.;
-const TITLE_FONT_SIZE: f32 = 18.;
 const NAV_FONT_SIZE: f32 = 13.;
 const CARD_TITLE_FONT_SIZE: f32 = 14.;
 const CARD_BODY_FONT_SIZE: f32 = 12.;
 
 const DOCUMENTATION_URL: &str = "https://modelcontextprotocol.io/docs";
+
+/// Header text for the marketplace pane.
+pub const MARKETPLACE_HEADER_TEXT: &str = "Marketplace";
 
 /// The left-rail sections. `All` merges every directory; the rest filter to
 /// one backing source.
@@ -116,7 +118,6 @@ enum SourceState {
 
 #[derive(Debug, Clone)]
 pub enum MarketplaceDirectoryAction {
-    Close,
     SelectSection(usize),
     SelectInstallSpace(usize),
     /// Install the entry with this id from this source.
@@ -125,15 +126,22 @@ pub enum MarketplaceDirectoryAction {
     OpenDocumentation,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MarketplaceDirectoryEvent {
-    Close,
-    /// Open the app's customization surface (Settings).
-    OpenCustomize,
+    Pane(PaneEvent),
 }
 
+/// Overflow-menu actions for the pane header (currently none).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MarketplaceHeaderAction {}
+
+/// Custom header actions (currently none).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MarketplaceHeaderCustomAction {}
+
 pub struct MarketplaceDirectoryView {
-    is_open: bool,
+    pane_configuration: ModelHandle<PaneConfiguration>,
+    focus_handle: Option<PaneFocusHandle>,
     selected_section: Section,
     /// Which drive space "Get" installs into.
     install_space: Space,
@@ -144,7 +152,6 @@ pub struct MarketplaceDirectoryView {
     /// The query the current `source_states` were fetched with; a stale-guard
     /// so an old in-flight response can't clobber a newer search.
     fetched_query: String,
-    close_button_mouse_state: MouseStateHandle,
     customize_mouse_state: MouseStateHandle,
     documentation_mouse_state: MouseStateHandle,
     section_mouse_states: Vec<MouseStateHandle>,
@@ -166,15 +173,18 @@ impl MarketplaceDirectoryView {
             _ => ctx.notify(),
         });
 
-        Self {
-            is_open: false,
+        let pane_configuration =
+            ctx.add_model(|_ctx| PaneConfiguration::new(MARKETPLACE_HEADER_TEXT));
+
+        let mut view = Self {
+            pane_configuration,
+            focus_handle: None,
             selected_section: Section::All,
             install_space: Space::Personal,
             space_options: Vec::new(),
             search_editor,
             source_states: Default::default(),
             fetched_query: String::new(),
-            close_button_mouse_state: Default::default(),
             customize_mouse_state: Default::default(),
             documentation_mouse_state: Default::default(),
             section_mouse_states: Section::ALL
@@ -182,29 +192,25 @@ impl MarketplaceDirectoryView {
                 .map(|_| MouseStateHandle::default())
                 .collect(),
             card_mouse_states: Vec::new(),
-        }
+        };
+        view.rebuild_space_options(ctx);
+        view.refresh(ctx);
+        view
     }
 
-    pub fn is_open(&self) -> bool {
-        self.is_open
+    pub fn pane_configuration(&self) -> ModelHandle<PaneConfiguration> {
+        self.pane_configuration.clone()
     }
 
-    pub fn open(&mut self, ctx: &mut ViewContext<Self>) {
-        self.is_open = true;
-        self.selected_section = Section::All;
-        self.rebuild_space_options(ctx);
-        self.search_editor.update(ctx, |editor, ctx| {
-            editor.clear_buffer_and_reset_undo_stack(ctx);
-        });
+    pub fn focus(&mut self, ctx: &mut ViewContext<Self>) {
         ctx.focus(&self.search_editor);
-        self.refresh(ctx);
-        ctx.notify();
     }
 
-    fn close(&mut self, ctx: &mut ViewContext<Self>) {
-        self.is_open = false;
-        ctx.emit(MarketplaceDirectoryEvent::Close);
-        ctx.notify();
+    /// Re-syncs teams and re-queries every directory. Called when the user
+    /// re-triggers the open action while the pane is already open.
+    pub fn reopen(&mut self, ctx: &mut ViewContext<Self>) {
+        self.rebuild_space_options(ctx);
+        self.refresh(ctx);
     }
 
     fn rebuild_space_options(&mut self, app: &AppContext) {
@@ -472,41 +478,6 @@ impl MarketplaceDirectoryView {
 
     // ── Rendering ──────────────────────────────────────────────────────────
 
-    fn render_header(&self, appearance: &Appearance) -> Box<dyn Element> {
-        let theme = appearance.theme();
-
-        let title = Text::new(
-            "Marketplace".to_string(),
-            appearance.ui_font_family(),
-            TITLE_FONT_SIZE,
-        )
-        .with_color(theme.active_ui_text_color().into())
-        .finish();
-
-        let close_button = appearance
-            .ui_builder()
-            .close_button(CLOSE_BUTTON_SIZE, self.close_button_mouse_state.clone())
-            .build()
-            .on_click(|ctx, _, _| ctx.dispatch_typed_action(MarketplaceDirectoryAction::Close))
-            .finish();
-
-        Container::new(
-            Flex::row()
-                .with_main_axis_size(MainAxisSize::Max)
-                .with_main_axis_alignment(MainAxisAlignment::SpaceBetween)
-                .with_cross_axis_alignment(CrossAxisAlignment::Center)
-                .with_child(Shrinkable::new(1., Align::new(title).left().finish()).finish())
-                .with_child(close_button)
-                .finish(),
-        )
-        .with_padding_left(20.)
-        .with_padding_right(16.)
-        .with_padding_top(14.)
-        .with_padding_bottom(14.)
-        .with_border(Border::bottom(1.).with_border_fill(theme.outline()))
-        .finish()
-    }
-
     fn render_nav_item(
         label: &str,
         selected: bool,
@@ -666,10 +637,21 @@ impl MarketplaceDirectoryView {
         let description_text: String = entry.description.chars().take(140).collect();
         let entry_id = entry.entry_id.inner().to_owned();
         let font_family = appearance.ui_font_family();
+        let icon_url = entry.icon_url.clone();
 
         Hoverable::new(mouse_state, move |state| {
+            // Real directory icon when the entry has one (Open VSX always
+            // does); the display-name initial otherwise, which is also the
+            // Image variant's before-load placeholder.
+            let avatar_content = match &icon_url {
+                Some(url) => AvatarContent::Image {
+                    url: url.clone(),
+                    display_name: title_text.clone(),
+                },
+                None => AvatarContent::DisplayName(title_text.clone()),
+            };
             let avatar = Avatar::new(
-                AvatarContent::DisplayName(title_text.clone()),
+                avatar_content,
                 UiComponentStyles {
                     width: Some(32.),
                     height: Some(32.),
@@ -824,6 +806,7 @@ impl View for MarketplaceDirectoryView {
         let appearance = Appearance::as_ref(app);
         let theme = appearance.theme();
 
+        // Full-bleed pane content: left rail + card grid filling the canvas.
         let body = Flex::row()
             .with_main_axis_size(MainAxisSize::Max)
             .with_child(
@@ -834,36 +817,8 @@ impl View for MarketplaceDirectoryView {
             .with_child(Expanded::new(1., self.render_content(appearance, app)).finish())
             .finish();
 
-        let contents = Flex::column()
-            .with_main_axis_size(MainAxisSize::Max)
-            .with_child(self.render_header(appearance))
-            .with_child(Shrinkable::new(1., body).finish())
-            .finish();
-
-        let panel = ConstrainedBox::new(
-            Container::new(contents)
-                .with_background(theme.surface_2())
-                .with_corner_radius(CornerRadius::with_all(Radius::Pixels(PANEL_CORNER_RADIUS)))
-                .with_border(Border::all(1.).with_border_fill(theme.outline()))
-                .finish(),
-        )
-        .with_width(PANEL_WIDTH)
-        .with_height(PANEL_HEIGHT)
-        .finish();
-
-        let mut stack = Stack::new();
-        stack.add_positioned_child(
-            panel,
-            OffsetPositioning::offset_from_parent(
-                vec2f(0., 0.),
-                ParentOffsetBounds::WindowByPosition,
-                ParentAnchor::Center,
-                ChildAnchor::Center,
-            ),
-        );
-
-        Container::new(Align::new(stack.finish()).finish())
-            .with_background_color(Fill::blur().into())
+        Container::new(body)
+            .with_background(theme.background())
             .finish()
     }
 }
@@ -873,7 +828,6 @@ impl TypedActionView for MarketplaceDirectoryView {
 
     fn handle_action(&mut self, action: &Self::Action, ctx: &mut ViewContext<Self>) {
         match action {
-            MarketplaceDirectoryAction::Close => self.close(ctx),
             MarketplaceDirectoryAction::SelectSection(index) => {
                 if let Some(section) = Section::ALL.get(*index) {
                     self.selected_section = *section;
@@ -891,12 +845,63 @@ impl TypedActionView for MarketplaceDirectoryView {
                 self.install(*source, &entry_id, ctx);
             }
             MarketplaceDirectoryAction::OpenCustomize => {
-                ctx.emit(MarketplaceDirectoryEvent::OpenCustomize);
-                self.close(ctx);
+                ctx.dispatch_typed_action(&WorkspaceAction::ShowSettings as &dyn warpui::Action);
             }
             MarketplaceDirectoryAction::OpenDocumentation => {
                 ctx.open_url(DOCUMENTATION_URL);
             }
         }
+    }
+}
+
+impl BackingView for MarketplaceDirectoryView {
+    type PaneHeaderOverflowMenuAction = MarketplaceHeaderAction;
+    type CustomAction = MarketplaceHeaderCustomAction;
+    type AssociatedData = ();
+
+    fn handle_pane_header_overflow_menu_action(
+        &mut self,
+        _action: &Self::PaneHeaderOverflowMenuAction,
+        _ctx: &mut ViewContext<Self>,
+    ) {
+        // No overflow menu items are registered.
+    }
+
+    fn handle_custom_action(
+        &mut self,
+        _custom_action: &Self::CustomAction,
+        _ctx: &mut ViewContext<Self>,
+    ) {
+        // No custom header actions are registered.
+    }
+
+    fn close(&mut self, ctx: &mut ViewContext<Self>) {
+        ctx.emit(MarketplaceDirectoryEvent::Pane(PaneEvent::Close));
+    }
+
+    fn focus_contents(&mut self, ctx: &mut ViewContext<Self>) {
+        self.focus(ctx);
+    }
+
+    fn render_header_content(
+        &self,
+        _ctx: &view::HeaderRenderContext<'_>,
+        _app: &AppContext,
+    ) -> HeaderContent {
+        HeaderContent::Standard(StandardHeader {
+            title: MARKETPLACE_HEADER_TEXT.to_string(),
+            title_secondary: None,
+            title_style: None,
+            title_clip_config: ClipConfig::start(),
+            title_max_width: None,
+            left_of_title: None,
+            right_of_title: None,
+            left_of_overflow: None,
+            options: StandardHeaderOptions::default(),
+        })
+    }
+
+    fn set_focus_handle(&mut self, focus_handle: PaneFocusHandle, _ctx: &mut ViewContext<Self>) {
+        self.focus_handle = Some(focus_handle);
     }
 }

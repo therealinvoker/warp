@@ -153,6 +153,10 @@ pub enum LeafContents {
     /// The in-app network log pane. Not persisted across restarts because the
     /// backing log is an in-memory ring buffer that starts empty on launch.
     NetworkLog,
+    /// The Marketplace directory pane. Not persisted: it refetches live
+    /// directory data on open, so a restored pane carries no state worth
+    /// saving; users reopen it from the sidebar/drive entry points.
+    Marketplace,
     /// A new first-time user experience which prioritizes choosing a coding repository.
     GetStarted,
 }
@@ -174,6 +178,8 @@ impl LeafContents {
             // starts empty on launch; persisting would also regress back to
             // an on-disk log via the app-state database.
             LeafContents::NetworkLog
+            // Marketplace: refetches live directory data on open.
+            | LeafContents::Marketplace
             // Environment management panes are opened on-demand via workspace
             // actions and have no persistable state.
             | LeafContents::EnvironmentManagement(_) => false,

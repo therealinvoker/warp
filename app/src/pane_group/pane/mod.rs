@@ -22,6 +22,7 @@ pub(super) mod get_started_pane;
 pub(super) mod get_started_view;
 #[cfg(not(target_family = "wasm"))]
 pub(super) mod local_harness_launch;
+pub(super) mod marketplace_pane;
 pub(super) mod network_log_pane;
 pub(super) mod notebook_pane;
 pub(super) mod settings_pane;
@@ -58,6 +59,7 @@ use crate::notebooks::file::FileNotebookView;
 use crate::notebooks::notebook::NotebookView;
 use crate::pane_group::focus_state::PaneFocusHandle;
 use crate::pane_group::pane::get_started_view::GetStartedView;
+use crate::marketplace_directory::MarketplaceDirectoryView;
 use crate::server::network_log_view::NetworkLogView;
 use crate::server::telemetry::SharingDialogSource;
 use crate::settings::PaneSettings;
@@ -146,6 +148,7 @@ pub(crate) enum IPaneType {
     ExecutionProfileEditor,
     GetStarted,
     NetworkLog,
+    Marketplace,
     DeferredPlaceholder,
     /// A pane type only for tests.
     #[cfg(test)]
@@ -170,6 +173,7 @@ impl Display for IPaneType {
             IPaneType::ExecutionProfileEditor => write!(f, "Execution Profile Editor"),
             IPaneType::GetStarted => write!(f, "GetStarted"),
             IPaneType::NetworkLog => write!(f, "Network Log"),
+            IPaneType::Marketplace => write!(f, "Marketplace"),
             IPaneType::DeferredPlaceholder => write!(f, "Placeholder"),
             #[cfg(test)]
             IPaneType::Dummy => write!(f, "Dummy"),
@@ -274,6 +278,13 @@ impl PaneId {
         Self::new_from_ctx(IPaneType::NetworkLog, ctx)
     }
 
+    /// Creates a [`PaneId`] from a [`ViewContext<PaneView<MarketplaceDirectoryView>>`].
+    pub fn from_marketplace_pane_ctx(
+        ctx: &ViewContext<PaneView<MarketplaceDirectoryView>>,
+    ) -> Self {
+        Self::new_from_ctx(IPaneType::Marketplace, ctx)
+    }
+
     /// Creates a [`PaneId`] from a [`PaneView<TerminalView>`] entity ID.
     pub fn from_terminal_pane_view(
         terminal_pane_view: &ViewHandle<terminal_pane::TerminalPaneView>,
@@ -376,6 +387,13 @@ impl PaneId {
         network_log_pane_view: &ViewHandle<PaneView<NetworkLogView>>,
     ) -> Self {
         Self::new(IPaneType::NetworkLog, network_log_pane_view)
+    }
+
+    /// Creates a [`PaneId`] from a [`PaneView<MarketplaceDirectoryView>`] entity ID.
+    pub fn from_marketplace_pane_view(
+        marketplace_pane_view: &ViewHandle<PaneView<MarketplaceDirectoryView>>,
+    ) -> Self {
+        Self::new(IPaneType::Marketplace, marketplace_pane_view)
     }
 
     #[cfg_attr(not(feature = "local_fs"), allow(dead_code))]
@@ -496,6 +514,10 @@ impl PaneId {
             }
             IPaneType::NetworkLog => {
                 ChildView::<PaneView<NetworkLogView>>::with_id(self.0.pane_view_id).finish()
+            }
+            IPaneType::Marketplace => {
+                ChildView::<PaneView<MarketplaceDirectoryView>>::with_id(self.0.pane_view_id)
+                    .finish()
             }
             IPaneType::DeferredPlaceholder => warpui::elements::Empty::new().finish(),
             #[cfg(test)]
