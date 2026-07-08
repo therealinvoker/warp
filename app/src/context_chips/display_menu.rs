@@ -218,6 +218,9 @@ pub struct DisplayChipMenu {
     /// the user's query doesn't exactly match an existing item. See
     /// [`CreateItemFromQueryFn`].
     create_item_from_query: Option<Arc<CreateItemFromQueryFn>>,
+    /// Hover state for the pinned "Open Folder" row that opens the OS-native
+    /// folder picker. Only rendered for [`ChipMenuType::Directories`].
+    browse_native_mouse_state: MouseStateHandle,
 
     // Environment sidecar state
     window_id: WindowId,
@@ -235,6 +238,7 @@ pub enum DisplayChipMenuAction {
     SelectDown,
     SelectEnter,
     SelectFixedFooterOption,
+    SelectBrowseNative,
     CopyEnvironmentSidecarField { key: String, value: String },
     Close,
 }
@@ -394,6 +398,7 @@ impl DisplayChipMenu {
             search_query: String::new(),
             chip_menu_type,
             create_item_from_query: None,
+            browse_native_mouse_state: Default::default(),
 
             window_id: ctx.window_id(),
             env_sidecar_copy_id_mouse_state: Default::default(),
@@ -1046,6 +1051,72 @@ impl DisplayChipMenu {
         .finish()
     }
 
+    /// Renders the pinned "Open Folder" row that opens the OS-native folder
+    /// picker. Only shown for [`ChipMenuType::Directories`] and pinned at the
+    /// bottom of the menu, matching the native "Open Folder" affordance. This is
+    /// a mouse-only affordance (not part of the keyboard-navigable list/footer).
+    fn render_browse_native_option(&self, app: &AppContext) -> Box<dyn Element> {
+        let appearance = Appearance::as_ref(app);
+        let theme = appearance.theme();
+
+        let font_size = appearance.ui_font_size();
+        let icon_size = font_size * 0.8;
+        let item_horizontal_padding = self.menu_item_horizontal_padding();
+        let item_vertical_padding = self.menu_item_vertical_padding();
+
+        ConstrainedBox::new(
+            Hoverable::new(self.browse_native_mouse_state.clone(), move |mouse_state| {
+                let is_active = mouse_state.is_hovered();
+
+                let background_color = is_active.then(|| theme.accent());
+                let text_color = if is_active {
+                    theme.main_text_color(theme.accent()).into_solid()
+                } else {
+                    theme.sub_text_color(theme.surface_2()).into_solid()
+                };
+
+                let mut row = Flex::row().with_cross_axis_alignment(CrossAxisAlignment::Center);
+                row.add_child(
+                    Container::new(
+                        ConstrainedBox::new(
+                            Icon::Folder
+                                .to_warpui_icon(Fill::Solid(text_color))
+                                .finish(),
+                        )
+                        .with_height(icon_size)
+                        .with_width(icon_size)
+                        .finish(),
+                    )
+                    .with_margin_right(8.)
+                    .finish(),
+                );
+                row.add_child(
+                    Text::new_inline("Open Folder", appearance.ui_font_family(), font_size)
+                        .autosize_text(MIN_FONT_SIZE)
+                        .with_color(text_color)
+                        .finish(),
+                );
+
+                let mut container = Container::new(row.finish())
+                    .with_horizontal_padding(item_horizontal_padding)
+                    .with_vertical_padding(item_vertical_padding)
+                    .with_border(Border::top(1.0));
+
+                if let Some(bg_color) = background_color {
+                    container = container.with_background(bg_color);
+                }
+
+                container.finish()
+            })
+            .on_click(|ctx, _, _| {
+                ctx.dispatch_typed_action(DisplayChipMenuAction::SelectBrowseNative);
+            })
+            .finish(),
+        )
+        .with_width(self.menu_width())
+        .finish()
+    }
+
     fn render_env_search_footer(
         &self,
         search_input: &ViewHandle<EditorView>,
@@ -1405,6 +1476,11 @@ impl View for DisplayChipMenu {
                             .finish(),
                     );
                 }
+                // Pinned at the very bottom (below the scrollable list), matching
+                // the native "Open Folder" affordance.
+                if self.chip_menu_type == ChipMenuType::Directories {
+                    main_container.add_child(self.render_browse_native_option(app));
+                }
             }
         }
 
@@ -1453,6 +1529,9 @@ pub struct GenericMenuEvent {
 
 pub enum PromptDisplayMenuEvent {
     MenuAction(GenericMenuEvent),
+    /// The user asked to pick a directory via the OS-native folder picker
+    /// (the pinned "Open Folder" row in the working-directory menu).
+    BrowseNativeDirectory,
     CloseMenu,
 }
 
@@ -1477,6 +1556,10 @@ impl TypedActionView for DisplayChipMenu {
             DisplayChipMenuAction::SelectDown => self.select_next(ctx),
             DisplayChipMenuAction::SelectEnter => self.select_enter(ctx),
             DisplayChipMenuAction::SelectFixedFooterOption => self.select_fixed_footer_option(ctx),
+            DisplayChipMenuAction::SelectBrowseNative => {
+                ctx.emit(PromptDisplayMenuEvent::BrowseNativeDirectory);
+                ctx.notify();
+            }
             DisplayChipMenuAction::CopyEnvironmentSidecarField { key, value } => {
                 ctx.clipboard()
                     .write(ClipboardContent::plain_text(value.clone()));

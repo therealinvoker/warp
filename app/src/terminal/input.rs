@@ -77,24 +77,28 @@ use warp_core::user_preferences::GetUserPreferences as _;
 use warp_editor::editor::NavigationKey;
 use warp_util::path::ShellFamily;
 use warpui::accessibility::{AccessibilityContent, ActionAccessibilityContent, WarpA11yRole};
+use warpui::assets::asset_cache::{AssetCache, AssetSource};
 use warpui::clipboard::{ClipboardContent, ImageData};
 use warpui::clipboard_utils::CLIPBOARD_IMAGE_MIME_TYPES;
 use warpui::color::ColorU;
 use warpui::elements::{
     resizable_state_handle, Align, AnchorPair, ChildAnchor, Clipped, ConstrainedBox, Container,
     CornerRadius, CrossAxisAlignment, DispatchEventResult, DropTargetData, Element, EventHandler,
-    Flex, MainAxisAlignment, MainAxisSize, MouseStateHandle, OffsetPositioning, OffsetType,
-    ParentAnchor, ParentElement, PositionedElementOffsetBounds, PositioningAxis, Radius,
-    ResizableStateHandle, SavePosition, SelectionHandle, Text, Wrap, XAxisAnchor, YAxisAnchor,
+    Flex, Image as WarpImage, MainAxisAlignment, MainAxisSize, MouseStateHandle, OffsetPositioning,
+    OffsetType, ParentAnchor, ParentElement, PositionedElementOffsetBounds, PositioningAxis,
+    Radius, ResizableStateHandle, SavePosition, SelectionHandle, Text, Wrap, XAxisAnchor,
+    YAxisAnchor,
 };
 pub use warpui::elements::{ParentElement as _, Stack};
 pub use warpui::geometry::vector::{vec2f, Vector2F};
+use warpui::image_cache::{CacheOption, ImageType};
 use warpui::keymap::{BindingDescription, EditableBinding, FixedBinding, Keystroke};
 use warpui::platform::OperatingSystem;
 use warpui::presenter::ChildView;
 #[cfg(all(feature = "local_fs", not(target_family = "wasm")))]
 use warpui::r#async::FutureExt as _;
 use warpui::r#async::SpawnedFutureHandle;
+use warpui::scene::Border;
 use warpui::text_layout::TextStyle;
 use warpui::ui_components::chip::Chip;
 use warpui::ui_components::components::{Coords, UiComponent, UiComponentStyles};
@@ -1777,6 +1781,9 @@ struct AttachmentChip {
     attachment_type: AttachmentType,
     /// Index into the unified pending_attachments list for deletion.
     index: usize,
+    /// For image attachments, the asset-cache source of the decoded image so the
+    /// chip can render an inline thumbnail. `None` for files or if decode failed.
+    image_asset: Option<AssetSource>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -3288,16 +3295,38 @@ impl Input {
                 }
                 BlocklistAIContextEvent::UpdatedPendingContext { .. } => {
                     me.update_image_context_options(ctx);
-                    me.attachment_chips = context_model
+                    // Collect the display data first so the immutable `context_model`
+                    // borrow is released before we take a mutable `ctx` to stage the
+                    // thumbnail image bytes in the asset cache.
+                    let attachments: Vec<(String, AttachmentType, Option<String>)> = context_model
                         .as_ref(ctx)
                         .pending_attachments()
                         .iter()
+                        .map(|attachment| {
+                            let image_data = match attachment {
+                                PendingAttachment::Image(image) => Some(image.data.clone()),
+                                PendingAttachment::File(_) => None,
+                            };
+                            (
+                                attachment.file_name().to_string(),
+                                attachment.attachment_type(),
+                                image_data,
+                            )
+                        })
+                        .collect();
+                    me.attachment_chips = attachments
+                        .into_iter()
                         .enumerate()
-                        .map(|(i, attachment)| AttachmentChip {
-                            file_name: attachment.file_name().to_string(),
-                            mouse_state_handle: Default::default(),
-                            attachment_type: attachment.attachment_type(),
-                            index: i,
+                        .map(|(i, (file_name, attachment_type, image_data))| {
+                            let image_asset = image_data
+                                .and_then(|data| Self::stage_attachment_thumbnail(&data, ctx));
+                            AttachmentChip {
+                                file_name,
+                                mouse_state_handle: Default::default(),
+                                attachment_type,
+                                index: i,
+                                image_asset,
+                            }
                         })
                         .collect_vec();
                 }
@@ -15381,6 +15410,28 @@ impl Input {
         }
     }
 
+    /// Decodes base64 image data into the asset cache so an attachment chip can
+    /// render an inline thumbnail, returning the `AssetSource` to hand to
+    /// `WarpImage`. Returns `None` when the data can't be decoded. The asset id
+    /// is derived from the content so identical images dedupe and changed
+    /// content never resolves to a stale cached thumbnail.
+    fn stage_attachment_thumbnail(
+        base64_data: &str,
+        ctx: &mut ViewContext<Self>,
+    ) -> Option<AssetSource> {
+        use std::hash::{Hash, Hasher};
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(base64_data)
+            .ok()?;
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        bytes.hash(&mut hasher);
+        let id = format!("pending-attachment-thumb-{:016x}", hasher.finish());
+        AssetCache::handle(ctx).update(ctx, |asset_cache, ctx| {
+            asset_cache.insert_raw_asset_bytes::<ImageType>(id.clone(), &bytes, ctx);
+        });
+        Some(AssetSource::Raw { id })
+    }
+
     fn render_attachment_chips(&self, appearance: &Appearance) -> Option<Box<dyn Element>> {
         if self.attachment_chips.is_empty() {
             None
@@ -15420,6 +15471,47 @@ impl Input {
                 });
             })
             .finish();
+
+        // Image attachments render an inline thumbnail (click to open the
+        // lightbox) rather than the generic icon + filename chip.
+        if let (AttachmentType::Image, Some(asset_source)) =
+            (chip.attachment_type, chip.image_asset.as_ref())
+        {
+            const ATTACHMENT_THUMBNAIL_HEIGHT: f32 = 36.;
+            const ATTACHMENT_THUMBNAIL_MAX_WIDTH: f32 = 160.;
+            let preview_chip_index = chip.index;
+            let thumbnail = WarpImage::new(asset_source.clone(), CacheOption::BySize)
+                .contain()
+                .with_corner_radius(CornerRadius::with_all(Radius::Pixels(4.)));
+            let thumbnail = ConstrainedBox::new(Box::new(thumbnail.layout_using_paint_bounds()))
+                .with_max_height(ATTACHMENT_THUMBNAIL_HEIGHT)
+                .with_max_width(ATTACHMENT_THUMBNAIL_MAX_WIDTH)
+                .finish();
+            let row = Flex::row()
+                .with_cross_axis_alignment(CrossAxisAlignment::Center)
+                .with_main_axis_size(MainAxisSize::Min)
+                .with_child(thumbnail)
+                .with_child(Container::new(close_button).with_margin_left(6.).finish())
+                .finish();
+            let container = Container::new(row)
+                .with_horizontal_padding(4.)
+                .with_vertical_padding(2.)
+                .with_margin_right(6.)
+                .with_border(
+                    Border::all(1.)
+                        .with_border_fill(internal_colors::neutral_4(appearance.theme())),
+                )
+                .with_corner_radius(CornerRadius::with_all(Radius::Pixels(5.)))
+                .finish();
+            return EventHandler::new(container)
+                .on_left_mouse_down(move |ctx, _, _| {
+                    ctx.dispatch_typed_action(TerminalAction::OpenAttachmentLightbox {
+                        index: preview_chip_index,
+                    });
+                    DispatchEventResult::StopPropagation
+                })
+                .finish();
+        }
 
         let icon = match chip.attachment_type {
             AttachmentType::Image => Icon::Image,

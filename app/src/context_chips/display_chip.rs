@@ -907,6 +907,7 @@ impl DisplayChip {
                         me.close_git_branch_menu(ctx);
                         ctx.notify();
                     }
+                    PromptDisplayMenuEvent::BrowseNativeDirectory => {}
                     PromptDisplayMenuEvent::CloseMenu => {
                         me.close_git_branch_menu(ctx);
                         ctx.emit(PromptDisplayChipEvent::ToggleMenu { open: false });
@@ -1029,6 +1030,28 @@ impl DisplayChip {
                                 ctx.notify();
                             }
                         }
+                    }
+                    PromptDisplayMenuEvent::BrowseNativeDirectory => {
+                        let chip = ctx.handle();
+                        ctx.open_file_picker(
+                            move |result, ctx| {
+                                let Ok(paths) = result else { return };
+                                let Some(path) = paths.into_iter().next() else {
+                                    return;
+                                };
+                                let Some(chip) = chip.upgrade(ctx) else {
+                                    return;
+                                };
+                                chip.update(ctx, |chip, ctx| {
+                                    ctx.emit(PromptDisplayChipEvent::TryExecuteCommand(
+                                        PromptChipShellCommand::ChangeDirectory { dir_name: path },
+                                    ));
+                                    chip.close_working_directory_menu(ctx);
+                                    ctx.notify();
+                                });
+                            },
+                            warpui::platform::FilePickerConfiguration::new().folders_only(),
+                        );
                     }
                     PromptDisplayMenuEvent::CloseMenu => {
                         me.close_working_directory_menu(ctx);
