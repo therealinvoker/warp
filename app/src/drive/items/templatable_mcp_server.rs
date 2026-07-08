@@ -70,20 +70,21 @@ impl WarpDriveItem for WarpDriveTemplatableMCPServer {
         let mut text = Flex::column().with_child(Container::new(title).finish());
 
         if let Some(description) = model.description.clone() {
-            let description_text = appearance
-                .ui_builder()
-                .paragraph(description)
-                .with_style(UiComponentStyles {
-                    font_family_id: Some(appearance.ui_font_family()),
-                    font_color: Some(
-                        appearance
-                            .theme()
-                            .sub_text_color(appearance.theme().surface_2())
-                            .into(),
-                    ),
-                    font_size: Some(12.),
-                    ..Default::default()
-                });
+            let description_text =
+                appearance
+                    .ui_builder()
+                    .paragraph(description)
+                    .with_style(UiComponentStyles {
+                        font_family_id: Some(appearance.ui_font_family()),
+                        font_color: Some(
+                            appearance
+                                .theme()
+                                .sub_text_color(appearance.theme().surface_2())
+                                .into(),
+                        ),
+                        font_size: Some(12.),
+                        ..Default::default()
+                    });
             text.add_child(
                 Container::new(description_text.build().finish())
                     .with_margin_top(4.)
@@ -104,10 +105,11 @@ impl WarpDriveItem for WarpDriveTemplatableMCPServer {
         hover_state: MouseStateHandle,
         appearance: &Appearance,
     ) -> Option<Box<dyn Element>> {
-        self.server
-            .metadata
-            .pending_changes_statuses
-            .render_icon(sync_queue_is_dequeueing, hover_state, appearance)
+        self.server.metadata.pending_changes_statuses.render_icon(
+            sync_queue_is_dequeueing,
+            hover_state,
+            appearance,
+        )
     }
 
     fn action_summary(&self, _app: &AppContext) -> Option<String> {

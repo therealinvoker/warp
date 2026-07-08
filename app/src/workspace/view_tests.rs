@@ -2064,6 +2064,9 @@ fn test_stop_sharing_all_sessions_in_tab() {
 #[test]
 fn test_tab_context_menu_share_session_items() {
     let _guard = FeatureFlag::CreatingSharedSessions.override_enabled(true);
+    // Pinned tabs prepend a "Pin tab" entry; disable so the share items stay
+    // at the indices this test asserts.
+    let _pin_guard = FeatureFlag::PinnedTabs.override_enabled(false);
 
     App::test((), |mut app| async move {
         initialize_app(&mut app);
@@ -2102,14 +2105,14 @@ fn test_tab_context_menu_share_session_items() {
                 });
         });
 
-        // When there's a single shared session in a tab (unfocused), the options
-        // for sharing are "Share session" and "Stop sharing all".
+        // When there's a single shared session in a tab (unfocused), the tab
+        // menu offers "Stop sharing all". ("Share session" for the focused,
+        // unshared pane moved to the pane context menu in the session-mode UI
+        // rework.)
         workspace.read(&app, |workspace, ctx| {
             let items =
                 workspace.tabs[1].menu_items(1, 3, &workspace.tab_groups, false, true, true, ctx);
-            assert!(items[0]
-                .is_approximately_same_item_as(&MenuItemFields::new("Share session").into_item()));
-            assert!(items[1].is_approximately_same_item_as(
+            assert!(items[0].is_approximately_same_item_as(
                 &MenuItemFields::new("Stop sharing all").into_item()
             ));
         });
@@ -2120,13 +2123,16 @@ fn test_tab_context_menu_share_session_items() {
             workspace.stop_sharing_all_panes_in_tab(&tab, ctx);
         });
 
-        // When there's no shared sessions in a tab, the only option is "Share session".
+        // When there's no shared sessions in a tab, the tab menu offers no
+        // sharing entries at all.
         workspace.read(&app, |workspace, ctx| {
             let items =
                 workspace.tabs[1].menu_items(1, 3, &workspace.tab_groups, false, true, true, ctx);
-            assert!(items[0]
-                .is_approximately_same_item_as(&MenuItemFields::new("Share session").into_item()));
-            assert!(items[1].is_approximately_same_item_as(&MenuItem::Separator));
+            for label in ["Share session", "Stop sharing", "Stop sharing all"] {
+                assert!(!items.iter().any(|item| {
+                    item.is_approximately_same_item_as(&MenuItemFields::new(label).into_item())
+                }));
+            }
         });
     });
 }

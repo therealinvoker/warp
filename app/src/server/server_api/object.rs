@@ -128,7 +128,6 @@ use crate::ai::document::ai_document_model::AIDocumentId;
 use crate::ai::execution_profiles::AIExecutionProfile;
 use crate::ai::facts::AIFact;
 use crate::ai::mcp::{MCPServer, TemplatableMCPServer};
-use crate::marketplace_plugins::MarketplacePlugin;
 use crate::channel::ChannelState;
 use crate::cloud_object::model::generic_string_model::{
     GenericStringModel, GenericStringObjectId, Serializer, StringModel,
@@ -144,6 +143,7 @@ use crate::cloud_object::{
 use crate::drive::folders::FolderId;
 use crate::drive::sharing::SharingAccessLevel;
 use crate::env_vars::EnvVarCollection;
+use crate::marketplace_plugins::MarketplacePlugin;
 use crate::notebooks::{NotebookId, SerializedNotebook};
 use crate::server::graphql::schema::{
     action_type_to_gql_action_type, object_action_history_from_gql,

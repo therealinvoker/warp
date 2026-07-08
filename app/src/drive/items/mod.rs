@@ -17,9 +17,9 @@ pub mod item;
 pub mod marketplace_plugin;
 pub mod mcp_server;
 pub mod mcp_server_collection;
-pub mod templatable_mcp_server;
 pub mod notebook;
 pub mod space;
+pub mod templatable_mcp_server;
 pub mod workflow;
 
 pub trait WarpDriveItem {

@@ -1,4 +1,5 @@
 use pathfinder_geometry::vector::vec2f;
+use warp_completer::completer::CommandExitStatus;
 use warp_core::ui::theme::Fill;
 use warpui::elements::{
     Align, Border, ChildAnchor, Clipped, Container, CornerRadius, CrossAxisAlignment, Flex,
@@ -8,7 +9,6 @@ use warpui::elements::{
 use warpui::presenter::ChildView;
 use warpui::ui_components::button::ButtonVariant;
 use warpui::ui_components::components::{UiComponent, UiComponentStyles};
-use warp_completer::completer::CommandExitStatus;
 use warpui::{
     AppContext, Element, Entity, SingletonEntity, TypedActionView, View, ViewContext, ViewHandle,
 };
@@ -106,11 +106,7 @@ impl MarketplacePluginModal {
         self.object_id = Some(sync_id);
         self.install_status = None;
         Self::set_editor_text(&self.name_editor, &model.name, ctx);
-        Self::set_editor_text(
-            &self.source_editor,
-            model.source.display_identifier(),
-            ctx,
-        );
+        Self::set_editor_text(&self.source_editor, model.source.display_identifier(), ctx);
         Self::set_editor_text(
             &self.version_editor,
             model.pinned_version.as_deref().unwrap_or(""),
@@ -393,7 +389,10 @@ impl MarketplacePluginModal {
 
         let cancel_button = appearance
             .ui_builder()
-            .button(ButtonVariant::Outlined, self.cancel_button_mouse_state.clone())
+            .button(
+                ButtonVariant::Outlined,
+                self.cancel_button_mouse_state.clone(),
+            )
             .with_centered_text_label("Cancel".to_owned())
             .with_style(button_styles)
             .build()
@@ -423,8 +422,14 @@ impl MarketplacePluginModal {
 
         Container::new(
             Flex::row()
-                .with_child(Shrinkable::new(1.0, Align::new(cancel_button).left().finish()).finish())
-                .with_child(Container::new(install_button).with_margin_right(8.).finish())
+                .with_child(
+                    Shrinkable::new(1.0, Align::new(cancel_button).left().finish()).finish(),
+                )
+                .with_child(
+                    Container::new(install_button)
+                        .with_margin_right(8.)
+                        .finish(),
+                )
                 .with_child(save_button)
                 .with_cross_axis_alignment(CrossAxisAlignment::Center)
                 .finish(),
@@ -479,7 +484,6 @@ impl View for MarketplacePluginModal {
             .finish()
     }
 }
-
 
 impl TypedActionView for MarketplacePluginModal {
     type Action = MarketplacePluginModalAction;

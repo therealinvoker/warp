@@ -28,7 +28,9 @@ use crate::cloud_object::{
 };
 use crate::env_vars::manager::EnvVarCollectionSource;
 use crate::env_vars::CloudEnvVarCollection;
-use crate::marketplace_plugins::{CloudMarketplacePlugin, CloudMarketplacePluginModel, MarketplacePlugin};
+use crate::marketplace_plugins::{
+    CloudMarketplacePlugin, CloudMarketplacePluginModel, MarketplacePlugin,
+};
 use crate::notebooks::manager::NotebookSource;
 use crate::notebooks::CloudNotebook;
 use crate::server::cloud_objects::update_manager::{InitiatedBy, UpdateManager};
@@ -63,6 +65,8 @@ pub enum DrivePanelAction {
     OpenSearch,
     /// Focus WD panel (via single click)
     FocusDriveIndex,
+    /// Open the Marketplace directory overlay.
+    OpenMarketplaceDirectory,
 }
 
 #[derive(Clone, Debug)]
@@ -90,6 +94,8 @@ pub enum DrivePanelEvent {
     OpenEnvVarCollection(EnvVarCollectionSource),
     OpenWorkflowInPane(WorkflowOpenSource, WorkflowViewMode),
     OpenMarketplacePlugin(CloudObjectTypeAndId),
+    /// Open the Marketplace directory overlay (browsable plugin catalog).
+    OpenMarketplaceDirectory,
     FocusWarpDrive,
     AttachPlanAsContext(AIDocumentId),
 }
@@ -803,6 +809,9 @@ impl TypedActionView for DrivePanel {
                 ctx.focus(&self.index_view);
                 // should_scroll is set to false here in order to not let menu clicks autoscroll WD index
                 self.reset_focused_index_in_warp_drive(false, ctx);
+            }
+            DrivePanelAction::OpenMarketplaceDirectory => {
+                ctx.emit(DrivePanelEvent::OpenMarketplaceDirectory)
             }
         }
     }

@@ -81,9 +81,7 @@ impl StringModel for TemplatableMCPServer {
     ) -> Option<Box<dyn WarpDriveItem>> {
         Some(Box::new(WarpDriveTemplatableMCPServer::new(
             crate::drive::CloudObjectTypeAndId::GenericStringObject {
-                object_type: GenericStringObjectFormat::Json(
-                    JsonObjectType::TemplatableMCPServer,
-                ),
+                object_type: GenericStringObjectFormat::Json(JsonObjectType::TemplatableMCPServer),
                 id,
             },
             templatable_mcp_server.clone(),

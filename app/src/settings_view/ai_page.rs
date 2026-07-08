@@ -4792,10 +4792,14 @@ impl SettingsWidget for GlobalAIWidget {
             .with_main_axis_alignment(MainAxisAlignment::SpaceBetween)
             .with_cross_axis_alignment(CrossAxisAlignment::Center)
             .with_child(
-                Text::new_inline("Agent", appearance.ui_font_family(), PRIMARY_HEADER_FONT_SIZE)
-                    .with_style(Properties::default().weight(Weight::Bold))
-                    .with_color(appearance.theme().active_ui_text_color().into())
-                    .finish(),
+                Text::new_inline(
+                    "Agent",
+                    appearance.ui_font_family(),
+                    PRIMARY_HEADER_FONT_SIZE,
+                )
+                .with_style(Properties::default().weight(Weight::Bold))
+                .with_color(appearance.theme().active_ui_text_color().into())
+                .finish(),
             );
 
         if is_ai_disabled_due_to_remote_session_org_policy {

@@ -7,8 +7,7 @@ pub use warp_graphql::queries::search_marketplace::{
     MarketplaceEntryKind, MarketplaceSearchEntry, MarketplaceSourceKind,
 };
 use warp_graphql::queries::search_marketplace::{
-    SearchMarketplace, SearchMarketplaceInput, SearchMarketplaceResult,
-    SearchMarketplaceVariables,
+    SearchMarketplace, SearchMarketplaceInput, SearchMarketplaceResult, SearchMarketplaceVariables,
 };
 
 use super::ServerApi;

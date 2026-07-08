@@ -1070,7 +1070,11 @@ impl EnvironmentsPageWidget {
 
         // Page title + description. Uses the shared 23px page-title size so it
         // matches every other settings section (GitHub, Teams, etc.).
-        let title = Text::new(PAGE_TITLE_TEXT, appearance.ui_font_family(), HEADER_FONT_SIZE)
+        let title = Text::new(
+            PAGE_TITLE_TEXT,
+            appearance.ui_font_family(),
+            HEADER_FONT_SIZE,
+        )
         .with_style(Properties::default().weight(Weight::Bold))
         .with_color(theme.active_ui_text_color().into())
         .finish();

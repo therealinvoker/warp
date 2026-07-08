@@ -114,10 +114,11 @@ impl WarpDriveItem for WarpDriveMarketplacePlugin {
         hover_state: MouseStateHandle,
         appearance: &Appearance,
     ) -> Option<Box<dyn Element>> {
-        self.plugin
-            .metadata
-            .pending_changes_statuses
-            .render_icon(sync_queue_is_dequeueing, hover_state, appearance)
+        self.plugin.metadata.pending_changes_statuses.render_icon(
+            sync_queue_is_dequeueing,
+            hover_state,
+            appearance,
+        )
     }
 
     fn action_summary(&self, _app: &AppContext) -> Option<String> {

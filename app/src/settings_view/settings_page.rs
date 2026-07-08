@@ -124,7 +124,6 @@ pub enum SettingsPageViewHandle {
     GithubAutomations(
         ViewHandle<super::github_automations::list_page::GithubAutomationsListPageView>,
     ),
-    Marketplace(ViewHandle<super::marketplace_page::MarketplacePageView>),
 }
 
 impl SettingsPageViewHandle {
@@ -153,7 +152,6 @@ impl SettingsPageViewHandle {
             Github(view_handle) => ChildView::new(view_handle).finish(),
             #[cfg(feature = "github_automations")]
             GithubAutomations(view_handle) => ChildView::new(view_handle).finish(),
-            Marketplace(view_handle) => ChildView::new(view_handle).finish(),
         }
     }
 }
@@ -1683,12 +1681,11 @@ impl<V: warpui::View> PageType<V> {
                             // is measured under an infinite constraint and its
                             // flexible child panics. Scrollable pages keep intrinsic
                             // sizing so the outer scrollable can handle overflow.
-                            let col = Flex::column()
-                                .with_child(render_page_title(
-                                    title,
-                                    HEADER_FONT_SIZE,
-                                    appearance,
-                                ));
+                            let col = Flex::column().with_child(render_page_title(
+                                title,
+                                HEADER_FONT_SIZE,
+                                appearance,
+                            ));
                             let col = if is_non_scrollable {
                                 col.with_child(Expanded::new(1., widget_el).finish())
                             } else {

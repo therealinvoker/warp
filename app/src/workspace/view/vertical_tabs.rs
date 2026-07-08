@@ -312,6 +312,8 @@ struct PaneGroupStateHandles {
 }
 
 /// Hover states for a tab group's container, header, chevron, kebab, and close button.
+/// Reused for Workspace-view folder headers, where `plus` tracks the hover-revealed
+/// "New Agent tab" button.
 #[derive(Clone, Default)]
 struct TabGroupMouseStates {
     container: MouseStateHandle,
@@ -319,6 +321,7 @@ struct TabGroupMouseStates {
     chevron: MouseStateHandle,
     kebab: MouseStateHandle,
     close: MouseStateHandle,
+    plus: MouseStateHandle,
 }
 
 /// Describes how a pane row sits in its tab's row layout. Carried as state
@@ -731,6 +734,7 @@ pub(super) struct VerticalTabsPanelState {
     new_tab_hover_state: MouseStateHandle,
     new_tab_button_state: MouseStateHandle,
     new_terminal_button_mouse_state: MouseStateHandle,
+    customize_button_mouse_state: MouseStateHandle,
     pub(super) search_query: String,
     settings_button_mouse_state: MouseStateHandle,
     settings_launcher_mouse_state: MouseStateHandle,
@@ -783,6 +787,7 @@ impl Default for VerticalTabsPanelState {
             new_tab_hover_state: Default::default(),
             new_tab_button_state: Default::default(),
             new_terminal_button_mouse_state: Default::default(),
+            customize_button_mouse_state: Default::default(),
             search_query: String::new(),
             settings_button_mouse_state: Default::default(),
             settings_launcher_mouse_state: Default::default(),
@@ -1593,6 +1598,14 @@ fn render_new_session_buttons(
             WarpIcon::Plus,
             state.new_terminal_button_mouse_state.clone(),
             WorkspaceAction::AddAgentTab,
+            appearance,
+            theme,
+        ))
+        .with_child(render_new_session_button(
+            "Customize",
+            WarpIcon::Settings,
+            state.customize_button_mouse_state.clone(),
+            WorkspaceAction::OpenMarketplaceDirectory,
             appearance,
             theme,
         ));
@@ -2682,10 +2695,12 @@ fn render_workspace_folder_section(
     section.finish()
 }
 
-/// Header row for a Workspace-view folder section: the folder basename only.
-/// Clicking anywhere on the header row toggles the folder's collapse state.
-/// Since the chevron was removed, the folder glyph itself is the open/closed
-/// affordance: an open folder when expanded, a closed folder when collapsed.
+/// Header row for a Workspace-view folder section: the folder basename plus a
+/// "New Agent tab" (+) button revealed on hover at the trailing edge.
+/// Clicking the header row (outside the + button) toggles the folder's collapse
+/// state. Since the chevron was removed, the folder glyph itself is the
+/// open/closed affordance: an open folder when expanded, a closed folder when
+/// collapsed.
 fn render_workspace_folder_header(
     state: &VerticalTabsPanelState,
     folder_key: &str,
@@ -2716,25 +2731,65 @@ fn render_workspace_folder_header(
     } else {
         WarpIcon::Folder
     });
-    let folder_icon = ConstrainedBox::new(folder_glyph.to_warpui_icon(sub_text_color).finish())
-        .with_width(TAB_GROUP_ICON_SIZE)
-        .with_height(TAB_GROUP_ICON_SIZE)
-        .finish();
 
-    let title = Text::new_inline(label.to_string(), font_family, 12.)
-        .with_clip(ClipConfig::ellipsis())
-        .with_color(main_text_color.into())
-        .finish();
+    let label = label.to_string();
+    let plus_mouse_state = mouse_states.plus.clone();
 
-    let row = Flex::row()
-        .with_main_axis_size(MainAxisSize::Max)
-        .with_cross_axis_alignment(CrossAxisAlignment::Center)
-        .with_spacing(ICON_WITH_STATUS_GAP)
-        .with_child(folder_icon)
-        .with_child(Shrinkable::new(1., title).finish())
-        .finish();
-
+    // The row (and its hover-revealed + button) is rebuilt each time the header's
+    // hover state changes, matching the tab-group header pattern.
     Hoverable::new(mouse_states.header.clone(), move |hover_state| {
+        let folder_icon = ConstrainedBox::new(folder_glyph.to_warpui_icon(sub_text_color).finish())
+            .with_width(TAB_GROUP_ICON_SIZE)
+            .with_height(TAB_GROUP_ICON_SIZE)
+            .finish();
+
+        let title = Text::new_inline(label.clone(), font_family.clone(), 12.)
+            .with_clip(ClipConfig::ellipsis())
+            .with_color(main_text_color.into())
+            .finish();
+
+        // Reveal the "New Agent tab" affordance while the header is hovered. The
+        // trailing slot is always reserved at the button's full size (icon plus
+        // padding) so revealing it on hover doesn't resize the row or reflow the
+        // title, which would otherwise make the header jiggle.
+        let new_tab_button_size =
+            TAB_GROUP_HEADER_ACTION_ICON_SIZE + GROUP_ACTION_BUTTON_PADDING * 2.;
+        let new_tab_button = if hover_state.is_hovered() {
+            render_tab_group_header_icon_button(
+                WarpIcon::Plus,
+                TAB_GROUP_HEADER_ACTION_ICON_SIZE,
+                sub_text_color,
+                internal_colors::fg_overlay_3(theme),
+                plus_mouse_state.clone(),
+                Some(WorkspaceAction::AddAgentTab),
+            )
+        } else {
+            ConstrainedBox::new(Empty::new().finish())
+                .with_width(new_tab_button_size)
+                .with_height(new_tab_button_size)
+                .finish()
+        };
+
+        let row = Flex::row()
+            .with_main_axis_size(MainAxisSize::Max)
+            .with_main_axis_alignment(MainAxisAlignment::SpaceBetween)
+            .with_cross_axis_alignment(CrossAxisAlignment::Center)
+            .with_child(
+                Shrinkable::new(
+                    1.,
+                    Flex::row()
+                        .with_main_axis_size(MainAxisSize::Max)
+                        .with_cross_axis_alignment(CrossAxisAlignment::Center)
+                        .with_spacing(ICON_WITH_STATUS_GAP)
+                        .with_child(folder_icon)
+                        .with_child(Shrinkable::new(1., title).finish())
+                        .finish(),
+                )
+                .finish(),
+            )
+            .with_child(new_tab_button)
+            .finish();
+
         let mut container = Container::new(row)
             .with_padding(Padding::uniform(GROUP_HORIZONTAL_PADDING))
             .with_corner_radius(CornerRadius::with_all(Radius::Pixels(ROW_CORNER_RADIUS)));
@@ -3289,35 +3344,40 @@ fn render_tab_group_internal(
                 }
             }
         }
+        let is_panes_view = matches!(display_granularity, VerticalTabsDisplayGranularity::Panes);
         // Pane view inside a tab group: the group container adds
         // `GROUP_HORIZONTAL_PADDING` of right padding and the member wrapper
         // around this `Stack` adds another `TAB_GROUP_CONTENT_INSET`, so the
         // `Stack`'s right edge sits that much further inside the panel than
         // it does in regular pane view. Push the buttons back out by the
         // same amount so they land at the same panel-relative offset.
-        let action_button_x_offset = if in_tab_group
-            && matches!(display_granularity, VerticalTabsDisplayGranularity::Panes)
-        {
+        let action_button_x_offset = if in_tab_group && is_panes_view {
             GROUP_HORIZONTAL_PADDING + TAB_GROUP_CONTENT_INSET - 4.
         } else {
             -4.
         };
-        // GroupedTabs: pull the action buttons up to match the band of padding.
-        let action_button_y_offset = if FeatureFlag::GroupedTabs.is_enabled()
-            && in_tab_group
-            && matches!(display_granularity, VerticalTabsDisplayGranularity::Panes)
-        {
-            0.
+        // Panes view anchors the belt to the top of the (possibly multi-row) tab,
+        // where a reserved band holds it. Single-row tabs (Tabs / Workspace
+        // granularity) instead vertically center the belt within the row so it
+        // stays aligned and sits inside the row rather than poking above it.
+        let (button_parent_anchor, button_child_anchor, action_button_y_offset) = if is_panes_view {
+            // GroupedTabs: pull the action buttons up to match the band of padding.
+            let y_offset = if FeatureFlag::GroupedTabs.is_enabled() && in_tab_group {
+                0.
+            } else {
+                GROUP_HEADER_VERTICAL_PADDING
+            };
+            (ParentAnchor::TopRight, ChildAnchor::TopRight, y_offset)
         } else {
-            GROUP_HEADER_VERTICAL_PADDING
+            (ParentAnchor::MiddleRight, ChildAnchor::MiddleRight, 0.)
         };
         stack.add_positioned_overlay_child(
             action_buttons,
             OffsetPositioning::offset_from_parent(
                 vec2f(action_button_x_offset, action_button_y_offset),
                 ParentOffsetBounds::WindowByPosition,
-                ParentAnchor::TopRight,
-                ChildAnchor::TopRight,
+                button_parent_anchor,
+                button_child_anchor,
             ),
         );
         stack.finish()

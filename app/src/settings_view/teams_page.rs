@@ -5481,11 +5481,7 @@ impl SettingsWidget for TeamsWidget {
 
         let mut content_column = Flex::column();
         if let Some(switcher) = switcher {
-            content_column.add_child(
-                Container::new(switcher)
-                    .with_padding_bottom(20.)
-                    .finish(),
-            );
+            content_column.add_child(Container::new(switcher).with_padding_bottom(20.).finish());
         }
         content_column.add_child(content);
 
