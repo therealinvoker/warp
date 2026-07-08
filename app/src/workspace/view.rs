@@ -3630,9 +3630,78 @@ impl Workspace {
             ctx.notify();
         }
 
+        // Name an agent tab after the user's first question when the chat starts.
+        if let BlocklistAIHistoryEvent::AppendedExchange {
+            terminal_surface_id,
+            conversation_id,
+            is_hidden,
+            ..
+        } = event
+        {
+            if !is_hidden {
+                self.maybe_set_agent_tab_title_from_first_query(
+                    *terminal_surface_id,
+                    conversation_id,
+                    ctx,
+                );
+            }
+        }
+
         if self.agent_conversation_event_affects_vertical_tabs(event, ctx) {
             ctx.notify();
         }
+    }
+
+    /// When an agent conversation receives its first exchange, rename the tab it
+    /// lives in to the user's initial question. Only the auto-generated
+    /// `"Terminal N"` placeholder (or an unnamed tab) is replaced, so a manual
+    /// rename is never clobbered. Setting a tab-level custom title also keeps the
+    /// name stable if the server later generates a summarized conversation title.
+    fn maybe_set_agent_tab_title_from_first_query(
+        &mut self,
+        terminal_surface_id: EntityId,
+        conversation_id: &AIConversationId,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        const MAX_AGENT_TAB_TITLE_LENGTH: usize = 60;
+
+        let history = BlocklistAIHistoryModel::as_ref(ctx);
+        let Some(conversation) = history.conversation(conversation_id) else {
+            return;
+        };
+        // Only the very first user turn seeds the tab title.
+        if conversation.exchange_count() != 1 {
+            return;
+        }
+        let Some(query) = conversation.initial_user_query() else {
+            return;
+        };
+        // Collapse whitespace/newlines into a single clean line, then truncate.
+        let collapsed = query.split_whitespace().collect::<Vec<_>>().join(" ");
+        if collapsed.is_empty() {
+            return;
+        }
+        let title = truncate_from_end(&collapsed, MAX_AGENT_TAB_TITLE_LENGTH);
+
+        let Some(pane_group) = self.tabs.iter().find_map(|tab| {
+            tab.pane_group
+                .as_ref(ctx)
+                .contains_terminal_view(terminal_surface_id, ctx)
+                .then(|| tab.pane_group.clone())
+        }) else {
+            return;
+        };
+
+        pane_group.update(ctx, |pane_group, ctx| {
+            let should_override = match pane_group.custom_title(ctx) {
+                None => true,
+                Some(existing) => parse_terminal_tab_number(&existing).is_some(),
+            };
+            if should_override {
+                pane_group.set_title(&title, ctx);
+            }
+        });
+        ctx.notify();
     }
 
     fn workspace_contains_terminal_view(

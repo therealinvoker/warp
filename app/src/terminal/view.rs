@@ -2792,6 +2792,11 @@ pub struct TerminalView {
 
     pty_spawn_failed: bool,
 
+    /// Latches true once the first user command has run in this tab. Gates the
+    /// empty-state centered input so it only appears on the initial blank pane,
+    /// not again after the block list is later emptied (e.g. via clear).
+    has_run_first_command: bool,
+
     model_events_handle: ModelHandle<ModelEventDispatcher>,
 
     is_todo_popup_visible: bool,
@@ -4341,6 +4346,7 @@ impl TerminalView {
             cursor_position_id: format!("terminal_view:cursor_{}", ctx.view_id()),
             active_session,
             pty_spawn_failed: false,
+            has_run_first_command: false,
             model_events_handle,
             is_todo_popup_visible: false,
             agent_todos_popup,
@@ -11650,6 +11656,11 @@ impl TerminalView {
             ModelEvent::BlockCompleted(block_completed_event) => {
                 record_trace_event!("command_execution:block_completed");
                 end_trace_after_next!("window:redraw:end");
+                // Once a real command has run, the empty-state centered input
+                // should never return (even if the block list is later cleared).
+                if matches!(block_completed_event.block_type, BlockType::User(_)) {
+                    self.has_run_first_command = true;
+                }
                 let block_completed_event_clone = block_completed_event.clone();
                 self.input.update(ctx, |input, ctx| {
                     input.handle_block_completed_event(block_completed_event_clone, ctx);
@@ -23483,6 +23494,26 @@ impl TerminalView {
             .finish()
     }
 
+    /// Renders the command input centered vertically and horizontally in the
+    /// empty main area, occupying the middle 3/5 of the width (≈1/5 padding on
+    /// each side). Used only on a fresh/empty terminal so the prompt sits in the
+    /// middle of the pane rather than pinned to an edge.
+    fn render_centered_first_run_input(&self) -> Box<dyn Element> {
+        let input_row = Flex::row()
+            .with_cross_axis_alignment(CrossAxisAlignment::Center)
+            .with_child(Expanded::new(1., Empty::new().finish()).finish())
+            .with_child(Expanded::new(3., self.render_input()).finish())
+            .with_child(Expanded::new(1., Empty::new().finish()).finish())
+            .finish();
+
+        Flex::column()
+            .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
+            .with_child(Expanded::new(1., Empty::new().finish()).finish())
+            .with_child(input_row)
+            .with_child(Expanded::new(1., Empty::new().finish()).finish())
+            .finish()
+    }
+
     fn render_inline_banners(
         &self,
         appearance: &Appearance,
@@ -27495,38 +27526,77 @@ impl View for TerminalView {
                         && !self.is_ambient_agent_session(app);
                     let is_loading_transcript = model.is_loading_conversation_transcript();
                     let should_show_loading = is_view_pending_clause || is_loading_transcript;
-                    let output_area = if should_show_loading {
-                        self.render_viewer_loading(app)
-                    } else if is_alt_screen_active {
-                        did_wrap_terminal_size = true;
-                        wrap_in_terminal_size_element(
-                            &self.resize_tx,
-                            self.render_alt_screen_element(
-                                app,
-                                &model,
-                                model.alt_screen().selection_range(semantic_selection),
-                            ),
-                        )
-                    } else {
-                        self.render_block_list_element(&model, input_mode, true, app)
-                    };
+                    // Only on the initial blank pane of a new tab (nothing run
+                    // yet) center the input in the main area; after the first
+                    // command it returns to its normal pinned position and never
+                    // re-centers, even if the block list is later cleared. An
+                    // agent conversation isn't stored in the terminal block list,
+                    // so we separately check its current exchange count: a fresh
+                    // (empty) agent view still centers, but once it has any
+                    // messages we must render the output area or the chat would
+                    // vanish when toggling terminal <-> agent. PTY sizing is
+                    // driven by the whole-view layout size (see
+                    // `after_terminal_view_layout`), not the block list child, so
+                    // skipping the (empty) output area here is safe.
+                    let agent_conversation_has_messages = self
+                        .agent_view_controller
+                        .as_ref(app)
+                        .agent_view_state()
+                        .active_conversation_id()
+                        .and_then(|id| {
+                            BlocklistAIHistoryModel::as_ref(app)
+                                .conversation(&id)
+                                .map(|c| c.exchange_count())
+                        })
+                        .unwrap_or(0)
+                        > 0;
+                    let is_empty_first_run = !self.has_run_first_command
+                        && !should_show_loading
+                        && !is_alt_screen_active
+                        && !agent_conversation_has_messages
+                        && self.is_input_box_visible(&model, app)
+                        && model.is_block_list_empty();
 
-                    column.add_child(Shrinkable::new(1., output_area).finish());
-
-                    if model.is_alt_screen_active()
-                        && self.should_render_use_agent_footer(&model, app)
-                    {
-                        column.add_child(ChildView::new(&self.use_agent_footer).finish());
-                    }
-
-                    if self.is_input_box_visible(&model, app) {
-                        column.add_child(self.render_input());
-                    } else if self.should_render_legacy_ambient_agent_loading_footer(&model, app) {
-                        column.add_child(ambient_agent::render_loading_footer(appearance));
-                    } else if self.show_remote_server_loading_footer(&model, app) {
+                    if is_empty_first_run {
                         column.add_child(
-                            self.render_remote_server_loading_footer(&model, appearance, app),
+                            Expanded::new(1., self.render_centered_first_run_input()).finish(),
                         );
+                    } else {
+                        let output_area = if should_show_loading {
+                            self.render_viewer_loading(app)
+                        } else if is_alt_screen_active {
+                            did_wrap_terminal_size = true;
+                            wrap_in_terminal_size_element(
+                                &self.resize_tx,
+                                self.render_alt_screen_element(
+                                    app,
+                                    &model,
+                                    model.alt_screen().selection_range(semantic_selection),
+                                ),
+                            )
+                        } else {
+                            self.render_block_list_element(&model, input_mode, true, app)
+                        };
+
+                        column.add_child(Shrinkable::new(1., output_area).finish());
+
+                        if model.is_alt_screen_active()
+                            && self.should_render_use_agent_footer(&model, app)
+                        {
+                            column.add_child(ChildView::new(&self.use_agent_footer).finish());
+                        }
+
+                        if self.is_input_box_visible(&model, app) {
+                            column.add_child(self.render_input());
+                        } else if self
+                            .should_render_legacy_ambient_agent_loading_footer(&model, app)
+                        {
+                            column.add_child(ambient_agent::render_loading_footer(appearance));
+                        } else if self.show_remote_server_loading_footer(&model, app) {
+                            column.add_child(
+                                self.render_remote_server_loading_footer(&model, appearance, app),
+                            );
+                        }
                     }
 
                     let stack = Stack::new()
