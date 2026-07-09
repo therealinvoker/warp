@@ -939,7 +939,8 @@ impl BlockList {
             BlockHeightItem::RestoredBlockSeparator {
                 height_when_visible: BlockHeight::from(RESTORED_BLOCK_SEPARATOR_HEIGHT),
                 is_historical_conversation_restoration,
-                is_hidden: false,
+                // The "Previous session from …" banner is no longer surfaced in the terminal view.
+                is_hidden: true,
             },
         );
     }
@@ -2250,8 +2251,9 @@ impl BlockList {
                             height_when_visible: *height_when_visible,
                             is_historical_conversation_restoration:
                                 *is_historical_conversation_restoration,
-                            // Don't show restored block separators in the agent view.
-                            is_hidden: agent_view_state.is_fullscreen(),
+                            // The "Previous session from …" banner is no longer surfaced in the
+                            // terminal view (previously only hidden in the fullscreen agent view).
+                            is_hidden: true,
                         });
                     }
                     BlockHeightItem::InlineBanner {

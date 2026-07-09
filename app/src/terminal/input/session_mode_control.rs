@@ -34,7 +34,7 @@ impl SessionModeSegment {
     /// The [`TerminalAction`] dispatched to switch the current pane to this mode.
     fn switch_action(self) -> TerminalAction {
         match self {
-            SessionModeSegment::Agent => TerminalAction::StartNewAgentConversation {
+            SessionModeSegment::Agent => TerminalAction::SwitchToAgentView {
                 origin: AgentViewEntryOrigin::Input {
                     was_prompt_autodetected: false,
                 },

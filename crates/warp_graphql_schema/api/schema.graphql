@@ -2574,6 +2574,7 @@ enum MarketplaceEntryKind {
 }
 
 enum MarketplaceSourceKind {
+  CURSOR
   MCP_REGISTRY
   OPEN_VSX
   ORG
@@ -2581,20 +2582,53 @@ enum MarketplaceSourceKind {
 
 """
 One normalized marketplace directory entry. MCP entries carry a ready-to-use
-mcpTemplateJson; plugin entries carry an extensionId and/or bundleUrl.
+mcpTemplateJson; plugin entries carry an extensionId and/or bundleUrl. Cursor
+`.cursor-plugin` plugins additionally carry authoring metadata (author,
+homepage, license, category, tags), a per-team installCount, and a summary of
+the component types they provide (see `components`).
 """
 type MarketplaceSearchEntry {
+  author: String
   bundleUrl: String
+  category: String
+  components: MarketplacePluginComponents
   description: String!
   entryId: ID!
   extensionId: String
+  homepage: String
   iconUrl: String
+  installCount: Int
   kind: MarketplaceEntryKind!
+  license: String
   mcpTemplateJson: String
   publisher: String
   sourceLabel: String!
+  tags: [String!]
   title: String!
   version: String
+}
+
+"""
+Per-type counts of the components a Cursor-style plugin provides, used to
+render badges on a marketplace card without fetching the full component bodies.
+"""
+type MarketplacePluginComponents {
+  agentCount: Int!
+  commandCount: Int!
+  hookCount: Int!
+  mcpServerCount: Int!
+  ruleCount: Int!
+  skillCount: Int!
+}
+
+"""The installable component types a Cursor-style plugin can provide."""
+enum MarketplaceComponentType {
+  AGENT
+  COMMAND
+  HOOK
+  MCP_SERVER
+  RULE
+  SKILL
 }
 
 input SearchMarketplaceInput {
@@ -2608,6 +2642,47 @@ type SearchMarketplaceOutput implements Response {
 }
 
 union SearchMarketplaceResult = SearchMarketplaceOutput | UserFacingError
+
+input ResolveMarketplacePluginInput {
+  entryId: ID!
+  source: MarketplaceSourceKind!
+}
+
+"""
+One resolved component file with its fetched, sanitized body, ready for the
+client to materialize into the matching native Bang object or on-disk file.
+`name` groups files belonging to the same component (e.g. a skill folder);
+`path` is the file's path relative to that component root.
+"""
+type MarketplacePluginComponentFile {
+  componentType: MarketplaceComponentType!
+  content: String!
+  name: String!
+  path: String!
+}
+
+type ResolveMarketplacePluginOutput implements Response {
+  entryId: ID!
+  files: [MarketplacePluginComponentFile!]!
+  mcpTemplateJson: String
+  responseContext: ResponseContext!
+}
+
+union ResolveMarketplacePluginResult = ResolveMarketplacePluginOutput | UserFacingError
+
+input ReportMarketplaceInstallInput {
+  entryId: ID!
+  source: MarketplaceSourceKind!
+  title: String
+  workspaceId: ID
+}
+
+type ReportMarketplaceInstallOutput implements Response {
+  responseContext: ResponseContext!
+  success: Boolean!
+}
+
+union ReportMarketplaceInstallResult = ReportMarketplaceInstallOutput | UserFacingError
 
 type MemberSpendLimit {
   maxMonthlySpendCents: Int!
@@ -3217,6 +3292,12 @@ type RootMutation {
   createNotebook(input: CreateNotebookInput!, requestContext: RequestContext!): CreateNotebookResult!
   createSimpleIntegration(input: CreateSimpleIntegrationInput!, requestContext: RequestContext!): CreateSimpleIntegrationResult!
   createTeam(input: CreateTeamInput!, requestContext: RequestContext!): CreateTeamResult!
+
+  """
+  Record that the caller installed a marketplace entry, scoped to a team
+  workspace. Powers the per-team install-count popularity leaderboard.
+  """
+  reportMarketplaceInstall(input: ReportMarketplaceInstallInput!, requestContext: RequestContext!): ReportMarketplaceInstallResult!
   upsertGithubAutomation(input: UpsertGithubAutomationInput!, requestContext: RequestContext!): UpsertGithubAutomationResult!
   removeGithubAutomation(input: RemoveGithubAutomationInput!, requestContext: RequestContext!): RemoveGithubAutomationResult!
   setGithubProviderKey(input: SetGithubProviderKeyInput!, requestContext: RequestContext!): SetGithubProviderKeyResult!
@@ -3340,6 +3421,13 @@ type RootQuery {
 
   """Retrieve execution history for a scheduled agent."""
   searchMarketplace(input: SearchMarketplaceInput!, requestContext: RequestContext!): SearchMarketplaceResult!
+
+  """
+  Resolve a marketplace plugin's full component contents (MCP configs, rule /
+  command / agent / skill file bodies) for installation. Kept separate from
+  searchMarketplace so directory listings stay lightweight.
+  """
+  resolveMarketplacePlugin(input: ResolveMarketplacePluginInput!, requestContext: RequestContext!): ResolveMarketplacePluginResult!
   scheduledAgentHistory(input: ScheduledAgentHistoryInput!, requestContext: RequestContext!): ScheduledAgentHistoryResult!
   simpleIntegrations(input: SimpleIntegrationsInput!, requestContext: RequestContext!): SimpleIntegrationsResult!
   suggestCloudEnvironmentImage(input: SuggestCloudEnvironmentImageInput!, requestContext: RequestContext!): SuggestCloudEnvironmentImageResult!

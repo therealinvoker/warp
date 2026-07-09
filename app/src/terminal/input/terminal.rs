@@ -61,16 +61,24 @@ impl Input {
             FeatureFlag::AgentView.is_enabled() && AISettings::as_ref(app).is_any_ai_enabled(app);
         let show_message_bar = should_show_terminal_input_message_bar(&model, app);
 
-        let prompt_elements = self
-            .prompt_render_helper
-            .render_universal_developer_input_prompt(&model, appearance, app);
-
         // Once bootstrapped, the prompt row is just context chips (working directory, git
         // branch, ...). When the session-mode footer is shown, move those chips into the
         // footer below the editor so their placement matches the Agent footer; the
         // pre-bootstrap "Starting…" status stays above the editor.
         let move_chips_to_footer =
             show_session_mode_control && model.block_list().is_bootstrapped();
+
+        // In the footer the chips are baseline-aligned with the segmented control, so
+        // skip the above-editor top padding that would otherwise offset their text.
+        let prompt_elements = self
+            .prompt_render_helper
+            .render_universal_developer_input_prompt(
+                &model,
+                appearance,
+                !move_chips_to_footer,
+                app,
+            );
+
         let mut footer_prompt_chips = None;
         if move_chips_to_footer {
             footer_prompt_chips = Some(prompt_elements);
@@ -210,6 +218,16 @@ impl Input {
             styles::default_border_color(appearance.theme()),
             appearance,
         )
+        // The shared floating box fill (`surface_overlay_2`) is a translucent 10%-foreground
+        // overlay, so over the dark terminal content it reads noticeably darker than the Agent
+        // input. The Agent input effectively composites the agent-view surface
+        // (`surface_overlay_1`, 5% fg) under its own box fill (`surface_overlay_2`, 10% fg), for
+        // ~15% foreground. Paint the opaque equivalent (`neutral_3` = 15% fg over the background)
+        // so the terminal box shows a stable fill that matches the Agent input regardless of
+        // what's behind it.
+        .with_background_color(crate::ui_components::blended_colors::neutral_3(
+            appearance.theme(),
+        ))
         .with_padding_bottom(4.)
         .finish();
 

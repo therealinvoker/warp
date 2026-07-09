@@ -8945,3 +8945,83 @@ fn ctrl_enter_inserts_newline_in_normal_input_after_rich_input_closes() {
         });
     });
 }
+
+#[test]
+fn split_sequential_commands_splits_plain_block() {
+    let block = "railway init\nrailway add --database postgres\nrailway up";
+    let commands = split_into_sequential_commands(block).expect("plain block should split");
+    assert_eq!(
+        commands,
+        vec![
+            "railway init".to_owned(),
+            "railway add --database postgres".to_owned(),
+            "railway up".to_owned(),
+        ]
+    );
+}
+
+#[test]
+fn split_sequential_commands_trims_and_drops_blank_and_comment_lines() {
+    let block = "  railway init  \n\n# a comment\nrailway up\n";
+    let commands = split_into_sequential_commands(block).expect("should split");
+    assert_eq!(
+        commands,
+        vec!["railway init".to_owned(), "railway up".to_owned()]
+    );
+}
+
+#[test]
+fn split_sequential_commands_returns_none_for_single_line() {
+    assert!(split_into_sequential_commands("railway up").is_none());
+    // Trailing newline still yields a single command.
+    assert!(split_into_sequential_commands("railway up\n").is_none());
+    // A single command plus only blank/comment lines is not worth splitting.
+    assert!(split_into_sequential_commands("railway up\n# note\n").is_none());
+}
+
+#[test]
+fn split_sequential_commands_preserves_history_expansion_line() {
+    // The line that triggers zsh `!` history expansion should still be its own command, so the
+    // lines around it run rather than the whole block being rejected.
+    let block = "railway init\nrailway variables --set ADMIN_KEY=Hootsuite!212\nrailway up";
+    let commands = split_into_sequential_commands(block).expect("should split");
+    assert_eq!(commands.len(), 3);
+    assert_eq!(
+        commands[1],
+        "railway variables --set ADMIN_KEY=Hootsuite!212"
+    );
+}
+
+#[test]
+fn split_sequential_commands_does_not_split_shell_constructs() {
+    // Trailing backslash continuation.
+    assert!(split_into_sequential_commands("echo one \\\n  two").is_none());
+    // Heredoc.
+    assert!(split_into_sequential_commands("cat <<EOF\nhello\nEOF").is_none());
+    // for/do/done block.
+    assert!(split_into_sequential_commands("for i in 1 2 3\ndo\n  echo $i\ndone").is_none());
+    // if/then/fi block.
+    assert!(split_into_sequential_commands("if true\nthen\n  echo hi\nfi").is_none());
+    // Pipeline continued across lines.
+    assert!(split_into_sequential_commands("cat file |\n  grep foo").is_none());
+    // `&&` continued across lines.
+    assert!(split_into_sequential_commands("make build &&\n  make test").is_none());
+    // Quoted string spanning a newline.
+    assert!(split_into_sequential_commands("echo \"line one\nline two\"").is_none());
+    // Unclosed subshell spanning a newline.
+    assert!(split_into_sequential_commands("(cd foo\nmake)").is_none());
+    // Function definition body opening.
+    assert!(split_into_sequential_commands("greet() {\n  echo hi\n}").is_none());
+}
+
+#[test]
+fn line_is_balanced_handles_quotes_parens_and_escapes() {
+    assert!(line_is_balanced("echo 'a (b) c'"));
+    assert!(line_is_balanced("echo \"a (b) c\""));
+    assert!(line_is_balanced("(cd foo && make)"));
+    assert!(line_is_balanced("echo \\\"quoted\\\""));
+    assert!(!line_is_balanced("echo \"unterminated"));
+    assert!(!line_is_balanced("echo 'unterminated"));
+    assert!(!line_is_balanced("(cd foo"));
+    assert!(!line_is_balanced("echo )"));
+}

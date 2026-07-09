@@ -280,7 +280,6 @@ use crate::experiments::{BlockOnboarding, Experiment};
 use crate::launch_configs::launch_config::WindowTemplate;
 use crate::launch_configs::save_modal::{LaunchConfigModalEvent, LaunchConfigSaveModal};
 use crate::marketplace_directory::pane_manager::MarketplacePaneManager;
-use crate::pane_group::MarketplacePane;
 use crate::menu::{Event as MenuEvent, Menu, MenuItem, MenuItemFields, MenuSelectionSource};
 use crate::modal::{Modal, ModalEvent, ModalViewState};
 use crate::network::{NetworkStatus, NetworkStatusEvent};
@@ -291,6 +290,7 @@ use crate::palette::PaletteMode;
 use crate::pane_group::pane::ActionOrigin;
 #[cfg(feature = "local_fs")]
 use crate::pane_group::FilePane;
+use crate::pane_group::MarketplacePane;
 use crate::pane_group::{
     self, AIFactPane, AnyPaneContent, ChildAgentOrigin, CodeDiffPane, CodePane, CodeReviewPanelArg,
     CustomRouterEditorPane, Direction as PaneGroupDirection, Direction, EnvironmentManagementPane,
@@ -1592,7 +1592,6 @@ impl Workspace {
         });
         modal
     }
-
 
     fn handle_import_modal_event(&mut self, event: &ImportModalEvent, ctx: &mut ViewContext<Self>) {
         match event {
@@ -15231,7 +15230,7 @@ impl Workspace {
         self.add_tab_with_pane_layout(
             panes_layout,
             Arc::new(HashMap::new()),
-            Some("Marketplace".to_owned()),
+            Some(crate::marketplace_directory::MARKETPLACE_HEADER_TEXT.to_owned()),
             ctx,
         );
     }
@@ -21375,7 +21374,19 @@ impl Workspace {
             .platform_window(self.window_id)
             .map(|window| window.fullscreen_state() == FullscreenState::Fullscreen)
             .unwrap_or(false);
-        if is_window_fullscreen && cfg!(target_os = "macos") {
+        // When the vertical tabs panel occupies the window's left edge, the macOS
+        // traffic lights sit over that panel (which reserves space for them),
+        // not over this tab bar — which now begins at the panel's right edge. So
+        // the tab bar shouldn't also reserve traffic-light width, or it would
+        // leave a large empty gap at its left.
+        let left_panel_covers_traffic_lights = FeatureFlag::VerticalTabs.is_enabled()
+            && *TabSettings::as_ref(ctx).use_vertical_tabs
+            && self.vertical_tabs_panel_open
+            && matches!(
+                Self::tabs_panel_side(&TabSettings::as_ref(ctx).header_toolbar_chip_selection),
+                PanelPosition::Left
+            );
+        if (is_window_fullscreen && cfg!(target_os = "macos")) || left_panel_covers_traffic_lights {
             // Full-screen mode on MacOS does not need as much padding (traffic lights are hidden).
             TAB_BAR_PADDING_LEFT
         } else {
@@ -26389,11 +26400,31 @@ impl View for Workspace {
                 .finish()
         } else {
             let mut outer_column = Flex::column();
-            if tab_bar_mode == ShowTabBar::Stacked {
-                outer_column.add_child(self.render_tab_bar(self.tab_fixed_width, appearance, app));
-            }
             let content = self.render_banner_and_active_tab(app, appearance);
-            let panels_row = self.render_panels(app, Shrinkable::new(1.0, content).finish(), false);
+            let vertical_tabs_active = FeatureFlag::VerticalTabs.is_enabled()
+                && *TabSettings::as_ref(app).use_vertical_tabs;
+            let panels_row = if tab_bar_mode == ShowTabBar::Stacked && vertical_tabs_active {
+                // Vertical tabs: stack the tab bar above the content only, so the
+                // side panels run full-height to the very top of the window and
+                // their (gradient) background reaches y=0. The panels reserve
+                // `TAB_BAR_HEIGHT` at the top (see `render_vertical_tabs_panel`)
+                // so their first row lines up with the content below the bar.
+                let content_column = Flex::column()
+                    .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
+                    .with_child(self.render_tab_bar(self.tab_fixed_width, appearance, app))
+                    .with_child(Expanded::new(1.0, content).finish())
+                    .finish();
+                self.render_panels(app, Shrinkable::new(1.0, content_column).finish(), false)
+            } else {
+                if tab_bar_mode == ShowTabBar::Stacked {
+                    outer_column.add_child(self.render_tab_bar(
+                        self.tab_fixed_width,
+                        appearance,
+                        app,
+                    ));
+                }
+                self.render_panels(app, Shrinkable::new(1.0, content).finish(), false)
+            };
             outer_column.add_child(Shrinkable::new(1.0, panels_row).finish());
             Container::new(outer_column.finish())
                 .with_background(util::get_terminal_background_fill(self.window_id, app))

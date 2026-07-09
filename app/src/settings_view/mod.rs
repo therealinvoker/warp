@@ -1368,7 +1368,6 @@ impl SettingsView {
             settings_pages.push(SettingsPage::new(github_page_handle));
         }
 
-
         #[cfg(feature = "github_automations")]
         if let Some(github_automations_page_handle) = github_automations_page_handle {
             settings_pages.push(SettingsPage::new(github_automations_page_handle));

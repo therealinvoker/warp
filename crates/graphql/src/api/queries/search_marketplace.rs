@@ -21,6 +21,8 @@ pub struct SearchMarketplaceInput {
 
 #[derive(cynic::Enum, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MarketplaceSourceKind {
+    #[cynic(rename = "CURSOR")]
+    Cursor,
     #[cynic(rename = "MCP_REGISTRY")]
     McpRegistry,
     #[cynic(rename = "OPEN_VSX")]
@@ -39,17 +41,34 @@ pub enum MarketplaceEntryKind {
 
 #[derive(cynic::QueryFragment, Debug, Clone)]
 pub struct MarketplaceSearchEntry {
+    pub author: Option<String>,
     pub bundle_url: Option<String>,
+    pub category: Option<String>,
+    pub components: Option<MarketplacePluginComponents>,
     pub description: String,
     pub entry_id: cynic::Id,
     pub extension_id: Option<String>,
+    pub homepage: Option<String>,
     pub icon_url: Option<String>,
+    pub install_count: Option<i32>,
     pub kind: MarketplaceEntryKind,
+    pub license: Option<String>,
     pub mcp_template_json: Option<String>,
     pub publisher: Option<String>,
     pub source_label: String,
+    pub tags: Option<Vec<String>>,
     pub title: String,
     pub version: Option<String>,
+}
+
+#[derive(cynic::QueryFragment, Debug, Clone)]
+pub struct MarketplacePluginComponents {
+    pub agent_count: i32,
+    pub command_count: i32,
+    pub hook_count: i32,
+    pub mcp_server_count: i32,
+    pub rule_count: i32,
+    pub skill_count: i32,
 }
 
 #[derive(cynic::QueryFragment, Debug)]

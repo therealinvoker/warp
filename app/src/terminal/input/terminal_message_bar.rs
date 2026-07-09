@@ -99,6 +99,7 @@ impl View for TerminalInputMessageBar {
                 .produce_message(selected)
                 .unwrap_or_default();
             return Container::new(render_terminal_message(message, app))
+                .with_padding_left(*crate::terminal::view::PADDING_LEFT)
                 .with_padding_bottom(8.)
                 .with_padding_right(8.)
                 .finish();
@@ -117,8 +118,9 @@ impl View for TerminalInputMessageBar {
             app,
         };
 
-        let mut message = ErroredBlockMessageProducer
+        let mut message = HistoryExpansionErrorMessageProducer
             .produce_message(args)
+            .or_else(|| ErroredBlockMessageProducer.produce_message(args))
             .or_else(|| AgentMessageProducer.produce_message(args))
             .or_else(|| PlanMessageProducer.produce_message(args))
             .or_else(|| ContinueConversationMessageProducer.produce_message(args))
@@ -136,6 +138,9 @@ impl View for TerminalInputMessageBar {
         }
 
         Container::new(render_terminal_message(message, app))
+            // Match the Agent message bar's left indent (`render_standard_message_bar` applies the
+            // same `PADDING_LEFT`), so the hint text lines up in the same place across modes.
+            .with_padding_left(*crate::terminal::view::PADDING_LEFT)
             .with_padding_bottom(8.)
             .with_padding_right(8.)
             .finish()
@@ -157,6 +162,48 @@ impl<'a> TerminalMessageArgs<'a> {
             && self.input_model.is_ai_input_enabled()
             && !self.input_model.is_input_type_locked()
     }
+}
+
+/// When the last command failed because the shell interpreted a `!` as history expansion
+/// (e.g. pasting `ADMIN_KEY=Hootsuite!212` makes zsh try to recall history event `212`), the raw
+/// shell output (`zsh: no such event: 212`) is cryptic and the *entire* submitted block is
+/// rejected. Surface a plain-language explanation with the fix so it's obvious why nothing ran.
+struct HistoryExpansionErrorMessageProducer;
+impl MessageProvider<TerminalMessageArgs<'_>> for HistoryExpansionErrorMessageProducer {
+    fn produce_message(&self, args: TerminalMessageArgs<'_>) -> Option<Message> {
+        let block = args.terminal_model.block_list().last_non_hidden_block()?;
+        // Same "empty input, nothing attached, last block failed" gating as the generic errored
+        // block hint, so this only replaces it when the failure is a history-expansion error.
+        if block.exit_code().was_successful()
+            || !args.current_input.is_empty()
+            || !args.context_model.pending_context_block_ids().is_empty()
+        {
+            return None;
+        }
+
+        if !is_history_expansion_error(&block.command_to_string(), &block.output_to_string()) {
+            return None;
+        }
+
+        let theme = Appearance::as_ref(args.app).theme();
+        Some(
+            Message::new(vec![MessageItem::text(
+                "`!` triggered shell history expansion — wrap the value in single quotes or escape it as `\\!` (double quotes won't stop it)",
+            )])
+            .with_color(message_warning(theme)),
+        )
+    }
+}
+
+/// Returns whether a failed command's `output` looks like a shell history-expansion error for a
+/// command that actually contained a `!` (guarding against unrelated output that happens to
+/// mention "event"). Covers zsh (`no such event`) and bash (`event not found`).
+fn is_history_expansion_error(command: &str, output: &str) -> bool {
+    if !command.contains('!') {
+        return false;
+    }
+    let output = output.to_ascii_lowercase();
+    output.contains("no such event") || output.contains("event not found")
 }
 
 struct ErroredBlockMessageProducer;
@@ -324,10 +371,41 @@ mod internal {
 
 struct DefaultMessageProducer;
 impl MessageProvider<TerminalMessageArgs<'_>> for DefaultMessageProducer {
-    fn produce_message(&self, _args: TerminalMessageArgs<'_>) -> Option<Message> {
-        // Intentionally emit no default hint: the "new /agent conversation" line is no longer
-        // shown in the empty-buffer terminal state. Other producers/transformers still apply.
-        None
+    fn produce_message(&self, args: TerminalMessageArgs<'_>) -> Option<Message> {
+        let is_input_ai_detected = args.is_input_ai_detected();
+
+        let keystroke = if is_input_ai_detected {
+            Some(Keystroke {
+                key: "enter".to_owned(),
+                ..Default::default()
+            })
+        } else if let Some(keystroke) = keybinding_name_to_keystroke(commands::AGENT.name, args.app)
+        {
+            Some(keystroke)
+        } else {
+            keybinding_name_to_keystroke(commands::NEW.name, args.app)
+        };
+
+        let mut items = if let Some(keystroke) = keystroke {
+            vec![
+                MessageItem::keystroke(keystroke),
+                MessageItem::text(" new /agent conversation"),
+            ]
+        } else {
+            vec![MessageItem::text("/agent for new conversation")]
+        };
+
+        // Also surface the ⌘↑ shortcut for attaching the previous command's output as agent
+        // context, so it's discoverable from the empty-input state.
+        if let Some(attach_keystroke) =
+            keybinding_name_to_keystroke(SELECT_PREVIOUS_BLOCK_ACTION_NAME, args.app)
+        {
+            items.push(MessageItem::text("    "));
+            items.push(MessageItem::keystroke(attach_keystroke));
+            items.push(MessageItem::text(" attach output as agent context"));
+        }
+
+        Some(Message::new(items))
     }
 }
 
@@ -440,5 +518,11 @@ impl MessageTransformer<TerminalMessageArgs<'_>> for AttachedTextSelectionMessag
 fn message_magenta(theme: &WarpTheme) -> ColorU {
     let mut color = theme.ansi_fg_magenta();
     color.a = (255. * 0.65) as u8;
+    color
+}
+
+fn message_warning(theme: &WarpTheme) -> ColorU {
+    let mut color = theme.ansi_fg_yellow();
+    color.a = (255. * 0.8) as u8;
     color
 }

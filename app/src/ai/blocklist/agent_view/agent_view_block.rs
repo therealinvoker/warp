@@ -249,6 +249,12 @@ impl View for AgentViewEntryBlock {
             return Empty::new().finish();
         }
 
+        // Don't surface the restored-conversation card ("Untitled conversation / Restored") in the
+        // terminal view; restored sessions should come back without this banner.
+        if self.is_restored {
+            return Empty::new().finish();
+        }
+
         let appearance = Appearance::as_ref(app);
         let theme = appearance.theme();
         let are_block_dividers_enabled =

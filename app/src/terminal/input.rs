@@ -993,6 +993,129 @@ pub enum InputEmptyStateChangeReason {
     UserCommandCompleted,
 }
 
+/// Given the full text of a submitted command, returns `Some(commands)` when it is a pasted
+/// multi-line block that is *safe* to run as a sequence of independent, sequential commands (each
+/// its own block). Returns `None` when the input is a single line or contains any shell construct
+/// that must be submitted as one unit (heredocs, `for`/`while`/`if`/`case` blocks, line
+/// continuations, pipelines / `&&` / `||` spanning lines, or quoted/parenthesized newlines) — in
+/// which case the caller falls back to the normal atomic submission.
+fn split_into_sequential_commands(command: &str) -> Option<Vec<String>> {
+    // Fast path: a single physical line never needs splitting.
+    if !command.contains('\n') {
+        return None;
+    }
+
+    let raw_lines: Vec<&str> = command.split('\n').collect();
+
+    // Every physical line must be an independent, self-contained simple command (or a
+    // blank/comment line). If any line hints at a multi-line construct, bail out so the normal
+    // path submits the whole block atomically.
+    if !raw_lines
+        .iter()
+        .all(|line| is_standalone_command_line(line))
+    {
+        return None;
+    }
+
+    // Collect the runnable commands: trim, and drop blank and comment-only lines. Comments are a
+    // no-op at best and error under zsh's default (non-interactive comments off), so we skip them.
+    let commands: Vec<String> = raw_lines
+        .iter()
+        .map(|line| line.trim())
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(|line| line.to_owned())
+        .collect();
+
+    // Only worth splitting if there are at least two independent commands.
+    (commands.len() >= 2).then_some(commands)
+}
+
+/// Whether `line` (one physical line of a pasted block) is a self-contained command that can be
+/// safely executed on its own. Blank and comment lines are considered safe (they are filtered out
+/// before execution). Anything that hints at a multi-line shell construct returns `false`.
+fn is_standalone_command_line(line: &str) -> bool {
+    let trimmed = line.trim();
+
+    // Blank and comment lines are safe (they get filtered out before execution).
+    if trimmed.is_empty() || trimmed.starts_with('#') {
+        return true;
+    }
+
+    // Quotes, parentheses, and braces must balance within the line; otherwise a string or
+    // compound construct spans the newline.
+    if !line_is_balanced(trimmed) {
+        return false;
+    }
+
+    // Heredocs must be submitted as one unit.
+    if trimmed.contains("<<") {
+        return false;
+    }
+
+    // A trailing operator means the command continues on the next line.
+    if ["\\", "&&", "||", "|", ","]
+        .iter()
+        .any(|suffix| trimmed.ends_with(suffix))
+    {
+        return false;
+    }
+
+    // The first token being a shell block keyword (or a lone block delimiter) means this line is
+    // part of a compound command that must be submitted as one unit.
+    let first_token = trimmed
+        .split(|c: char| c.is_whitespace() || c == ';' || c == '(' || c == '{')
+        .next()
+        .unwrap_or("");
+    const BLOCK_KEYWORDS: &[&str] = &[
+        "for", "while", "until", "if", "elif", "else", "then", "do", "done", "fi", "case", "esac",
+        "select", "function", "in", "}", ")",
+    ];
+    !BLOCK_KEYWORDS.contains(&first_token)
+}
+
+/// Whether single quotes, double quotes, parentheses, and braces are all balanced across `line`,
+/// honoring backslash escapes (inactive inside single quotes). Used to detect constructs that span
+/// a newline, which would break if the block were split line-by-line.
+fn line_is_balanced(line: &str) -> bool {
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut paren: i32 = 0;
+    let mut brace: i32 = 0;
+    let mut chars = line.chars();
+    while let Some(c) = chars.next() {
+        if in_single {
+            if c == '\'' {
+                in_single = false;
+            }
+            continue;
+        }
+        match c {
+            // A backslash escapes the next character outside single quotes.
+            '\\' => {
+                chars.next();
+            }
+            '\'' if !in_double => in_single = true,
+            '"' => in_double = !in_double,
+            '(' if !in_double => paren += 1,
+            ')' if !in_double => {
+                paren -= 1;
+                if paren < 0 {
+                    return false;
+                }
+            }
+            '{' if !in_double => brace += 1,
+            '}' if !in_double => {
+                brace -= 1;
+                if brace < 0 {
+                    return false;
+                }
+            }
+            _ => {}
+        }
+    }
+    !in_single && !in_double && paren == 0 && brace == 0
+}
+
 pub enum Event {
     AutosuggestionAccepted,
     ClearSelectedBlock,
@@ -1023,6 +1146,11 @@ pub enum Event {
     },
     Enter,
     ExecuteCommand(Box<ExecuteCommandEvent>),
+    /// Requests that a pasted multi-line block be run as a sequence of separate,
+    /// sequential shell commands (each its own block), rather than one atomic
+    /// multi-line submission. Gated by `FeatureFlag::SequentialMultilinePaste`.
+    /// The vector is guaranteed non-empty.
+    ExecuteCommandSequence(Vec<String>),
     ExecuteAIQuery,
     EmacsBindingUsed,
     /// The input editor was locally edited and
@@ -7009,6 +7137,30 @@ impl Input {
             CanExecuteCommand::No(DenyExecutionReason::HistoryNotAppendable)
         } else {
             CanExecuteCommand::Yes
+        }
+    }
+
+    /// After submitting a shell command, reset the AI input back to its default post-command state
+    /// (Shell mode with autodetection enabled). Shared between the normal single-command submit and
+    /// the sequential multi-line paste path.
+    fn reset_ai_autodetection_after_shell_submit(&mut self, ctx: &mut ViewContext<Self>) {
+        if FeatureFlag::AgentMode.is_enabled()
+            && AISettings::as_ref(ctx).is_ai_autodetection_enabled(ctx)
+        {
+            self.ai_input_model.update(ctx, |input, ctx| {
+                input.abort_in_progress_detection();
+
+                // The default input state after executing a shell command is Shell mode with
+                // autodetection enabled.
+                input.set_input_config_for_classic_mode(
+                    InputConfig {
+                        input_type: InputType::Shell,
+                        is_locked: true,
+                    }
+                    .unlocked_if_autodetection_enabled(false, ctx),
+                    ctx,
+                );
+            });
         }
     }
 
@@ -13415,28 +13567,25 @@ impl Input {
             }
 
             let command = self.get_command(ctx);
+
+            // When a pasted block is a plain sequence of independent commands, run each line as its
+            // own sequential command instead of one atomic multi-line submission. This avoids a
+            // single line's failure (e.g. a zsh `!` history-expansion error) aborting the whole
+            // block, and the multi-line-buffer desync that follows a rejected resubmission.
+            if FeatureFlag::SequentialMultilinePaste.is_enabled() {
+                if let Some(commands) = split_into_sequential_commands(&command) {
+                    self.clear_buffer_and_reset_undo_stack(ctx);
+                    ctx.emit(Event::ExecuteCommandSequence(commands));
+                    self.reset_ai_autodetection_after_shell_submit(ctx);
+                    return;
+                }
+            }
+
             if !self.try_execute_command(&command, ctx) {
                 return;
             }
 
-            if FeatureFlag::AgentMode.is_enabled()
-                && AISettings::as_ref(ctx).is_ai_autodetection_enabled(ctx)
-            {
-                self.ai_input_model.update(ctx, |input, ctx| {
-                    input.abort_in_progress_detection();
-
-                    // The default input state after executing a shell command is Shell mode with
-                    // autodetection enabled.
-                    input.set_input_config_for_classic_mode(
-                        InputConfig {
-                            input_type: InputType::Shell,
-                            is_locked: true,
-                        }
-                        .unlocked_if_autodetection_enabled(false, ctx),
-                        ctx,
-                    );
-                });
-            }
+            self.reset_ai_autodetection_after_shell_submit(ctx);
 
             // Cancel actively streaming conversations if we're able to run the command.
             // This is possible in persistent input mode.

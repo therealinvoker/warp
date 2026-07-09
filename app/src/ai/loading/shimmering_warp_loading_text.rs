@@ -1,16 +1,25 @@
-//! Shimmering Warp loading text - renders Warp logo with shimmering text for loading states.
+//! Shimmering loading text - renders the Bang lightning logo alongside shimmering
+//! text for loading states.
 
 use warp_core::ui::appearance::Appearance;
+use warp_core::ui::Icon;
 use warpui::elements::shimmering_text::{
     ShimmerConfig, ShimmeringTextElement, ShimmeringTextStateHandle,
 };
-use warpui::elements::Element;
+use warpui::elements::{ConstrainedBox, CrossAxisAlignment, Element, Flex, ParentElement};
 use warpui::{AppContext, SingletonEntity};
 
-/// Warp icon glyph character
-const WARP_GLYPH: &str = "\u{E500}";
+/// Horizontal gap (px) between the lightning logo and the loading text.
+pub const LIGHTNING_LOADING_ICON_GAP: f32 = 4.;
 
-/// Creates a shimmering text element with the Warp glyph.
+/// Size (px) of the lightning logo rendered inline with loading text of the
+/// given `font_size`. Kept as a helper so callers that need to visually align
+/// other content (e.g. an indented tip) can reserve the matching width.
+pub fn lightning_loading_icon_size(font_size: f32) -> f32 {
+    font_size
+}
+
+/// Creates a shimmering text element preceded by the lightning logo.
 pub fn shimmering_warp_loading_text(
     text: impl Into<String>,
     font_size: f32,
@@ -27,9 +36,14 @@ pub fn shimmering_warp_loading_text(
     // Hardcoded shimmer config for consistent animation
     let config = ShimmerConfig::default();
 
-    // Create a single shimmering element with glyph and text
-    ShimmeringTextElement::new(
-        format!("{} {}", WARP_GLYPH, text.into()),
+    let icon_size = lightning_loading_icon_size(font_size);
+    let lightning = ConstrainedBox::new(Icon::Lightning.to_warpui_icon(base_color.into()).finish())
+        .with_width(icon_size)
+        .with_height(icon_size)
+        .finish();
+
+    let shimmer = ShimmeringTextElement::new(
+        text.into(),
         appearance.ui_font_family(),
         font_size,
         base_color,
@@ -37,5 +51,12 @@ pub fn shimmering_warp_loading_text(
         config,
         shimmer_handle,
     )
-    .finish()
+    .finish();
+
+    Flex::row()
+        .with_cross_axis_alignment(CrossAxisAlignment::Center)
+        .with_spacing(LIGHTNING_LOADING_ICON_GAP)
+        .with_child(lightning)
+        .with_child(shimmer)
+        .finish()
 }

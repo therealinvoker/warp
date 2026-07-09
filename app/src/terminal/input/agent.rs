@@ -2,8 +2,8 @@ use warp_cli::agent::Harness;
 use warp_core::settings::Setting;
 use warpui::elements::{
     AnchorPair, ConstrainedBox, Container, CrossAxisAlignment, DispatchEventResult, DropTarget,
-    Element, Empty, EventHandler, Expanded, Flex, Hoverable, MainAxisSize, OffsetPositioning,
-    OffsetType, ParentElement, PositionedElementOffsetBounds, PositioningAxis, SavePosition, Stack,
+    Element, Empty, EventHandler, Flex, Hoverable, MainAxisSize, OffsetPositioning, OffsetType,
+    ParentElement, PositionedElementOffsetBounds, PositioningAxis, SavePosition, Stack,
     XAxisAnchor, YAxisAnchor,
 };
 use warpui::presenter::ChildView;
@@ -213,6 +213,13 @@ impl Input {
             border_color,
             appearance,
         )
+        // Paint the same stable opaque fill the Terminal input uses
+        // (`neutral_3` = 15% fg over the background) so the Agent, Terminal, and
+        // Cloud Agent input boxes read identically regardless of what surface is
+        // composited behind them.
+        .with_background_color(crate::ui_components::blended_colors::neutral_3(
+            appearance.theme(),
+        ))
         .with_padding_bottom(4.)
         .finish();
 
@@ -327,15 +334,15 @@ impl Input {
 
         let mut stack = Stack::new();
 
-        // Mirror the local agent input: the compose UI spans the full pane width
-        // and docks to the bottom. An `Expanded` spacer pushes the natural-height
-        // content column to the bottom, and no horizontal gutter / max-width is
-        // applied so the input fills the width like the agent input. The left
-        // inset (terminal `PADDING_LEFT`) is applied inside the content instead.
+        // The compose UI is a fresh, pre-run state, so it renders at natural height and
+        // the view centers it in the main area (see `render_centered_first_run_input`),
+        // matching a new Agent / Terminal tab rather than docking to the bottom. No
+        // horizontal gutter / max-width is applied here; the left inset (terminal
+        // `PADDING_LEFT`) is applied inside the content and the centering wrapper
+        // constrains the width.
         let input_content = Flex::column()
             .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
-            .with_main_axis_size(MainAxisSize::Max)
-            .with_child(Expanded::new(1., Empty::new().finish()).finish())
+            .with_main_axis_size(MainAxisSize::Min)
             .with_child(self.render_cloud_mode_v2_content(appearance, app))
             .finish();
 
@@ -672,6 +679,11 @@ impl Input {
             border_color,
             appearance,
         )
+        // Match the Agent and Terminal input boxes' stable opaque fill so the
+        // Cloud Agent box reads identically (see `render_agent_input`).
+        .with_background_color(crate::ui_components::blended_colors::neutral_3(
+            appearance.theme(),
+        ))
         .with_padding_bottom(4.);
 
         input.finish()

@@ -78,7 +78,9 @@ use crate::ai::blocklist::model::{AIBlockModel, AIBlockModelHelper};
 use crate::ai::blocklist::secret_redaction::{redact_secrets_in_element, SecretRedactionState};
 use crate::ai::blocklist::view_util::error_color;
 use crate::ai::blocklist::{BlocklistAIActionModel, ShellCommandExecutor, TextLocation};
-use crate::ai::loading::shimmering_warp_loading_text;
+use crate::ai::loading::{
+    lightning_loading_icon_size, shimmering_warp_loading_text, LIGHTNING_LOADING_ICON_GAP,
+};
 use crate::ai::AIRequestUsageModel;
 use crate::code::editor::view::CodeEditorView;
 use crate::code::editor_management::CodeSource;
@@ -108,7 +110,7 @@ const IMAGE_SOURCE_LINK_LINE_INDEX: usize = 1;
 const ERROR_APOLOGY_TEXT: &str = "I'm sorry, I couldn't complete that request.";
 const INTERNAL_WARP_ERROR: &str = "Internal Warp error.";
 
-pub const LOAD_OUTPUT_MESSAGE: &str = "Warping...";
+pub const LOAD_OUTPUT_MESSAGE: &str = "Banging...";
 pub const LOAD_OUTPUT_MESSAGE_FOR_ADJUSTING: &str = "Adjusting tasks...";
 pub const LOAD_OUTPUT_MESSAGE_FOR_PASSIVE_CODE_GEN: &str = "Generating fix...";
 pub const LOAD_OUTPUT_MESSAGE_FOR_CREATING_DIFF: &str = "Creating diff...";
@@ -564,14 +566,10 @@ pub fn render_warping_indicator_base(
     // will be rendered on a second line below the warping text. Captured before
     // `secondary_element` is consumed so the container can reserve room for it.
     let has_secondary_element = secondary_element.is_some();
-    // Unicode code point for the Warp glyph that is embedded in the version of Roboto we bundle
-    // into the app. This code point MUST be rendered using Roboto (the default ui font) or else the
-    // glyph may not be rendered.
-    const WARP_GLYPH: &str = "\u{E500}";
 
     let appearance = Appearance::as_ref(app);
 
-    let should_indent_tip_for_warp_glyph = matches!(
+    let should_indent_tip_for_lightning_logo = matches!(
         warping_indicator_text,
         MaybeShimmeringText::Shimmering { .. }
     );
@@ -599,24 +597,20 @@ pub fn render_warping_indicator_base(
 
     let mut text_col = Flex::column();
     if let Some(sub_element) = secondary_element {
-        // Our warping indicator text prepends the Warp glyph (and a space) to the label.
-        // If we render the tip directly underneath, it will align to the glyph instead of
-        // the start of the actual warping text.
-        let sub_element = if should_indent_tip_for_warp_glyph {
-            let font_size = appearance.monospace_font_size() - 3.;
-            let glyph_indent = Text::new_inline(
-                format!("{WARP_GLYPH} "),
-                appearance.ui_font_family(),
-                font_size,
-            )
-            .with_color(ColorU::new(0, 0, 0, 0))
-            .with_selectable(false)
-            .soft_wrap(false)
-            .finish();
+        // Our warping indicator text prepends the lightning logo (and a gap) to the label.
+        // If we render the tip directly underneath, it will align to the logo instead of
+        // the start of the actual warping text, so reserve the matching width.
+        let sub_element = if should_indent_tip_for_lightning_logo {
+            let logo_indent = ConstrainedBox::new(Empty::new().finish())
+                .with_width(
+                    lightning_loading_icon_size(appearance.monospace_font_size() - 2.)
+                        + LIGHTNING_LOADING_ICON_GAP,
+                )
+                .finish();
 
             Flex::row()
                 .with_cross_axis_alignment(CrossAxisAlignment::Start)
-                .with_child(glyph_indent)
+                .with_child(logo_indent)
                 .with_child(Shrinkable::new(1., sub_element).finish())
                 .finish()
         } else {

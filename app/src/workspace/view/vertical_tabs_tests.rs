@@ -8,7 +8,7 @@ use warpui::EntityId;
 use super::{
     branch_label_display, coalesce_summary_branch_entries, code_detail_kind_label,
     compact_branch_subtitle_display, detail_sidecar_width_and_bounds,
-    detail_target_for_hovered_row, non_terminal_search_text_fragments,
+    detail_target_for_hovered_row, expand_home_prefix, non_terminal_search_text_fragments,
     pane_ids_for_display_granularity, pane_search_text_fragments, preferred_agent_tab_titles,
     push_normalized_unique_summary_label, search_fragments_contain_query,
     select_summary_pane_kind_icons, should_keep_detail_sidecar_visible_for_mouse_position,
@@ -16,10 +16,10 @@ use super::{
     summary_search_text_fragments, terminal_kind_badge_label, terminal_primary_line_data,
     terminal_pull_request_badge_label, terminal_search_text_fragments,
     terminal_title_fallback_font, uses_outer_group_container, visible_pane_ids_for_detail_target,
-    vtab_diff_stats_text, AgentTabTextPreference, SummaryPaneKind, SummaryPaneKindIcons,
-    TerminalAgentText, TerminalPrimaryLineData, TerminalPrimaryLineFont, VerticalTabsDetailTarget,
-    VerticalTabsDetailTargetKind, VerticalTabsSummaryBranchEntry, VerticalTabsSummaryData,
-    VerticalTabsSummaryPrimaryLabel,
+    vtab_diff_stats_text, workspace_folder_key_and_label, AgentTabTextPreference, SummaryPaneKind,
+    SummaryPaneKindIcons, TerminalAgentText, TerminalPrimaryLineData, TerminalPrimaryLineFont,
+    VerticalTabsDetailTarget, VerticalTabsDetailTargetKind, VerticalTabsSummaryBranchEntry,
+    VerticalTabsSummaryData, VerticalTabsSummaryPrimaryLabel,
 };
 use crate::ai::agent::conversation::ConversationStatus;
 use crate::context_chips::display_chip::GitLineChanges;
@@ -1189,4 +1189,48 @@ fn summary_search_fragments_include_hidden_overflow_values() {
     assert!(search_fragments_contain_query(&fragments, "#789"));
     assert!(search_fragments_contain_query(&fragments, "+2"));
     assert!(search_fragments_contain_query(&fragments, "-3"));
+}
+
+#[test]
+fn expand_home_prefix_replaces_leading_tilde() {
+    let home = PathBuf::from("/Users/ryan.holmes");
+    assert_eq!(expand_home_prefix(&PathBuf::from("~"), &home), home);
+    assert_eq!(
+        expand_home_prefix(&PathBuf::from("~/Workspace/foo"), &home),
+        PathBuf::from("/Users/ryan.holmes/Workspace/foo")
+    );
+    // Absolute and unrelated paths are returned unchanged.
+    assert_eq!(
+        expand_home_prefix(&PathBuf::from("/etc/hosts"), &home),
+        PathBuf::from("/etc/hosts")
+    );
+    // A `~something` component that isn't exactly `~` is not treated as home.
+    assert_eq!(
+        expand_home_prefix(&PathBuf::from("~foo/bar"), &home),
+        PathBuf::from("~foo/bar")
+    );
+}
+
+#[test]
+fn workspace_folder_key_and_label_normalizes_home_representations() {
+    use crate::code::buffer_location::LocalOrRemotePath;
+
+    let Some(home) = dirs::home_dir() else {
+        return;
+    };
+
+    let tilde = workspace_folder_key_and_label(&LocalOrRemotePath::Local(PathBuf::from("~")));
+    let absolute = workspace_folder_key_and_label(&LocalOrRemotePath::Local(home.clone()));
+
+    // Both the `~`-collapsed and absolute-home forms bucket under the same friendly `~` folder,
+    // so a freshly created home tab doesn't briefly appear under the absolute-home folder.
+    assert_eq!(tilde, ("~".to_owned(), "~".to_owned()));
+    assert_eq!(absolute, ("~".to_owned(), "~".to_owned()));
+
+    // A home-relative subdirectory and its absolute form share one key + basename label.
+    let sub_tilde =
+        workspace_folder_key_and_label(&LocalOrRemotePath::Local(PathBuf::from("~/proj")));
+    let sub_absolute = workspace_folder_key_and_label(&LocalOrRemotePath::Local(home.join("proj")));
+    assert_eq!(sub_tilde, sub_absolute);
+    assert_eq!(sub_tilde.1, "proj".to_owned());
 }

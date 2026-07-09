@@ -16,10 +16,14 @@
 
 pub mod pane_manager;
 
+#[cfg(test)]
+#[path = "mod_test.rs"]
+mod tests;
+
 use warpui::elements::{
-    Border, ChildView, Clipped, ConstrainedBox, Container, CornerRadius, CrossAxisAlignment,
-    Expanded, Flex, Hoverable, MainAxisSize, MouseStateHandle, Padding, ParentElement, Radius,
-    Shrinkable, Text, Wrap,
+    Border, ChildView, Clipped, ClippedScrollStateHandle, ClippedScrollable, ConstrainedBox,
+    Container, CornerRadius, CrossAxisAlignment, Expanded, Fill, Flex, Hoverable, MainAxisSize,
+    MouseStateHandle, Padding, ParentElement, Radius, ScrollbarWidth, Text, Wrap,
 };
 use warpui::fonts::Weight;
 use warpui::platform::Cursor;
@@ -30,10 +34,16 @@ use warpui::{
     ViewContext, ViewHandle,
 };
 
+use std::collections::HashSet;
+
+use ai::skills::{home_skills_path, SkillProvider};
+
+use crate::ai::execution_profiles::AIExecutionProfile;
+use crate::ai::facts::{AIFact, AIMemory};
 use crate::ai::mcp::parsing::ParsedTemplatableMCPServerResult;
 use crate::ai::mcp::{ServerOrigin, TemplatableMCPServerManager};
 use crate::appearance::Appearance;
-use crate::cloud_object::{CloudObjectEventEntrypoint, Space};
+use crate::cloud_object::{CloudObjectEventEntrypoint, Owner, Space};
 use crate::editor::{EditorView, Event as EditorEvent, SingleLineEditorOptions};
 use crate::marketplace_plugins::{CloudMarketplacePluginModel, MarketplacePlugin, PluginSource};
 use crate::pane_group::focus_state::PaneFocusHandle;
@@ -42,61 +52,95 @@ use crate::pane_group::{BackingView, PaneConfiguration, PaneEvent};
 use crate::server::cloud_objects::update_manager::{InitiatedBy, UpdateManager};
 use crate::server::ids::ClientId;
 use crate::server::server_api::marketplace::{
-    MarketplaceEntryKind, MarketplaceSearchEntry, MarketplaceSourceKind,
+    MarketplaceComponentType, MarketplaceEntryKind, MarketplacePluginComponentFile,
+    MarketplaceSearchEntry, MarketplaceSourceKind, ResolvedMarketplacePlugin,
 };
 use crate::server::server_api::ServerApiProvider;
 use crate::ui_components::avatar::{Avatar, AvatarContent};
 use crate::ui_components::blended_colors;
+use crate::ui_components::buttons::icon_button;
+use crate::ui_components::icons::Icon;
 use crate::view_components::DismissibleToast;
+use crate::workflows::workflow::Workflow;
 use crate::workspace::WorkspaceAction;
 use crate::workspaces::user_workspaces::UserWorkspaces;
 use crate::ToastStack;
 
 const NAV_WIDTH: f32 = 216.;
-const CARD_WIDTH: f32 = 320.;
-const CARD_SPACING: f32 = 12.;
+const CARD_WIDTH: f32 = 300.;
+const CARD_SPACING: f32 = 8.;
 const NAV_FONT_SIZE: f32 = 13.;
 const CARD_TITLE_FONT_SIZE: f32 = 14.;
 const CARD_BODY_FONT_SIZE: f32 = 12.;
 
 const DOCUMENTATION_URL: &str = "https://modelcontextprotocol.io/docs";
 
-/// Header text for the marketplace pane.
-pub const MARKETPLACE_HEADER_TEXT: &str = "Marketplace";
+/// Header text for the marketplace ("Connectors") pane.
+pub const MARKETPLACE_HEADER_TEXT: &str = "Connectors";
 
-/// The left-rail sections. `All` merges every directory; the rest filter to
-/// one backing source.
+/// The left-rail sections. `All` merges every directory; `Popular` shows the
+/// most-installed entries in your team; the rest filter to one backing source.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Section {
     All,
+    Popular,
+    Cursor,
     Org,
     McpRegistry,
-    OpenVsx,
 }
 
 impl Section {
     const ALL: &'static [Section] = &[
         Section::All,
+        Section::Popular,
+        Section::Cursor,
         Section::Org,
         Section::McpRegistry,
-        Section::OpenVsx,
     ];
 
     fn label(self) -> &'static str {
         match self {
             Section::All => "All",
+            Section::Popular => "Popular in your team",
+            Section::Cursor => "Cursor",
             Section::Org => "Your org",
             Section::McpRegistry => "MCP servers",
-            Section::OpenVsx => "Plugins",
+        }
+    }
+}
+
+/// How the visible cards are ordered.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SortMode {
+    /// The server's merged relevance order (default).
+    Relevance,
+    /// Alphabetical by title.
+    Name,
+    /// Most-installed-in-your-team first; entries without a count sort last.
+    Popular,
+}
+
+impl SortMode {
+    const ALL: &'static [SortMode] = &[SortMode::Relevance, SortMode::Name, SortMode::Popular];
+
+    fn label(self) -> &'static str {
+        match self {
+            SortMode::Relevance => "Relevance",
+            SortMode::Name => "Name",
+            SortMode::Popular => "Popularity",
         }
     }
 }
 
 /// The sources fetched by the rail search, in merge/display order.
+///
+/// Open VSX (VS Code extension registry) is intentionally excluded: Bang has no
+/// VS Code extension host, so `.vsix` extensions can't run here, and none of
+/// them expose an MCP server we could extract.
 const SOURCES: [MarketplaceSourceKind; 3] = [
+    MarketplaceSourceKind::Cursor,
     MarketplaceSourceKind::Org,
     MarketplaceSourceKind::McpRegistry,
-    MarketplaceSourceKind::OpenVsx,
 ];
 
 fn source_index(source: MarketplaceSourceKind) -> usize {
@@ -119,11 +163,15 @@ enum SourceState {
 #[derive(Debug, Clone)]
 pub enum MarketplaceDirectoryAction {
     SelectSection(usize),
+    SelectCategory(usize),
+    SelectSort(usize),
     SelectInstallSpace(usize),
     /// Install the entry with this id from this source.
     Install(MarketplaceSourceKind, String),
     OpenCustomize,
     OpenDocumentation,
+    /// Close the Connectors pane.
+    Close,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -143,6 +191,10 @@ pub struct MarketplaceDirectoryView {
     pane_configuration: ModelHandle<PaneConfiguration>,
     focus_handle: Option<PaneFocusHandle>,
     selected_section: Section,
+    /// Optional domain-category filter (from entries' `category` field), shown
+    /// as a CATEGORIES rail below BROWSE. `None` means "all categories".
+    selected_category: Option<String>,
+    sort_mode: SortMode,
     /// Which drive space "Get" installs into.
     install_space: Space,
     space_options: Vec<(Space, String, MouseStateHandle)>,
@@ -154,8 +206,16 @@ pub struct MarketplaceDirectoryView {
     fetched_query: String,
     customize_mouse_state: MouseStateHandle,
     documentation_mouse_state: MouseStateHandle,
+    close_button_mouse_state: MouseStateHandle,
     section_mouse_states: Vec<MouseStateHandle>,
+    sort_mouse_states: Vec<MouseStateHandle>,
+    category_mouse_states: Vec<MouseStateHandle>,
     card_mouse_states: Vec<MouseStateHandle>,
+    /// Vertical scroll for the card grid so long directories don't clip.
+    content_scroll_state: ClippedScrollStateHandle,
+    /// Vertical scroll for the left rail so many categories don't clip the
+    /// sections below them.
+    nav_scroll_state: ClippedScrollStateHandle,
 }
 
 impl MarketplaceDirectoryView {
@@ -180,6 +240,8 @@ impl MarketplaceDirectoryView {
             pane_configuration,
             focus_handle: None,
             selected_section: Section::All,
+            selected_category: None,
+            sort_mode: SortMode::Relevance,
             install_space: Space::Personal,
             space_options: Vec::new(),
             search_editor,
@@ -187,11 +249,19 @@ impl MarketplaceDirectoryView {
             fetched_query: String::new(),
             customize_mouse_state: Default::default(),
             documentation_mouse_state: Default::default(),
+            close_button_mouse_state: Default::default(),
             section_mouse_states: Section::ALL
                 .iter()
                 .map(|_| MouseStateHandle::default())
                 .collect(),
+            sort_mouse_states: SortMode::ALL
+                .iter()
+                .map(|_| MouseStateHandle::default())
+                .collect(),
+            category_mouse_states: Vec::new(),
             card_mouse_states: Vec::new(),
+            content_scroll_state: ClippedScrollStateHandle::default(),
+            nav_scroll_state: ClippedScrollStateHandle::default(),
         };
         view.rebuild_space_options(ctx);
         view.refresh(ctx);
@@ -274,6 +344,7 @@ impl MarketplaceDirectoryView {
                         Err(err) => SourceState::Error(err.to_string()),
                     };
                     me.resize_card_mouse_states();
+                    me.resize_category_mouse_states();
                     ctx.notify();
                 },
             );
@@ -295,6 +366,38 @@ impl MarketplaceDirectoryView {
         }
     }
 
+    fn resize_category_mouse_states(&mut self) {
+        let total = self.available_categories().len();
+        while self.category_mouse_states.len() < total {
+            self.category_mouse_states.push(MouseStateHandle::default());
+        }
+    }
+
+    /// Distinct, human-readable domain categories across all loaded entries,
+    /// sorted alphabetically. Powers the CATEGORIES rail and its filter.
+    fn available_categories(&self) -> Vec<String> {
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut categories: Vec<String> = Vec::new();
+        for state in &self.source_states {
+            if let SourceState::Loaded(entries) = state {
+                for entry in entries {
+                    let Some(raw) = entry.category.as_deref() else {
+                        continue;
+                    };
+                    let label = prettify_category(raw);
+                    if label.is_empty() {
+                        continue;
+                    }
+                    if seen.insert(label.to_lowercase()) {
+                        categories.push(label);
+                    }
+                }
+            }
+        }
+        categories.sort_by_key(|c| c.to_lowercase());
+        categories
+    }
+
     /// The entries visible under the current section + live text filter, as
     /// `(source, entry)` pairs in merged display order.
     fn visible_entries(
@@ -303,11 +406,13 @@ impl MarketplaceDirectoryView {
     ) -> Vec<(MarketplaceSourceKind, &MarketplaceSearchEntry)> {
         let term = self.search_term(app).to_lowercase();
         let wanted_source = match self.selected_section {
-            Section::All => None,
+            Section::All | Section::Popular => None,
+            Section::Cursor => Some(MarketplaceSourceKind::Cursor),
             Section::Org => Some(MarketplaceSourceKind::Org),
             Section::McpRegistry => Some(MarketplaceSourceKind::McpRegistry),
-            Section::OpenVsx => Some(MarketplaceSourceKind::OpenVsx),
         };
+        let popular_only = self.selected_section == Section::Popular;
+        let wanted_category = self.selected_category.as_deref().map(str::to_lowercase);
 
         let mut visible = Vec::new();
         for source in SOURCES {
@@ -316,6 +421,18 @@ impl MarketplaceDirectoryView {
             }
             if let SourceState::Loaded(entries) = &self.source_states[source_index(source)] {
                 for entry in entries {
+                    if popular_only && entry.install_count.unwrap_or(0) <= 0 {
+                        continue;
+                    }
+                    if let Some(wanted) = &wanted_category {
+                        let matches_category = entry
+                            .category
+                            .as_deref()
+                            .is_some_and(|c| prettify_category(c).to_lowercase() == *wanted);
+                        if !matches_category {
+                            continue;
+                        }
+                    }
                     let matches = term.is_empty()
                         || entry.title.to_lowercase().contains(&term)
                         || entry.description.to_lowercase().contains(&term)
@@ -327,6 +444,28 @@ impl MarketplaceDirectoryView {
                         visible.push((source, entry));
                     }
                 }
+            }
+        }
+
+        // The Popular section always ranks by install count; elsewhere honor
+        // the chosen sort. Relevance keeps the server's merged order.
+        let effective_sort = if popular_only {
+            SortMode::Popular
+        } else {
+            self.sort_mode
+        };
+        match effective_sort {
+            SortMode::Relevance => {}
+            SortMode::Name => {
+                visible.sort_by(|a, b| a.1.title.to_lowercase().cmp(&b.1.title.to_lowercase()));
+            }
+            SortMode::Popular => {
+                visible.sort_by(|a, b| {
+                    b.1.install_count
+                        .unwrap_or(0)
+                        .cmp(&a.1.install_count.unwrap_or(0))
+                        .then_with(|| a.1.title.to_lowercase().cmp(&b.1.title.to_lowercase()))
+                });
             }
         }
         visible
@@ -369,17 +508,35 @@ impl MarketplaceDirectoryView {
             return;
         };
         match entry.kind {
-            MarketplaceEntryKind::Mcp => self.install_mcp(source, &entry, ctx),
-            MarketplaceEntryKind::Plugin => self.install_plugin(source, &entry, ctx),
+            MarketplaceEntryKind::Mcp => {
+                self.install_mcp(source, &entry, ctx);
+                self.report_install(source, &entry, ctx);
+            }
+            MarketplaceEntryKind::Plugin if Self::is_cursor_plugin(&entry) => {
+                // Multi-component `.cursor-plugin` entry: fetch the full
+                // component bodies on demand, then install each into its native
+                // Bang home.
+                self.install_cursor_plugin(source, entry, ctx);
+            }
+            MarketplaceEntryKind::Plugin => {
+                self.install_plugin(source, &entry, ctx);
+                self.report_install(source, &entry, ctx);
+            }
         }
+    }
+
+    /// A Cursor `.cursor-plugin` entry carries a component summary; Open VSX
+    /// plugins instead carry an `extension_id` / `bundle_url` and no components.
+    fn is_cursor_plugin(entry: &MarketplaceSearchEntry) -> bool {
+        entry.components.is_some() && entry.extension_id.is_none()
     }
 
     fn origin_for_source(source: MarketplaceSourceKind) -> ServerOrigin {
         match source {
             MarketplaceSourceKind::Org => ServerOrigin::OrgMarketplace,
-            MarketplaceSourceKind::McpRegistry | MarketplaceSourceKind::OpenVsx => {
-                ServerOrigin::Registry
-            }
+            MarketplaceSourceKind::Cursor
+            | MarketplaceSourceKind::McpRegistry
+            | MarketplaceSourceKind::OpenVsx => ServerOrigin::Registry,
         }
     }
 
@@ -393,16 +550,30 @@ impl MarketplaceDirectoryView {
             self.show_toast("This entry has no installable MCP config.".to_owned(), ctx);
             return;
         };
+        if self.install_mcp_template(source, template_json, ctx) == 0 {
+            self.show_toast("Couldn't parse this entry's MCP config.".to_owned(), ctx);
+        } else {
+            self.show_toast(format!("Added {} to your MCP servers.", entry.title), ctx);
+        }
+    }
+
+    /// Installs every server in a `{"mcpServers": {...}}` template into the
+    /// selected space. Returns how many servers were installed (0 on parse
+    /// failure), so callers can compose an install summary.
+    fn install_mcp_template(
+        &mut self,
+        source: MarketplaceSourceKind,
+        template_json: &str,
+        ctx: &mut ViewContext<Self>,
+    ) -> usize {
         let parsed_servers = match ParsedTemplatableMCPServerResult::from_user_json(template_json) {
             Ok(parsed) if !parsed.is_empty() => parsed,
-            _ => {
-                self.show_toast("Couldn't parse this entry's MCP config.".to_owned(), ctx);
-                return;
-            }
+            _ => return 0,
         };
 
         let space = self.install_space;
         let origin = Self::origin_for_source(source);
+        let count = parsed_servers.len();
         for parsed_server in parsed_servers {
             let mut server = parsed_server.templatable_mcp_server.clone();
             server.origin = origin;
@@ -418,7 +589,188 @@ impl MarketplaceDirectoryView {
                 }
             });
         }
-        self.show_toast(format!("Added {} to your MCP servers.", entry.title), ctx);
+        count
+    }
+
+    /// Resolves a `.cursor-plugin` entry's full component contents from the
+    /// backend, then installs each component. Async because the bodies are
+    /// fetched on demand (kept out of the directory listing).
+    fn install_cursor_plugin(
+        &mut self,
+        source: MarketplaceSourceKind,
+        entry: MarketplaceSearchEntry,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let entry_id = entry.entry_id.inner().to_owned();
+        let client = ServerApiProvider::handle(ctx)
+            .as_ref(ctx)
+            .get_marketplace_client();
+        self.show_toast(format!("Installing {}…", entry.title), ctx);
+        ctx.spawn(
+            async move {
+                let resolved = client.resolve_marketplace_plugin(source, entry_id).await;
+                (entry, resolved)
+            },
+            move |me, (entry, resolved), ctx| match resolved {
+                Ok(resolved) => me.apply_resolved_plugin(source, entry, resolved, ctx),
+                Err(err) => me.show_toast(format!("Couldn't install {}: {err}", entry.title), ctx),
+            },
+        );
+    }
+
+    /// Materializes each resolved component into its native Bang home: MCP
+    /// servers, rules (AIFact), commands (Workflow), agents (execution
+    /// profile), and skills (files under `~/.agents/skills`). Hooks have no
+    /// Bang equivalent and are reported as skipped.
+    fn apply_resolved_plugin(
+        &mut self,
+        source: MarketplaceSourceKind,
+        entry: MarketplaceSearchEntry,
+        resolved: ResolvedMarketplacePlugin,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let Some(owner) = UserWorkspaces::as_ref(ctx).space_to_owner(self.install_space, ctx)
+        else {
+            self.show_toast("Couldn't resolve the install destination.".to_owned(), ctx);
+            return;
+        };
+
+        let mut summary: Vec<String> = Vec::new();
+
+        if let Some(template_json) = resolved.mcp_template_json.as_deref() {
+            let installed = self.install_mcp_template(source, template_json, ctx);
+            if installed > 0 {
+                summary.push(pluralize(installed, "MCP server"));
+            }
+        }
+
+        let mut rules = 0usize;
+        let mut commands = 0usize;
+        let mut agents = 0usize;
+        let mut skipped_hooks = 0usize;
+        let mut skill_files: Vec<&MarketplacePluginComponentFile> = Vec::new();
+
+        for file in &resolved.files {
+            match file.component_type {
+                MarketplaceComponentType::Rule => {
+                    self.create_rule(&file.name, &file.content, owner, ctx);
+                    rules += 1;
+                }
+                MarketplaceComponentType::Command => {
+                    self.create_command(&file.name, &file.content, owner, ctx);
+                    commands += 1;
+                }
+                MarketplaceComponentType::Agent => {
+                    self.create_agent_profile(&file.name, owner, ctx);
+                    agents += 1;
+                }
+                MarketplaceComponentType::Skill => skill_files.push(file),
+                MarketplaceComponentType::Hook => skipped_hooks += 1,
+                // The MCP part is installed via `mcp_template_json` above.
+                MarketplaceComponentType::McpServer => {}
+            }
+        }
+        if rules > 0 {
+            summary.push(pluralize(rules, "rule"));
+        }
+        if commands > 0 {
+            summary.push(pluralize(commands, "command"));
+        }
+        if agents > 0 {
+            summary.push(pluralize(agents, "agent"));
+        }
+        let skills = install_skill_files(&skill_files);
+        if skills > 0 {
+            summary.push(pluralize(skills, "skill"));
+        }
+
+        self.report_install(source, &entry, ctx);
+
+        let mut message = if summary.is_empty() {
+            format!("Installed {}.", entry.title)
+        } else {
+            format!("Installed {}: {}.", entry.title, summary.join(", "))
+        };
+        if skipped_hooks > 0 {
+            message.push_str(&format!(
+                " Skipped {} (hooks aren't supported in Bang yet).",
+                pluralize(skipped_hooks, "hook")
+            ));
+        }
+        self.show_toast(message, ctx);
+    }
+
+    /// Creates a Rule (AIFact) from a rule file body.
+    fn create_rule(&self, name: &str, content: &str, owner: Owner, ctx: &mut ViewContext<Self>) {
+        let ai_fact = AIFact::Memory(AIMemory {
+            name: (!name.is_empty()).then(|| name.to_string()),
+            content: content.to_string(),
+            is_autogenerated: false,
+            suggested_logging_id: None,
+        });
+        UpdateManager::handle(ctx).update(ctx, |update_manager, ctx| {
+            update_manager.create_ai_fact(ai_fact, ClientId::default(), owner, ctx);
+        });
+    }
+
+    /// Creates an agent-mode Workflow (Cursor "command") from a command file.
+    fn create_command(&self, name: &str, content: &str, owner: Owner, ctx: &mut ViewContext<Self>) {
+        let workflow = Workflow::AgentMode {
+            name: name.to_string(),
+            query: content.to_string(),
+            description: None,
+            arguments: Vec::new(),
+        };
+        let client_id = ClientId::default();
+        UpdateManager::handle(ctx).update(ctx, |update_manager, ctx| {
+            update_manager.create_workflow(
+                workflow,
+                owner,
+                None,
+                client_id,
+                CloudObjectEventEntrypoint::ManagementUI,
+                true,
+                ctx,
+            );
+        });
+    }
+
+    /// Creates an AI execution profile (Cursor "agent") named after the file.
+    /// Cursor agent files carry a prompt/persona we can't fully model yet, so
+    /// we seed a default-permission profile the user can then tailor.
+    fn create_agent_profile(&self, name: &str, owner: Owner, ctx: &mut ViewContext<Self>) {
+        let profile = AIExecutionProfile {
+            name: name.to_string(),
+            is_default_profile: false,
+            ..Default::default()
+        };
+        let client_id = ClientId::default();
+        UpdateManager::handle(ctx).update(ctx, |update_manager, ctx| {
+            update_manager.create_ai_execution_profile(profile, client_id, owner, ctx);
+        });
+    }
+
+    /// Fire-and-forget report of an install for the per-team popularity
+    /// leaderboard. The backend derives the team from the caller's membership.
+    fn report_install(
+        &self,
+        source: MarketplaceSourceKind,
+        entry: &MarketplaceSearchEntry,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let entry_id = entry.entry_id.inner().to_owned();
+        let title = Some(entry.title.clone());
+        let client = ServerApiProvider::handle(ctx)
+            .as_ref(ctx)
+            .get_marketplace_client();
+        ctx.spawn(
+            async move {
+                let _ = client
+                    .report_marketplace_install(source, entry_id, title, None)
+                    .await;
+            },
+            |_me, _res, _ctx| {},
+        );
     }
 
     fn install_plugin(
@@ -542,7 +894,7 @@ impl MarketplaceDirectoryView {
 
     fn render_nav(&self, appearance: &Appearance) -> Box<dyn Element> {
         let theme = appearance.theme();
-        let mut column = Flex::column().with_main_axis_size(MainAxisSize::Max);
+        let mut column = Flex::column().with_main_axis_size(MainAxisSize::Min);
 
         // Search across every source, right in the rail.
         column = column.with_child(
@@ -577,6 +929,40 @@ impl MarketplaceDirectoryView {
             ));
         }
 
+        let categories = self.available_categories();
+        if !categories.is_empty() {
+            column = column.with_child(Self::render_nav_heading("CATEGORIES", appearance));
+            for (index, category) in categories.iter().enumerate() {
+                let selected = self.selected_category.as_deref() == Some(category);
+                let mouse_state = self
+                    .category_mouse_states
+                    .get(index)
+                    .cloned()
+                    .unwrap_or_default();
+                column = column.with_child(Self::render_nav_item(
+                    category,
+                    selected,
+                    mouse_state,
+                    appearance,
+                    move |ctx| {
+                        ctx.dispatch_typed_action(MarketplaceDirectoryAction::SelectCategory(index))
+                    },
+                ));
+            }
+        }
+
+        column = column.with_child(Self::render_nav_heading("SORT BY", appearance));
+        for (index, mode) in SortMode::ALL.iter().enumerate() {
+            let selected = *mode == self.sort_mode;
+            column = column.with_child(Self::render_nav_item(
+                mode.label(),
+                selected,
+                self.sort_mouse_states[index].clone(),
+                appearance,
+                move |ctx| ctx.dispatch_typed_action(MarketplaceDirectoryAction::SelectSort(index)),
+            ));
+        }
+
         column = column.with_child(Self::render_nav_heading("INSTALL TO", appearance));
         for (index, (space, name, mouse_state)) in self.space_options.iter().enumerate() {
             let selected = *space == self.install_space;
@@ -607,12 +993,48 @@ impl MarketplaceDirectoryView {
             |ctx| ctx.dispatch_typed_action(MarketplaceDirectoryAction::OpenDocumentation),
         ));
 
-        Container::new(Clipped::new(column.finish()).finish())
-            .with_padding_left(8.)
-            .with_padding_right(8.)
-            .with_padding_top(12.)
-            .with_border(Border::right(1.).with_border_fill(theme.outline()))
-            .finish()
+        Container::new(
+            ClippedScrollable::vertical(
+                self.nav_scroll_state.clone(),
+                column.finish(),
+                ScrollbarWidth::Auto,
+                theme.nonactive_ui_text_color().into(),
+                theme.active_ui_text_color().into(),
+                Fill::None,
+            )
+            .with_overlayed_scrollbar()
+            .finish(),
+        )
+        .with_padding_left(8.)
+        .with_padding_right(8.)
+        .with_padding_top(12.)
+        .with_border(Border::right(1.).with_border_fill(theme.outline()))
+        .finish()
+    }
+
+    /// Short chip labels describing a plugin's category and component types.
+    /// Retained for tests / potential detail views; cards no longer render it.
+    #[cfg(test)]
+    fn component_badges(entry: &MarketplaceSearchEntry) -> Vec<String> {
+        let mut badges = Vec::new();
+        if let Some(category) = entry.category.as_deref().filter(|c| !c.is_empty()) {
+            badges.push(category.to_string());
+        }
+        if let Some(components) = &entry.components {
+            for (count, label) in [
+                (components.mcp_server_count, "MCP"),
+                (components.rule_count, "Rules"),
+                (components.skill_count, "Skills"),
+                (components.agent_count, "Agents"),
+                (components.command_count, "Commands"),
+                (components.hook_count, "Hooks"),
+            ] {
+                if count > 0 {
+                    badges.push(label.to_string());
+                }
+            }
+        }
+        badges
     }
 
     fn render_card(
@@ -624,17 +1046,25 @@ impl MarketplaceDirectoryView {
         let theme = appearance.theme();
 
         let title_text = entry.title.clone();
-        let kind_label = match entry.kind {
-            MarketplaceEntryKind::Mcp => "MCP",
-            MarketplaceEntryKind::Plugin => "Plugin",
-        };
-        let mut subtitle_parts = vec![kind_label.to_owned()];
-        if let Some(publisher) = &entry.publisher {
-            subtitle_parts.push(publisher.clone());
+        // Compact subtitle: publisher and source de-duplicated (avoids
+        // "Cursor · Cursor"), plus install count when it's a team favorite.
+        let mut subtitle_parts: Vec<String> = Vec::new();
+        if let Some(publisher) = entry.publisher.as_deref().filter(|p| !p.is_empty()) {
+            subtitle_parts.push(publisher.to_owned());
         }
-        subtitle_parts.push(entry.source_label.clone());
+        if !entry.source_label.is_empty()
+            && entry.publisher.as_deref() != Some(entry.source_label.as_str())
+        {
+            subtitle_parts.push(entry.source_label.clone());
+        }
+        if let Some(installs) = entry.install_count.filter(|n| *n > 0) {
+            subtitle_parts.push(format!(
+                "{installs} install{}",
+                if installs == 1 { "" } else { "s" }
+            ));
+        }
         let subtitle_text = subtitle_parts.join(" · ");
-        let description_text: String = entry.description.chars().take(140).collect();
+        let description_text: String = entry.description.chars().take(72).collect();
         let entry_id = entry.entry_id.inner().to_owned();
         let font_family = appearance.ui_font_family();
         let icon_url = entry.icon_url.clone();
@@ -653,13 +1083,13 @@ impl MarketplaceDirectoryView {
             let avatar = Avatar::new(
                 avatar_content,
                 UiComponentStyles {
-                    width: Some(32.),
-                    height: Some(32.),
-                    border_radius: Some(CornerRadius::with_all(Radius::Pixels(6.))),
+                    width: Some(28.),
+                    height: Some(28.),
+                    border_radius: Some(CornerRadius::with_all(Radius::Pixels(5.))),
                     font_family_id: Some(font_family),
                     font_weight: Some(Weight::Bold),
                     background: Some(theme.background().into()),
-                    font_size: Some(16.),
+                    font_size: Some(14.),
                     font_color: Some(blended_colors::text_main(theme, theme.background())),
                     ..Default::default()
                 },
@@ -682,9 +1112,14 @@ impl MarketplaceDirectoryView {
                 .with_selectable(false)
                 .finish();
 
-            let info_column = Flex::column()
-                .with_child(name)
-                .with_child(Container::new(subtitle).with_margin_top(2.).finish())
+            // Cursor-style compact card: no component-badge chip row. Component
+            // details live on the plugin's resolve/detail view instead.
+            let mut info_column = Flex::column().with_child(name);
+            if !subtitle_text.is_empty() {
+                info_column =
+                    info_column.with_child(Container::new(subtitle).with_margin_top(2.).finish());
+            }
+            let info_column = info_column
                 .with_child(Container::new(description).with_margin_top(2.).finish())
                 .finish();
 
@@ -705,13 +1140,13 @@ impl MarketplaceDirectoryView {
             let mut card = Container::new(
                 Flex::row()
                     .with_cross_axis_alignment(CrossAxisAlignment::Center)
-                    .with_spacing(10.)
+                    .with_spacing(8.)
                     .with_child(avatar)
                     .with_child(Expanded::new(1., info_column).finish())
                     .with_child(cta)
                     .finish(),
             )
-            .with_padding(Padding::uniform(12.))
+            .with_padding(Padding::uniform(10.))
             .with_corner_radius(CornerRadius::with_all(Radius::Pixels(8.)))
             .with_border(Border::all(1.).with_border_fill(theme.outline()));
 
@@ -749,13 +1184,16 @@ impl MarketplaceDirectoryView {
     }
 
     fn render_content(&self, appearance: &Appearance, app: &AppContext) -> Box<dyn Element> {
+        let theme = appearance.theme();
         let visible = self.visible_entries(app);
 
         let mut column = Flex::column().with_main_axis_size(MainAxisSize::Max);
 
         if self.any_loading() {
-            column =
-                column.with_child(Self::render_status_line("Searching directories…", appearance));
+            column = column.with_child(Self::render_status_line(
+                "Searching directories…",
+                appearance,
+            ));
         }
         for error in self.errors() {
             column = column.with_child(Self::render_status_line(error, appearance));
@@ -780,8 +1218,24 @@ impl MarketplaceDirectoryView {
                 appearance,
             ));
         } else {
-            column = column
-                .with_child(Shrinkable::new(1., Clipped::new(cards.finish()).finish()).finish());
+            // Fill the remaining height with a vertical scroll so long
+            // directories are reachable instead of clipped.
+            column = column.with_child(
+                Expanded::new(
+                    1.,
+                    ClippedScrollable::vertical(
+                        self.content_scroll_state.clone(),
+                        cards.finish(),
+                        ScrollbarWidth::Auto,
+                        theme.nonactive_ui_text_color().into(),
+                        theme.active_ui_text_color().into(),
+                        Fill::None,
+                    )
+                    .with_overlayed_scrollbar()
+                    .finish(),
+                )
+                .finish(),
+            );
         }
 
         Container::new(column.finish())
@@ -791,6 +1245,97 @@ impl MarketplaceDirectoryView {
             .with_padding_bottom(16.)
             .finish()
     }
+}
+
+/// Writes resolved skill files under `~/.agents/skills/<skill>/<path>` so the
+/// SkillManager's file watcher discovers them (this is the Cursor-compatible,
+/// highest-precedence skills home). Returns the count of distinct skill folders
+/// written. Path segments are sanitized so a manifest can't escape the dir.
+fn install_skill_files(files: &[&MarketplacePluginComponentFile]) -> usize {
+    if files.is_empty() {
+        return 0;
+    }
+    let Some(base) = home_skills_path(SkillProvider::Agents) else {
+        return 0;
+    };
+    let mut installed: HashSet<String> = HashSet::new();
+    for file in files {
+        let Some(skill_dir) = sanitize_path_component(&file.name) else {
+            continue;
+        };
+        let Some(rel_path) = sanitize_relative_path(&file.path) else {
+            continue;
+        };
+        let dest = base.join(&skill_dir).join(&rel_path);
+        let Some(parent) = dest.parent() else {
+            continue;
+        };
+        if std::fs::create_dir_all(parent).is_err() {
+            continue;
+        }
+        if std::fs::write(&dest, file.content.as_bytes()).is_ok() {
+            installed.insert(skill_dir);
+        }
+    }
+    installed.len()
+}
+
+/// A single, traversal-safe path segment (the skill folder name).
+fn sanitize_path_component(name: &str) -> Option<String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty()
+        || trimmed == "."
+        || trimmed == ".."
+        || trimmed.contains('/')
+        || trimmed.contains('\\')
+    {
+        return None;
+    }
+    Some(trimmed.to_string())
+}
+
+/// A traversal-safe relative path (may contain `/`), used for a file within a
+/// skill folder.
+fn sanitize_relative_path(path: &str) -> Option<std::path::PathBuf> {
+    let mut out = std::path::PathBuf::new();
+    for segment in path.trim().split('/') {
+        if segment.is_empty() || segment == "." {
+            continue;
+        }
+        if segment == ".." || segment.contains('\\') {
+            return None;
+        }
+        out.push(segment);
+    }
+    (!out.as_os_str().is_empty()).then_some(out)
+}
+
+fn pluralize(n: usize, noun: &str) -> String {
+    if n == 1 {
+        format!("1 {noun}")
+    } else {
+        format!("{n} {noun}s")
+    }
+}
+
+/// Turns a raw category slug/label (e.g. `developer-tools`, `data_analytics`)
+/// into a display label (`Developer Tools`, `Data Analytics`), capping length.
+fn prettify_category(raw: &str) -> String {
+    raw.trim()
+        .split(|c: char| c == '-' || c == '_' || c.is_whitespace())
+        .filter(|word| !word.is_empty())
+        .map(|word| {
+            let mut chars = word.chars();
+            match chars.next() {
+                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(40)
+        .collect()
 }
 
 impl Entity for MarketplaceDirectoryView {
@@ -831,6 +1376,27 @@ impl TypedActionView for MarketplaceDirectoryView {
             MarketplaceDirectoryAction::SelectSection(index) => {
                 if let Some(section) = Section::ALL.get(*index) {
                     self.selected_section = *section;
+                    // Sections and categories are independent axes; picking a
+                    // section clears any active category filter.
+                    self.selected_category = None;
+                    ctx.notify();
+                }
+            }
+            MarketplaceDirectoryAction::SelectCategory(index) => {
+                if let Some(category) = self.available_categories().get(*index) {
+                    // Toggle: clicking the active category clears the filter.
+                    self.selected_category = if self.selected_category.as_deref() == Some(category)
+                    {
+                        None
+                    } else {
+                        Some(category.clone())
+                    };
+                    ctx.notify();
+                }
+            }
+            MarketplaceDirectoryAction::SelectSort(index) => {
+                if let Some(mode) = SortMode::ALL.get(*index) {
+                    self.sort_mode = *mode;
                     ctx.notify();
                 }
             }
@@ -849,6 +1415,9 @@ impl TypedActionView for MarketplaceDirectoryView {
             }
             MarketplaceDirectoryAction::OpenDocumentation => {
                 ctx.open_url(DOCUMENTATION_URL);
+            }
+            MarketplaceDirectoryAction::Close => {
+                self.close(ctx);
             }
         }
     }
@@ -886,8 +1455,25 @@ impl BackingView for MarketplaceDirectoryView {
     fn render_header_content(
         &self,
         _ctx: &view::HeaderRenderContext<'_>,
-        _app: &AppContext,
+        app: &AppContext,
     ) -> HeaderContent {
+        let appearance = Appearance::as_ref(app);
+        // Connectors opens as a full tab (not a split pane), so the framework's
+        // built-in close button never shows. Add an always-visible X that closes
+        // the pane.
+        let close_button = icon_button(
+            appearance,
+            Icon::X,
+            false,
+            self.close_button_mouse_state.clone(),
+        )
+        .build()
+        .on_click(|ctx, _, _| {
+            ctx.dispatch_typed_action(MarketplaceDirectoryAction::Close);
+        })
+        .with_cursor(Cursor::PointingHand)
+        .finish();
+
         HeaderContent::Standard(StandardHeader {
             title: MARKETPLACE_HEADER_TEXT.to_string(),
             title_secondary: None,
@@ -896,7 +1482,7 @@ impl BackingView for MarketplaceDirectoryView {
             title_max_width: None,
             left_of_title: None,
             right_of_title: None,
-            left_of_overflow: None,
+            left_of_overflow: Some(close_button),
             options: StandardHeaderOptions::default(),
         })
     }

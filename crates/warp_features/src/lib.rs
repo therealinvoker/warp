@@ -929,6 +929,15 @@ pub enum FeatureFlag {
     /// `githubPolicy.automationsEnabled` (visibility) and
     /// `Team::has_admin_permissions` (writes).
     GithubAutomations,
+
+    /// When enabled, submitting a pasted multi-line block that is a plain
+    /// sequence of independent commands (no shell constructs like heredocs,
+    /// `for`/`while`/`if` blocks, line continuations, or quoted newlines) runs
+    /// each line as its own sequential command/block instead of one atomic
+    /// bracketed-paste submission. This avoids a single line's failure (e.g. a
+    /// zsh `!` history-expansion error) aborting the entire block, and the
+    /// multi-line-buffer desync that follows a rejected resubmission.
+    SequentialMultilinePaste,
 }
 
 static FLAG_STATES: [AtomicBool; cardinality::<FeatureFlag>()] =
@@ -998,6 +1007,7 @@ pub const DOGFOOD_FLAGS: &[FeatureFlag] = &[
     FeatureFlag::PinnedTabs,
     FeatureFlag::ContextWindowUsageBreakdown,
     FeatureFlag::CloudRunners,
+    FeatureFlag::SequentialMultilinePaste,
 ];
 
 /// Features enabled for feature preview build users (e.g.: Friends of Warp).

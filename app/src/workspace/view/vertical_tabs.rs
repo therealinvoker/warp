@@ -18,7 +18,9 @@ use warp_core::telemetry::TelemetryEvent as _;
 use warp_core::ui::color::blend::Blend;
 use warp_core::ui::color::coloru_with_opacity;
 use warp_core::ui::theme::color::internal_colors;
-use warp_core::ui::theme::{AnsiColorIdentifier, Fill as WarpThemeFill, WarpTheme};
+use warp_core::ui::theme::{
+    AnsiColorIdentifier, Fill as WarpThemeFill, HorizontalGradient, WarpTheme,
+};
 use warp_core::ui::Icon as WarpIcon;
 use warpui::elements::{
     resizable_state_handle, Border, ChildAnchor, Clipped, ClippedScrollStateHandle,
@@ -1563,7 +1565,10 @@ fn render_new_session_button(
             )
             .finish();
 
-        Container::new(Align::new(row).finish())
+        // `.left()` keeps the button full-width (so stacking in the column
+        // doesn't collapse the control-bar area) while sitting the icon+label
+        // flush left, matching the folder rows below.
+        Container::new(Align::new(row).left().finish())
             .with_background(background)
             .with_corner_radius(CornerRadius::with_all(CONTROL_BAR_BUTTON_RADIUS))
             .with_vertical_padding(CONTROL_BAR_VERTICAL_PADDING)
@@ -1585,13 +1590,12 @@ fn render_new_session_buttons(
 ) -> Box<dyn Element> {
     let theme = appearance.theme();
 
-    // Left-justified: the button hugs its content (icon + label) at the panel's left
-    // gutter instead of stretching full-width, matching the left alignment of the
-    // folder headers/rows. The outer row is `MainAxisAlignment::Start` by default, so
-    // a non-`Expanded` child sits flush left.
-    let row = Flex::row()
-        .with_main_axis_size(MainAxisSize::Max)
-        .with_cross_axis_alignment(CrossAxisAlignment::Center)
+    // Stacked, each on its own line and stretched to the panel width so the
+    // control-bar geometry matches the folder rows below. Content is left-aligned
+    // inside each full-width button (see `render_new_session_button`).
+    let row = Flex::column()
+        .with_main_axis_size(MainAxisSize::Min)
+        .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
         .with_spacing(CONTROL_BAR_SPACING)
         .with_child(render_new_session_button(
             "New tab",
@@ -1602,8 +1606,8 @@ fn render_new_session_buttons(
             theme,
         ))
         .with_child(render_new_session_button(
-            "Customize",
-            WarpIcon::Settings,
+            "Connectors",
+            WarpIcon::Link,
             state.customize_button_mouse_state.clone(),
             WorkspaceAction::OpenMarketplaceDirectory,
             appearance,
@@ -2095,6 +2099,7 @@ fn render_vertical_tabs_panel(
     state: &VerticalTabsPanelState,
     workspace: &Workspace,
     side: super::PanelPosition,
+    top_inset: f32,
     app: &AppContext,
 ) -> Box<dyn Element> {
     let appearance = Appearance::as_ref(app);
@@ -2155,9 +2160,18 @@ fn render_vertical_tabs_panel(
     };
     // Wrap the panel in a `Hoverable` so right-clicking the empty area of the
     // vertical tabs panel opens the tab configs dropdown.
-    let inner = Hoverable::new(state.panel_right_click_mouse_state.clone(), |_| {
+    // Grey gradient across the panel: more foreground overlay on the left
+    // fading to less on the right, so the panel is visibly lighter on the left.
+    // Foreground-over-background keeps it theme-aware (lightens in dark themes,
+    // darkens in light themes).
+    let panel_background = WarpThemeFill::HorizontalGradient(HorizontalGradient::new(
+        theme.foreground().with_opacity(12).into(),
+        theme.foreground().with_opacity(8).into(),
+    ));
+    let inner = Hoverable::new(state.panel_right_click_mouse_state.clone(), move |_| {
         Container::new(panel_with_popup)
-            .with_background(internal_colors::fg_overlay_1(theme))
+            .with_background(panel_background)
+            .with_padding_top(top_inset)
             .finish()
     })
     .on_right_click(|ctx, _, position| {
@@ -2496,6 +2510,11 @@ const OTHER_FOLDER_KEY: &str = "";
 /// never collide with a real folder path key.
 const SETTINGS_FOLDER_KEY: &str = "\0settings";
 
+/// Collapse-map key for the Workspace-view "Connectors" section (the Marketplace
+/// pane). The leading NUL byte guarantees it can never collide with a real
+/// folder path key.
+const MARKETPLACE_FOLDER_KEY: &str = "\0connectors";
+
 /// Buckets `visible_tabs` by folder (git repo root, working-dir fallback) and
 /// appends one collapsible folder section per bucket to `groups`, preserving
 /// first-appearance order. Tabs with no resolvable folder are grouped into an
@@ -2513,6 +2532,7 @@ fn render_workspace_folder_sections(
     // Values are positions into `visible_tabs`, not raw tab indices.
     let mut buckets: HashMap<String, Vec<usize>> = HashMap::new();
     let mut settings: Vec<usize> = Vec::new();
+    let mut marketplace: Vec<usize> = Vec::new();
     let mut other: Vec<usize> = Vec::new();
 
     for (position, (tab_index, _)) in visible_tabs.iter().enumerate() {
@@ -2523,6 +2543,12 @@ fn render_workspace_folder_sections(
         // section (with a gear icon) rather than falling into the Cloud bucket.
         if tab_is_settings_related(pane_group, app) {
             settings.push(position);
+            continue;
+        }
+        // The Marketplace ("Connectors") pane gets its own top-level section,
+        // like Settings, rather than falling into the Cloud bucket.
+        if tab_is_marketplace_related(pane_group, app) {
+            marketplace.push(position);
             continue;
         }
         // Fall back to the tab's inherited folder hint (set when a new terminal
@@ -2559,18 +2585,28 @@ fn render_workspace_folder_sections(
         ));
     }
 
-    // Settings section renders as a top-level peer of the folder sections, with
-    // a gear icon, just above the Cloud bucket.
+    // Settings renders as a single top-level nav row (gear + "Settings") with an
+    // inline close (X) and one nested "Open settings" child, rather than a
+    // collapsible folder section with a redundant "Settings" child row.
     if !settings.is_empty() {
-        groups.add_child(render_workspace_folder_section(
+        groups.add_child(render_settings_nav_row(
             state,
             workspace,
             visible_tabs,
             &settings,
-            SETTINGS_FOLDER_KEY,
-            "Settings",
-            Some(WarpIcon::Gear),
-            is_any_pane_dragging,
+            app,
+        ));
+    }
+
+    // Connectors (Marketplace) renders as a single top-level nav row (no
+    // collapsible header or child rows, since there is only ever one Connectors
+    // tab) with an inline close (X) button. Clicking the row activates the tab.
+    if !marketplace.is_empty() {
+        groups.add_child(render_connectors_nav_row(
+            state,
+            workspace,
+            visible_tabs,
+            &marketplace,
             app,
         ));
     }
@@ -2593,6 +2629,9 @@ fn render_workspace_folder_sections(
     let mut live_keys: std::collections::HashSet<&str> = order.iter().map(String::as_str).collect();
     if !settings.is_empty() {
         live_keys.insert(SETTINGS_FOLDER_KEY);
+    }
+    if !marketplace.is_empty() {
+        live_keys.insert(MARKETPLACE_FOLDER_KEY);
     }
     if !other.is_empty() {
         live_keys.insert(OTHER_FOLDER_KEY);
@@ -2790,8 +2829,13 @@ fn render_workspace_folder_header(
             .with_child(new_tab_button)
             .finish();
 
+        // The groups list is already wrapped in an 8px (`GROUP_HORIZONTAL_PADDING`)
+        // left gutter, so drop this header's own left padding; otherwise the folder
+        // icon sits at 16px while the New tab/Customize buttons (which render flush
+        // against that same gutter) sit at 8px. Left = 0 lines the folder glyph up
+        // horizontally with those control-bar buttons.
         let mut container = Container::new(row)
-            .with_padding(Padding::uniform(GROUP_HORIZONTAL_PADDING))
+            .with_padding(Padding::uniform(GROUP_HORIZONTAL_PADDING).with_left(0.))
             .with_corner_radius(CornerRadius::with_all(Radius::Pixels(ROW_CORNER_RADIUS)));
         if hover_state.is_hovered() {
             container = container.with_background(internal_colors::fg_overlay_2(theme));
@@ -2802,6 +2846,310 @@ fn render_workspace_folder_header(
     .with_defer_events_to_children()
     .on_click(move |ctx, _, _| {
         ctx.dispatch_typed_action(toggle_action.clone());
+    })
+    .finish()
+}
+
+/// Renders a single top-level nav row (leading icon + label) with an
+/// always-visible inline close (X) button. Clicking the row activates
+/// `tab_index`; the X closes it. Used for singleton system entries (Connectors,
+/// Settings) that render as one flat row rather than a collapsible folder
+/// section with a redundant child row.
+fn render_singleton_nav_row(
+    header_mouse_state: MouseStateHandle,
+    close_mouse_state: MouseStateHandle,
+    label: &str,
+    row_icon: WarpIcon,
+    tab_index: usize,
+    is_selected: bool,
+    app: &AppContext,
+) -> Box<dyn Element> {
+    let appearance = Appearance::as_ref(app);
+    let theme = appearance.theme();
+    let font_family = appearance.ui_font_family();
+    let main_text_color = theme.main_text_color(theme.background());
+    let sub_text_color = theme.sub_text_color(theme.background());
+    let label = label.to_string();
+    let activate_action = WorkspaceAction::ActivateTab(tab_index);
+
+    Hoverable::new(header_mouse_state, move |hover_state| {
+        let icon = ConstrainedBox::new(row_icon.to_warpui_icon(sub_text_color).finish())
+            .with_width(TAB_GROUP_ICON_SIZE)
+            .with_height(TAB_GROUP_ICON_SIZE)
+            .finish();
+
+        let title = Text::new_inline(label.clone(), font_family.clone(), 12.)
+            .with_clip(ClipConfig::ellipsis())
+            .with_color(main_text_color.into())
+            .finish();
+
+        // Always-visible close button that removes the tab.
+        let close_button = render_tab_group_header_icon_button(
+            WarpIcon::X,
+            TAB_GROUP_HEADER_ACTION_ICON_SIZE,
+            sub_text_color,
+            internal_colors::fg_overlay_3(theme),
+            close_mouse_state.clone(),
+            Some(WorkspaceAction::CloseTab(tab_index)),
+        );
+
+        let row = Flex::row()
+            .with_main_axis_size(MainAxisSize::Max)
+            .with_main_axis_alignment(MainAxisAlignment::SpaceBetween)
+            .with_cross_axis_alignment(CrossAxisAlignment::Center)
+            .with_child(
+                Shrinkable::new(
+                    1.,
+                    Flex::row()
+                        .with_main_axis_size(MainAxisSize::Max)
+                        .with_cross_axis_alignment(CrossAxisAlignment::Center)
+                        .with_spacing(ICON_WITH_STATUS_GAP)
+                        .with_child(icon)
+                        .with_child(Shrinkable::new(1., title).finish())
+                        .finish(),
+                )
+                .finish(),
+            )
+            .with_child(close_button)
+            .finish();
+
+        // Match the folder-header gutter so the glyph lines up with the
+        // control-bar buttons above (left = 0 against the list's 8px gutter).
+        let mut container = Container::new(row)
+            .with_padding(Padding::uniform(GROUP_HORIZONTAL_PADDING).with_left(0.))
+            .with_corner_radius(CornerRadius::with_all(Radius::Pixels(ROW_CORNER_RADIUS)));
+        // Selected rows keep a persistent highlight (matching pane rows); hover
+        // shows the lighter overlay when not selected.
+        let background = if is_selected {
+            Some(internal_colors::fg_overlay_2(theme))
+        } else if hover_state.is_hovered() {
+            Some(internal_colors::fg_overlay_1(theme))
+        } else {
+            None
+        };
+        if let Some(background) = background {
+            container = container.with_background(background);
+        }
+        container.finish()
+    })
+    .with_cursor(Cursor::PointingHand)
+    .with_defer_events_to_children()
+    .on_click(move |ctx, _, _| {
+        ctx.dispatch_typed_action(activate_action.clone());
+    })
+    .finish()
+}
+
+/// Renders the Connectors (Marketplace) entry as a single top-level nav row.
+/// There is only ever one Connectors tab, so it has no collapsible header or
+/// child rows, just an inline close (X). Clicking the row activates the tab.
+fn render_connectors_nav_row(
+    state: &VerticalTabsPanelState,
+    workspace: &Workspace,
+    visible_tabs: &[(usize, Option<Vec<PaneId>>)],
+    member_positions: &[usize],
+    app: &AppContext,
+) -> Box<dyn Element> {
+    let Some(&position) = member_positions.first() else {
+        return Empty::new().finish();
+    };
+    let (tab_index, _) = visible_tabs[position];
+
+    let mouse_states = state
+        .workspace_folder_header_mouse_states
+        .borrow_mut()
+        .entry(MARKETPLACE_FOLDER_KEY.to_string())
+        .or_default()
+        .clone();
+
+    render_singleton_nav_row(
+        mouse_states.header.clone(),
+        mouse_states.close.clone(),
+        "Connectors",
+        WarpIcon::Link,
+        tab_index,
+        is_singleton_nav_row_selected(workspace, tab_index),
+        app,
+    )
+}
+
+/// Whether a singleton nav row's tab is the active, focused tab (so the row
+/// should show a persistent highlight). Agent management view being open means
+/// no tab is visually focused.
+fn is_singleton_nav_row_selected(workspace: &Workspace, tab_index: usize) -> bool {
+    tab_index == workspace.active_tab_index
+        && !workspace
+            .current_workspace_state
+            .is_agent_management_view_open
+}
+
+/// Renders the Settings entry as a single top-level nav row (gear + "Settings")
+/// with an inline close (X). Highlights when the settings tab is focused. Any
+/// open settings.toml editor tab is shown as a nested "Settings file" bullet.
+fn render_settings_nav_row(
+    state: &VerticalTabsPanelState,
+    workspace: &Workspace,
+    visible_tabs: &[(usize, Option<Vec<PaneId>>)],
+    member_positions: &[usize],
+    app: &AppContext,
+) -> Box<dyn Element> {
+    // Prefer the Settings pane itself; fall back to the first settings-related
+    // tab (e.g. an open settings.toml editor) when the pane is not present.
+    let settings_position = member_positions
+        .iter()
+        .copied()
+        .find(|&position| {
+            let (tab_index, _) = visible_tabs[position];
+            let pane_group = workspace.tabs[tab_index].pane_group.as_ref(app);
+            matches!(
+                pane_group.resolve_pane_type(pane_group.focused_pane_id(app), app),
+                TypedPane::Settings
+            )
+        })
+        .or_else(|| member_positions.first().copied());
+    let Some(position) = settings_position else {
+        return Empty::new().finish();
+    };
+    let (tab_index, _) = visible_tabs[position];
+
+    let mouse_states = state
+        .workspace_folder_header_mouse_states
+        .borrow_mut()
+        .entry(SETTINGS_FOLDER_KEY.to_string())
+        .or_default()
+        .clone();
+
+    let section_spacing = if is_compact_view_mode(app) {
+        COMPACT_GROUP_ITEM_SPACING
+    } else {
+        TABS_MODE_ITEM_SPACING
+    };
+
+    let mut section = Flex::column()
+        .with_main_axis_size(MainAxisSize::Min)
+        .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
+        .with_spacing(section_spacing);
+    section.add_child(render_singleton_nav_row(
+        mouse_states.header.clone(),
+        mouse_states.close.clone(),
+        "Settings",
+        WarpIcon::Gear,
+        tab_index,
+        is_singleton_nav_row_selected(workspace, tab_index),
+        app,
+    ));
+
+    // Any remaining settings-related tabs are open settings.toml editors; show
+    // each as a nested "Settings file" bullet that activates its tab.
+    for &child_position in member_positions {
+        if child_position == position {
+            continue;
+        }
+        let (child_tab_index, _) = visible_tabs[child_position];
+        section.add_child(render_settings_file_child_row(
+            mouse_states.plus.clone(),
+            mouse_states.kebab.clone(),
+            child_tab_index,
+            is_singleton_nav_row_selected(workspace, child_tab_index),
+            app,
+        ));
+    }
+
+    section.finish()
+}
+
+/// A nested bullet row under Settings representing an open settings.toml editor
+/// tab. Clicking it activates the tab; the trailing X closes it. Highlights when
+/// that tab is focused.
+fn render_settings_file_child_row(
+    mouse_state: MouseStateHandle,
+    close_mouse_state: MouseStateHandle,
+    tab_index: usize,
+    is_selected: bool,
+    app: &AppContext,
+) -> Box<dyn Element> {
+    let appearance = Appearance::as_ref(app);
+    let theme = appearance.theme();
+    let font_family = appearance.ui_font_family();
+    let main_text_color = theme.main_text_color(theme.background());
+    let dot_color = theme.sub_text_color(theme.background());
+
+    // Static leading dot centered in a full-size icon slot so the label lines up
+    // with pane row titles.
+    let dot = ConstrainedBox::new(
+        Flex::row()
+            .with_main_axis_size(MainAxisSize::Max)
+            .with_main_axis_alignment(MainAxisAlignment::Center)
+            .with_cross_axis_alignment(CrossAxisAlignment::Center)
+            .with_child(
+                ConstrainedBox::new(WarpIcon::CircleFilled.to_warpui_icon(dot_color).finish())
+                    .with_width(PANE_LEADING_DOT_SIZE)
+                    .with_height(PANE_LEADING_DOT_SIZE)
+                    .finish(),
+            )
+            .finish(),
+    )
+    .with_width(VERTICAL_TABS_ICON_SIZE)
+    .with_height(VERTICAL_TABS_ICON_SIZE)
+    .finish();
+
+    let text = Text::new_inline("Settings file".to_string(), font_family, 12.)
+        .with_clip(ClipConfig::ellipsis())
+        .with_color(main_text_color.into())
+        .finish();
+
+    // Always-visible close button that removes the settings.toml editor tab.
+    let close_button = render_tab_group_header_icon_button(
+        WarpIcon::X,
+        TAB_GROUP_HEADER_ACTION_ICON_SIZE,
+        dot_color,
+        internal_colors::fg_overlay_3(theme),
+        close_mouse_state,
+        Some(WorkspaceAction::CloseTab(tab_index)),
+    );
+
+    let row = Flex::row()
+        .with_main_axis_size(MainAxisSize::Max)
+        .with_main_axis_alignment(MainAxisAlignment::SpaceBetween)
+        .with_cross_axis_alignment(CrossAxisAlignment::Center)
+        .with_child(
+            Shrinkable::new(
+                1.,
+                Flex::row()
+                    .with_main_axis_size(MainAxisSize::Max)
+                    .with_cross_axis_alignment(CrossAxisAlignment::Center)
+                    .with_spacing(ICON_WITH_STATUS_GAP)
+                    .with_child(dot)
+                    .with_child(Shrinkable::new(1., text).finish())
+                    .finish(),
+            )
+            .finish(),
+        )
+        .with_child(close_button)
+        .finish();
+
+    let activate_action = WorkspaceAction::ActivateTab(tab_index);
+
+    Hoverable::new(mouse_state, move |hover_state| {
+        let mut container = Container::new(row)
+            .with_padding(Padding::uniform(8.))
+            .with_corner_radius(CornerRadius::with_all(Radius::Pixels(ROW_CORNER_RADIUS)));
+        let background = if is_selected {
+            Some(internal_colors::fg_overlay_2(theme))
+        } else if hover_state.is_hovered() {
+            Some(internal_colors::fg_overlay_1(theme))
+        } else {
+            None
+        };
+        if let Some(background) = background {
+            container = container.with_background(background);
+        }
+        container.finish()
+    })
+    .with_cursor(Cursor::PointingHand)
+    .with_defer_events_to_children()
+    .on_click(move |ctx, _, _| {
+        ctx.dispatch_typed_action(activate_action.clone());
     })
     .finish()
 }
@@ -5318,6 +5666,13 @@ fn tab_is_settings_related(pane_group: &PaneGroup, app: &AppContext) -> bool {
     }
 }
 
+/// Whether the tab's focused pane is the Marketplace ("Connectors") pane, so
+/// Workspace view can group it under a dedicated top-level "Connectors" section
+/// instead of the catch-all Cloud bucket.
+fn tab_is_marketplace_related(pane_group: &PaneGroup, app: &AppContext) -> bool {
+    pane_group.focused_pane_id(app).pane_type() == IPaneType::Marketplace
+}
+
 pub(super) fn workspace_folder_for_tab(
     workspace: &Workspace,
     pane_group_id: EntityId,
@@ -5357,13 +5712,50 @@ pub(super) fn workspace_folder_for_tab(
 /// Builds the `(key, label)` pair for a resolved folder path. The key is the
 /// full display path (used for bucketing + collapse persistence); the label is
 /// the basename, falling back to the full path when there is no file name.
+///
+/// Local paths are normalized so that a home-relative path is always bucketed
+/// under the same key regardless of whether the working directory was reported
+/// as `~/…` (home-collapsed) or as an absolute path. Without this, a freshly
+/// created tab briefly shows under the absolute-home folder (e.g. `ryan.holmes`)
+/// while the shell is still bootstrapping and `home_dir` is unknown, then jumps
+/// to the `~` folder once home resolves. The home directory itself keeps the
+/// friendly `~` key and label.
 fn workspace_folder_key_and_label(path: &LocalOrRemotePath) -> (String, String) {
+    if let LocalOrRemotePath::Local(local) = path {
+        if let Some(home) = dirs::home_dir() {
+            let expanded = expand_home_prefix(local, &home);
+            if expanded == home {
+                return ("~".to_owned(), "~".to_owned());
+            }
+            let key = expanded.to_string_lossy().to_string();
+            let label = expanded
+                .file_name()
+                .and_then(|name| name.to_str())
+                .filter(|name| !name.is_empty())
+                .map(str::to_owned)
+                .unwrap_or_else(|| key.clone());
+            return (key, label);
+        }
+    }
+
     let key = path.display_path();
     let label = match path.file_name() {
         Some(name) if !name.is_empty() => name.to_string(),
         Some(_) | None => key.clone(),
     };
     (key, label)
+}
+
+/// Expands a leading `~` component in `path` to `home`, returning the path
+/// unchanged if it does not start with `~`.
+fn expand_home_prefix(path: &Path, home: &Path) -> PathBuf {
+    let mut components = path.components();
+    if let Some(std::path::Component::Normal(first)) = components.next() {
+        if first == "~" {
+            return home.join(components.as_path());
+        }
+    }
+    path.to_path_buf()
 }
 
 /// For cloud agent panes, builds a composite string from the environment name,
@@ -8529,7 +8921,17 @@ impl Workspace {
         side: super::PanelPosition,
         app: &AppContext,
     ) -> Box<dyn Element> {
-        render_vertical_tabs_panel(&self.vertical_tabs_panel, self, side, app)
+        // In stacked mode the tab bar sits above the content only (see the
+        // vertical-tabs branch in `render`), so the panel runs full-height and
+        // reserves the tab-bar height at the top. Its gradient background fills
+        // that reserved strip (up behind the traffic lights) and its first row
+        // lines up with the content below the bar.
+        let top_inset = if self.tab_bar_mode(app) == super::ShowTabBar::Stacked {
+            super::TAB_BAR_HEIGHT
+        } else {
+            0.
+        };
+        render_vertical_tabs_panel(&self.vertical_tabs_panel, self, side, top_inset, app)
     }
 }
 

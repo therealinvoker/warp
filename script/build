@@ -1,0 +1,26 @@
+#!/bin/bash
+# script/build — compile the Bang client.
+#
+# Builds the same binary + features that `script/run` / `script/dev` launch, so
+# this warms the exact build cache a subsequent `script/dev` will use. Any extra
+# args are forwarded to cargo (e.g. `script/build --release`).
+#
+# Usage:
+#   script/build             # debug build of the client
+#   script/build --release   # optimized build
+set -e
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")"/.. && pwd)"
+cd "$ROOT"
+
+FEATURES="gui"
+# Mirror script/run: Local channel binary when warp-channel-config is available,
+# otherwise the OSS channel binary (this fork).
+if command -v warp-channel-config >/dev/null 2>&1; then
+  WARP_BIN_NAME="warp"
+else
+  WARP_BIN_NAME="warp-oss"
+fi
+
+echo "[script/build] cargo build --bin $WARP_BIN_NAME --features \"$FEATURES\" $*"
+exec cargo build --bin "$WARP_BIN_NAME" --features "$FEATURES" "$@"

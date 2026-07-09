@@ -665,6 +665,7 @@ impl PromptRenderHelper {
         &self,
         model: &TerminalModel,
         appearance: &Appearance,
+        apply_prompt_top_padding: bool,
         app: &AppContext,
     ) -> Box<dyn Element> {
         let element = {
@@ -683,12 +684,19 @@ impl PromptRenderHelper {
         let terminal_spacing = TerminalSettings::as_ref(app)
             .terminal_input_spacing(appearance.line_height_ratio(), app);
 
+        // The top padding positions the chips relative to the editor when they sit
+        // above it. When the chips are moved into the session-mode footer row they
+        // are baseline-aligned with the segmented control instead, so the extra
+        // top padding (which would push the chip text below the control) is skipped.
+        let prompt_top_padding = if apply_prompt_top_padding {
+            (terminal_spacing.block_padding.padding_top * size_info.cell_height_px().as_f32()
+                - get_input_box_top_border_width())
+                * spacing::UDI_PROMPT_TOP_PADDING_FACTOR
+        } else {
+            0.
+        };
         let prompt_with_padding_container = Container::new(element.render())
-            .with_padding_top({
-                (terminal_spacing.block_padding.padding_top * size_info.cell_height_px().as_f32()
-                    - get_input_box_top_border_width())
-                    * spacing::UDI_PROMPT_TOP_PADDING_FACTOR
-            })
+            .with_padding_top(prompt_top_padding)
             .finish();
 
         SavePosition::new(

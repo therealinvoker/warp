@@ -9296,6 +9296,23 @@ impl TerminalView {
         self.set_next_pending_command_from_queue(ctx);
     }
 
+    /// Runs a pasted multi-line block as a sequence of separate, sequential shell commands (each
+    /// its own block). The first command executes immediately; the rest are queued and drained one
+    /// at a time as each block completes (via the same `pending_command_queue` machinery used for
+    /// tab-config setup commands). Execution stops if any command fails.
+    ///
+    /// Gated by `FeatureFlag::SequentialMultilinePaste` at the emit site; `commands` is non-empty.
+    pub fn execute_command_sequence(&mut self, commands: Vec<String>, ctx: &mut ViewContext<Self>) {
+        let mut commands = commands.into_iter();
+        let Some(first) = commands.next() else {
+            return;
+        };
+        // Queue the remaining lines before kicking off the first so the `BlockCompleted` drain
+        // finds them.
+        self.pending_command_queue = commands.collect();
+        self.execute_command_or_set_pending(&first, ctx);
+    }
+
     fn set_next_pending_command_from_queue(&mut self, ctx: &mut ViewContext<Self>) -> bool {
         if self.input.as_ref(ctx).has_pending_command() {
             return false;
@@ -21170,6 +21187,16 @@ impl TerminalView {
                     self.interrupt_onboarding_blocks(ctx);
                 }
             }
+            InputEvent::ExecuteCommandSequence(commands) => {
+                self.update_scroll_position_locking(
+                    ScrollPositionUpdate::AfterCommandExecutionStarted,
+                    ctx,
+                );
+                if ctx.is_self_or_child_focused() {
+                    self.focus_terminal(ctx);
+                }
+                self.execute_command_sequence(commands.clone(), ctx);
+            }
             InputEvent::ExecuteAIQuery => {
                 // Clear the "enter again to send" ephemeral message if it's currently showing
                 self.ephemeral_message_model.update(ctx, |model, ctx| {
@@ -23495,14 +23522,17 @@ impl TerminalView {
     }
 
     /// Renders the command input centered vertically and horizontally in the
-    /// empty main area, occupying the middle 3/5 of the width (≈1/5 padding on
-    /// each side). Used only on a fresh/empty terminal so the prompt sits in the
-    /// middle of the pane rather than pinned to an edge.
+    /// empty main area, occupying the middle ~5/6 of the width (≈1/12 padding on
+    /// each side). The wide middle keeps the input from wrapping to multiple
+    /// lines on a fresh pane. Shared by all three empty states (Agent, Cloud
+    /// Agent, Terminal) so their centered input stays consistent. Used only on a
+    /// fresh/empty terminal so the prompt sits in the middle of the pane rather
+    /// than pinned to an edge.
     fn render_centered_first_run_input(&self) -> Box<dyn Element> {
         let input_row = Flex::row()
             .with_cross_axis_alignment(CrossAxisAlignment::Center)
             .with_child(Expanded::new(1., Empty::new().finish()).finish())
-            .with_child(Expanded::new(3., self.render_input()).finish())
+            .with_child(Expanded::new(10., self.render_input()).finish())
             .with_child(Expanded::new(1., Empty::new().finish()).finish())
             .finish();
 
@@ -26257,6 +26287,7 @@ impl TypedActionView for TerminalView {
             | ExitAgentView
             | EnterCloudAgentView
             | StartNewAgentConversation { .. }
+            | SwitchToAgentView { .. }
             | ToggleConversationDetailsPanel
             | CancelAmbientAgentTask
             | OpenInlineHistoryMenu
@@ -27334,6 +27365,39 @@ impl TypedActionView for TerminalView {
                     });
                 }
             }
+            SwitchToAgentView { origin } => {
+                // Toggling Terminal -> Agent should return to the conversation the
+                // user was in, not blow it away with a new one. Restore the
+                // surface's last active conversation when it still has messages;
+                // otherwise start fresh. Cloud (ambient) sessions keep their
+                // dedicated pop-to-parent behavior.
+                if !self.switch_from_cloud_to_local_agent(origin.clone(), ctx) {
+                    let existing = BlocklistAIHistoryModel::as_ref(ctx)
+                        .active_conversation_id(self.view_id)
+                        .filter(|id| {
+                            BlocklistAIHistoryModel::as_ref(ctx)
+                                .conversation(id)
+                                .is_some_and(|conversation| conversation.exchange_count() > 0)
+                        });
+                    if let Some(conversation_id) = existing {
+                        self.enter_agent_view_for_conversation(
+                            None,
+                            origin.clone(),
+                            conversation_id,
+                            ctx,
+                        );
+                    } else {
+                        self.input.update(ctx, |input, ctx| {
+                            input.handle_action(
+                                &InputAction::StartNewAgentConversation {
+                                    origin: origin.clone(),
+                                },
+                                ctx,
+                            );
+                        });
+                    }
+                }
+            }
             OpenInlineHistoryMenu => {
                 self.input.update(ctx, |input, ctx| {
                     input.handle_action(&InputAction::OpenInlineHistoryMenu, ctx);
@@ -27506,6 +27570,11 @@ impl View for TerminalView {
             TerminalSizeElement::new(resize_tx.clone(), element).finish()
         }
 
+        // Set when we render the vertically-centered empty-state input (a fresh
+        // Agent / Terminal / Cloud tab). Used below to give that state the same
+        // background as the fullscreen agent view so Terminal matches Agent.
+        let mut is_centered_empty_state = false;
+
         let mut stack = match (
             input_mode,
             model.block_list().active_gap(),
@@ -27516,7 +27585,13 @@ impl View for TerminalView {
             }
             (input_mode, _, _) => {
                 if self.input.as_ref(app).is_cloud_mode_input_v2_composing(app) {
-                    column.add_child(Expanded::new(1., self.render_input()).finish());
+                    // Cloud agent composing is a fresh, pre-run state, so center its
+                    // input in the main area just like a new Agent / Terminal tab
+                    // rather than pinning it to the bottom.
+                    is_centered_empty_state = true;
+                    column.add_child(
+                        Expanded::new(1., self.render_centered_first_run_input()).finish(),
+                    );
 
                     Stack::new()
                         .with_constrain_absolute_children()
@@ -27558,6 +27633,7 @@ impl View for TerminalView {
                         && model.is_block_list_empty();
 
                     if is_empty_first_run {
+                        is_centered_empty_state = true;
                         column.add_child(
                             Expanded::new(1., self.render_centered_first_run_input()).finish(),
                         );
@@ -27987,9 +28063,13 @@ impl View for TerminalView {
             Container::new(element)
                 .with_foreground_overlay(appearance.theme().accent_overlay())
                 .finish()
-        } else if FeatureFlag::AgentView.is_enabled()
-            && self.agent_view_controller.as_ref(app).is_fullscreen()
+        } else if is_centered_empty_state
+            || (FeatureFlag::AgentView.is_enabled()
+                && self.agent_view_controller.as_ref(app).is_fullscreen())
         {
+            // Give the centered empty-state (new Agent / Terminal / Cloud tab) and the
+            // fullscreen agent view the same background, so the Terminal empty state
+            // matches the Agent empty state instead of showing the darker pane background.
             Container::new(element)
                 .with_foreground_overlay(agent_view_bg_fill(app))
                 .finish()

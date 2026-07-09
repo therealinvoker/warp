@@ -401,6 +401,12 @@ pub enum TerminalAction {
     StartNewAgentConversation {
         origin: AgentViewEntryOrigin,
     },
+    /// Switch the current pane into agent mode, restoring the surface's last
+    /// active conversation if one exists (so toggling Terminal -> Agent returns
+    /// to the in-progress chat), otherwise starting a fresh conversation.
+    SwitchToAgentView {
+        origin: AgentViewEntryOrigin,
+    },
     /// Toggle the cloud mode conversation details panel
     ToggleConversationDetailsPanel,
     /// Cancel the ambient agent task while it's loading
@@ -729,6 +735,9 @@ impl fmt::Debug for TerminalAction {
             EnterCloudAgentView => write!(f, "EnterCloudAgentView"),
             StartNewAgentConversation { origin } => {
                 write!(f, "StartNewAgentConversation {{ origin: {origin:?} }}")
+            }
+            SwitchToAgentView { origin } => {
+                write!(f, "SwitchToAgentView {{ origin: {origin:?} }}")
             }
             ToggleConversationDetailsPanel => write!(f, "ToggleConversationDetailsPanel"),
             CancelAmbientAgentTask => write!(f, "CancelAmbientAgentTask"),

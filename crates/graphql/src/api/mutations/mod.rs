@@ -36,6 +36,7 @@ pub mod populate_merkle_tree_cache;
 pub mod purchase_addon_credits;
 pub mod record_object_action;
 pub mod redeem_team_invite_code;
+pub mod report_marketplace_install;
 pub mod remove_github_automation;
 pub mod remove_github_provider_key;
 pub mod remove_mcp_allowlist_entry;
