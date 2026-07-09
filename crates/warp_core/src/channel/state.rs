@@ -32,6 +32,13 @@ pub struct ChannelState {
     additional_features: HashSet<FeatureFlag>,
 
     config: ChannelConfig,
+
+    /// Whether `override_server_root_url` / `override_ws_server_url` ran
+    /// (e.g. `WARP_SERVER_ROOT_URL` / `WARP_WS_SERVER_URL`). `rtc_http_url`
+    /// uses the pair to avoid deriving RTC HTTP endpoints from a
+    /// non-overridden production WS URL when the root points elsewhere.
+    server_root_url_overridden: bool,
+    ws_server_url_overridden: bool,
 }
 
 impl ChannelState {
@@ -41,6 +48,8 @@ impl ChannelState {
         Self {
             channel,
             additional_features: Default::default(),
+            server_root_url_overridden: false,
+            ws_server_url_overridden: false,
             config: ChannelConfig {
                 app_id,
                 logfile_name: "".into(),
@@ -72,6 +81,8 @@ impl ChannelState {
             channel,
             additional_features: Default::default(),
             config,
+            server_root_url_overridden: false,
+            ws_server_url_overridden: false,
         }
     }
 
@@ -95,14 +106,18 @@ impl ChannelState {
     pub fn override_server_root_url(url: impl Into<Cow<'static, str>>) -> Result<(), ParseError> {
         let url = url.into();
         Url::parse(&url)?;
-        CHANNEL_STATE.lock().config.server_config.server_root_url = url;
+        let mut state = CHANNEL_STATE.lock();
+        state.config.server_config.server_root_url = url;
+        state.server_root_url_overridden = true;
         Ok(())
     }
 
     pub fn override_ws_server_url(url: impl Into<Cow<'static, str>>) -> Result<(), ParseError> {
         let url = url.into();
         Url::parse(&url)?;
-        CHANNEL_STATE.lock().config.server_config.rtc_server_url = url;
+        let mut state = CHANNEL_STATE.lock();
+        state.config.server_config.rtc_server_url = url;
+        state.ws_server_url_overridden = true;
         Ok(())
     }
 
@@ -252,6 +267,19 @@ impl ChannelState {
             if #[cfg(feature = "test-util")] {
                 Cow::Owned(MOCK_SERVER_URL.clone())
             } else {
+                // Fork footgun guard: when the HTTP root is pointed at a
+                // custom backend (WARP_SERVER_ROOT_URL) but the WS/RTC URL is
+                // NOT, deriving from the WS URL would silently send RTC-served
+                // HTTP endpoints (agent-event SSE) to the baked-in production
+                // host with a foreign token. Follow the overridden root
+                // instead.
+                let (root_overridden, ws_overridden) = {
+                    let state = CHANNEL_STATE.lock();
+                    (state.server_root_url_overridden, state.ws_server_url_overridden)
+                };
+                if root_overridden && !ws_overridden {
+                    return Self::server_root_url();
+                }
                 match derive_http_origin_from_ws_url(&Self::ws_server_url()) {
                     Some(origin) => Cow::Owned(origin),
                     None => Self::server_root_url(),
