@@ -12,6 +12,7 @@ use warp_core::features::FeatureFlag;
 use warp_graphql::mutations::create_anonymous_user::{
     AnonymousUserType, CreateAnonymousUserResult,
 };
+use warp_graphql::mutations::update_user_settings::UpdateUserSettingsInput;
 use warp_server_auth::user::persistence::PersistedUser;
 use warpui::clipboard::ClipboardContent;
 use warpui::{Entity, ModelContext, SingletonEntity, UpdateModel};
@@ -534,6 +535,38 @@ impl AuthManager {
         self.auth_state.set_user(user);
         self.auth_state.set_credentials(credentials);
         self.persist(ctx);
+    }
+
+    /// Updates the signed-in user's display name. Optimistically applies the new
+    /// name to local auth state (so the UI updates immediately and it survives a
+    /// restart via the persisted user), then syncs it to the backend so a later
+    /// `refresh_user` re-fetch stays consistent. Blank names are ignored.
+    pub fn update_display_name(&self, new_name: String, ctx: &mut ModelContext<Self>) {
+        let trimmed = new_name.trim().to_owned();
+        if trimmed.is_empty() {
+            return;
+        }
+
+        self.auth_state.set_display_name(Some(trimmed.clone()));
+        self.persist(ctx);
+        ctx.notify();
+
+        let auth_client = self.auth_client.clone();
+        let _ = ctx.spawn(
+            async move {
+                auth_client
+                    .update_user_settings(UpdateUserSettingsInput {
+                        display_name: Some(trimmed),
+                        ..Default::default()
+                    })
+                    .await
+            },
+            Self::on_display_name_updated,
+        );
+    }
+
+    fn on_display_name_updated(&mut self, result: Result<()>, _ctx: &mut ModelContext<Self>) {
+        report_if_error!(result);
     }
 
     /// Persists (or removes) the current user and credentials to/from secure storage,

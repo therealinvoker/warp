@@ -577,6 +577,9 @@ impl RootView {
                             ctx.dispatch_typed_action(Action::LightboxNavigateNext);
                         }
                     })),
+                    on_copy: None,
+                    on_download: None,
+                    copied: false,
                 },
             },
         )
@@ -610,6 +613,9 @@ impl RootView {
                             ctx.dispatch_typed_action(Action::LightboxNavigateNext);
                         }
                     })),
+                    on_copy: None,
+                    on_download: None,
+                    copied: false,
                 },
             },
         )

@@ -195,6 +195,9 @@ pub(crate) enum PersistedAIAgentActionType {
     },
     SuggestPrompt,
     OpenCodeReview,
+    OpenBrowserPreview {
+        url: String,
+    },
     InitProject,
     UseComputer {
         action_summary: String,
@@ -291,6 +294,9 @@ impl From<&AIAgentActionType> for PersistedAIAgentActionType {
             }
             AIAgentActionType::SuggestPrompt { .. } => Self::SuggestPrompt,
             AIAgentActionType::OpenCodeReview => Self::OpenCodeReview,
+            AIAgentActionType::OpenBrowserPreview { url } => {
+                Self::OpenBrowserPreview { url: url.clone() }
+            }
             AIAgentActionType::InsertCodeReviewComments { .. } => Self::NotPersisted,
             AIAgentActionType::InitProject => Self::InitProject,
             AIAgentActionType::ReadDocuments(_)
@@ -428,6 +434,9 @@ impl TryFrom<PersistedAIAgentActionType> for AIAgentActionType {
                 Err(anyhow!("Restoration for suggested prompts is unsupported."))
             }
             PersistedAIAgentActionType::OpenCodeReview => Ok(Self::OpenCodeReview),
+            PersistedAIAgentActionType::OpenBrowserPreview { url } => {
+                Ok(Self::OpenBrowserPreview { url })
+            }
             PersistedAIAgentActionType::InitProject => Ok(Self::InitProject),
             PersistedAIAgentActionType::UseComputer {
                 action_summary,

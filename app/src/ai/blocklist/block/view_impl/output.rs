@@ -72,16 +72,17 @@ use crate::ai::blocklist::block::view_impl::common::{
     BLOCKED_ACTION_MESSAGE_FOR_READING_FILES, BLOCKED_ACTION_MESSAGE_FOR_SEARCHING_CODEBASE,
 };
 use crate::ai::blocklist::block::{
-    AIBlock, AIBlockAction, AIBlockStateHandles, ActionButtons, AutonomySettingSpeedbump,
-    CollapsibleElementState, CollapsibleExpansionState, EmbeddedCodeEditorView, FinishReason,
-    ImportedCommentGroup, RequestedEdit, TextLocation, TodoListElementState,
+    AIBlock, AIBlockAction, AIBlockStateHandles, ActionButtons, ActionSummaryState,
+    AutonomySettingSpeedbump, CollapsibleElementState, CollapsibleExpansionState,
+    EmbeddedCodeEditorView, FinishReason, ImportedCommentGroup, RequestedEdit, TextLocation,
+    TodoListElementState,
 };
 use crate::ai::blocklist::history_model::BlocklistAIHistoryModel;
 use crate::ai::blocklist::inline_action::ask_user_question_view::AskUserQuestionView;
 use crate::ai::blocklist::inline_action::aws_bedrock_credentials_error::AwsBedrockCredentialsErrorView;
 use crate::ai::blocklist::inline_action::create_or_edit_document::CreateOrEditDocumentAction;
 use crate::ai::blocklist::inline_action::inline_action_header::{
-    HeaderConfig, InteractionMode, INLINE_ACTION_HEADER_VERTICAL_PADDING,
+    ExpandedConfig, HeaderConfig, InteractionMode, INLINE_ACTION_HEADER_VERTICAL_PADDING,
     INLINE_ACTION_HORIZONTAL_PADDING,
 };
 use crate::ai::blocklist::inline_action::inline_action_icons::{self, icon_size};
@@ -148,6 +149,7 @@ pub(crate) struct Props<'a> {
         &'a HashMap<AIAgentActionId, ViewHandle<SuggestedUnitTestsView>>,
     pub(super) todo_list_states: &'a HashMap<MessageId, TodoListElementState>,
     pub(super) collapsible_block_states: &'a HashMap<MessageId, CollapsibleElementState>,
+    pub(super) action_summary_states: &'a HashMap<AIAgentActionId, ActionSummaryState>,
     pub(crate) is_selecting_text: bool,
     pub(super) is_ai_input_enabled: bool,
     pub(crate) find_context: Option<FindContext<'a>>,
@@ -421,12 +423,14 @@ pub(super) fn render(props: Props, app: &AppContext) -> Box<dyn Element> {
                                 output_items.add_child(rendered_message);
                             }
                         }
-                        AIAgentOutputMessageType::Action(AIAgentAction {
-                            action:
-                                AIAgentActionType::ReadFiles(ReadFilesRequest { locations: files }),
-                            id,
-                            ..
-                        }) => {
+                        AIAgentOutputMessageType::Action(
+                            agent_action @ AIAgentAction {
+                                action:
+                                    AIAgentActionType::ReadFiles(ReadFilesRequest { locations: files }),
+                                id,
+                                ..
+                            },
+                        ) => {
                             if !status.is_streaming() || !files.is_empty() {
                                 // get the results of the agent's read file actions so we can read the results for later use
                                 let agent_action_results = props
@@ -506,13 +510,20 @@ pub(super) fn render(props: Props, app: &AppContext) -> Box<dyn Element> {
                                 let skill = file_locations.and_then(|file_locations| {
                                     parsed_skill_for_common_locations(file_locations, app)
                                 });
-                                output_items.add_child(render_read_files(
+                                let read_files_detail = render_read_files(
                                     props,
                                     id,
                                     file_names.iter(),
                                     app,
                                     skill,
                                     action_index,
+                                );
+                                output_items.add_child(maybe_collapse_action_summary(
+                                    &agent_action.action,
+                                    id,
+                                    read_files_detail,
+                                    props,
+                                    app,
                                 ));
                             }
                         }
@@ -545,37 +556,50 @@ pub(super) fn render(props: Props, app: &AppContext) -> Box<dyn Element> {
                                 }
                             }
                         }
-                        AIAgentOutputMessageType::Action(AIAgentAction {
-                            action: AIAgentActionType::Grep { queries, path },
-                            id,
-                            ..
-                        }) => {
+                        AIAgentOutputMessageType::Action(
+                            agent_action @ AIAgentAction {
+                                action: AIAgentActionType::Grep { queries, path },
+                                id,
+                                ..
+                            },
+                        ) => {
                             should_render_footer = false;
                             should_render_suggestions = false;
-                            output_items.add_child(render_file_retrieval_tool(
+                            let grep_detail = render_file_retrieval_tool(
                                 props,
                                 id,
                                 create_formatted_text_for_grep(props, id, queries, path, app),
                                 app,
+                            );
+                            output_items.add_child(maybe_collapse_action_summary(
+                                &agent_action.action,
+                                id,
+                                grep_detail,
+                                props,
+                                app,
                             ));
                         }
-                        AIAgentOutputMessageType::Action(AIAgentAction {
-                            action: AIAgentActionType::FileGlob { patterns, path },
-                            id,
-                            ..
-                        })
-                        | AIAgentOutputMessageType::Action(AIAgentAction {
-                            action:
-                                AIAgentActionType::FileGlobV2 {
-                                    patterns,
-                                    search_dir: path,
-                                },
-                            id,
-                            ..
-                        }) => {
+                        AIAgentOutputMessageType::Action(
+                            agent_action @ AIAgentAction {
+                                action: AIAgentActionType::FileGlob { patterns, path },
+                                id,
+                                ..
+                            },
+                        )
+                        | AIAgentOutputMessageType::Action(
+                            agent_action @ AIAgentAction {
+                                action:
+                                    AIAgentActionType::FileGlobV2 {
+                                        patterns,
+                                        search_dir: path,
+                                    },
+                                id,
+                                ..
+                            },
+                        ) => {
                             should_render_footer = false;
                             should_render_suggestions = false;
-                            output_items.add_child(render_file_retrieval_tool(
+                            let file_glob_detail = render_file_retrieval_tool(
                                 props,
                                 id,
                                 create_formatted_text_for_file_glob(
@@ -586,22 +610,39 @@ pub(super) fn render(props: Props, app: &AppContext) -> Box<dyn Element> {
                                     app,
                                 ),
                                 app,
+                            );
+                            output_items.add_child(maybe_collapse_action_summary(
+                                &agent_action.action,
+                                id,
+                                file_glob_detail,
+                                props,
+                                app,
                             ));
                         }
-                        AIAgentOutputMessageType::Action(AIAgentAction {
-                            action:
-                                AIAgentActionType::ReadMCPResource {
-                                    server_id: _,
-                                    name,
-                                    uri,
-                                },
-                            id,
-                            ..
-                        }) => {
+                        AIAgentOutputMessageType::Action(
+                            agent_action @ AIAgentAction {
+                                action:
+                                    AIAgentActionType::ReadMCPResource {
+                                        server_id: _,
+                                        name,
+                                        uri,
+                                    },
+                                id,
+                                ..
+                            },
+                        ) => {
                             should_render_footer = false;
                             should_render_suggestions = false;
                             let name = uri.as_ref().unwrap_or(name);
-                            output_items.add_child(render_read_mcp_resource(props, id, name, app));
+                            let read_mcp_resource_detail =
+                                render_read_mcp_resource(props, id, name, app);
+                            output_items.add_child(maybe_collapse_action_summary(
+                                &agent_action.action,
+                                id,
+                                read_mcp_resource_detail,
+                                props,
+                                app,
+                            ));
                         }
                         AIAgentOutputMessageType::Action(AIAgentAction {
                             action: AIAgentActionType::CallMCPTool { .. },
@@ -745,66 +786,115 @@ pub(super) fn render(props: Props, app: &AppContext) -> Box<dyn Element> {
                                 }
                             }
                         }
-                        AIAgentOutputMessageType::Action(AIAgentAction {
-                            action: AIAgentActionType::CreateDocuments { .. },
-                            id,
-                            ..
-                        }) => {
+                        AIAgentOutputMessageType::Action(
+                            agent_action @ AIAgentAction {
+                                action: AIAgentActionType::CreateDocuments { .. },
+                                id,
+                                ..
+                            },
+                        ) => {
                             should_render_footer = false;
                             if let Some(create_document) =
                                 maybe_render_create_document(props, id, app)
                             {
-                                output_items.add_child(create_document);
+                                output_items.add_child(maybe_collapse_action_summary(
+                                    &agent_action.action,
+                                    id,
+                                    create_document,
+                                    props,
+                                    app,
+                                ));
                             }
                         }
-                        AIAgentOutputMessageType::Action(AIAgentAction {
-                            action: AIAgentActionType::EditDocuments { .. },
-                            id,
-                            ..
-                        }) => {
+                        AIAgentOutputMessageType::Action(
+                            agent_action @ AIAgentAction {
+                                action: AIAgentActionType::EditDocuments { .. },
+                                id,
+                                ..
+                            },
+                        ) => {
                             should_render_footer = false;
                             if let Some(edit_document) = maybe_render_edit_document(props, id, app)
                             {
-                                output_items.add_child(edit_document);
+                                output_items.add_child(maybe_collapse_action_summary(
+                                    &agent_action.action,
+                                    id,
+                                    edit_document,
+                                    props,
+                                    app,
+                                ));
                             }
                         }
-                        AIAgentOutputMessageType::Action(AIAgentAction {
-                            action: AIAgentActionType::UseComputer(request),
-                            id,
-                            ..
-                        }) => {
-                            should_render_footer = false;
-                            output_items.add_child(render_use_computer(props, id, request, app));
-                        }
-                        AIAgentOutputMessageType::Action(AIAgentAction {
-                            action: AIAgentActionType::ReadSkill(request),
-                            id,
-                            ..
-                        }) => {
-                            should_render_footer = false;
-                            output_items.add_child(render_read_skill(
-                                props,
+                        AIAgentOutputMessageType::Action(
+                            agent_action @ AIAgentAction {
+                                action: AIAgentActionType::UseComputer(request),
                                 id,
-                                &request.skill,
+                                ..
+                            },
+                        ) => {
+                            should_render_footer = false;
+                            let use_computer_detail = render_use_computer(props, id, request, app);
+                            output_items.add_child(maybe_collapse_action_summary(
+                                &agent_action.action,
+                                id,
+                                use_computer_detail,
+                                props,
                                 app,
                             ));
                         }
-                        AIAgentOutputMessageType::Action(AIAgentAction {
-                            action: AIAgentActionType::UploadArtifact(request),
-                            id,
-                            ..
-                        }) => {
+                        AIAgentOutputMessageType::Action(
+                            agent_action @ AIAgentAction {
+                                action: AIAgentActionType::ReadSkill(request),
+                                id,
+                                ..
+                            },
+                        ) => {
                             should_render_footer = false;
-                            output_items.add_child(render_upload_artifact(props, id, request, app));
+                            let read_skill_detail =
+                                render_read_skill(props, id, &request.skill, app);
+                            output_items.add_child(maybe_collapse_action_summary(
+                                &agent_action.action,
+                                id,
+                                read_skill_detail,
+                                props,
+                                app,
+                            ));
                         }
-                        AIAgentOutputMessageType::Action(AIAgentAction {
-                            action: AIAgentActionType::RequestComputerUse(request),
-                            id,
-                            ..
-                        }) => {
+                        AIAgentOutputMessageType::Action(
+                            agent_action @ AIAgentAction {
+                                action: AIAgentActionType::UploadArtifact(request),
+                                id,
+                                ..
+                            },
+                        ) => {
                             should_render_footer = false;
-                            output_items
-                                .add_child(render_request_computer_use(props, id, request, app));
+                            let upload_artifact_detail =
+                                render_upload_artifact(props, id, request, app);
+                            output_items.add_child(maybe_collapse_action_summary(
+                                &agent_action.action,
+                                id,
+                                upload_artifact_detail,
+                                props,
+                                app,
+                            ));
+                        }
+                        AIAgentOutputMessageType::Action(
+                            agent_action @ AIAgentAction {
+                                action: AIAgentActionType::RequestComputerUse(request),
+                                id,
+                                ..
+                            },
+                        ) => {
+                            should_render_footer = false;
+                            let request_computer_use_detail =
+                                render_request_computer_use(props, id, request, app);
+                            output_items.add_child(maybe_collapse_action_summary(
+                                &agent_action.action,
+                                id,
+                                request_computer_use_detail,
+                                props,
+                                app,
+                            ));
                         }
                         AIAgentOutputMessageType::Action(AIAgentAction {
                             action:
@@ -3627,6 +3717,140 @@ fn render_collapsible_header(
     Container::new(Flex::row().with_child(expandable.finish()).finish())
         .with_horizontal_margin(CONTENT_HORIZONTAL_PADDING + icon_size + 16.)
         .finish()
+}
+
+/// Abstract, Cursor-style label for a collapsible tool-usage summary row.
+/// Returns `None` for action types that render their own collapsible UI (shell
+/// commands, MCP/GitHub cards, codebase/web search, edits) or are interactive/
+/// approval prompts, and therefore should not be summarized by the shared
+/// wrapper. Present tense while running, past tense once finished.
+fn action_summary_label(
+    action: &AIAgentActionType,
+    status: Option<&AIActionStatus>,
+) -> Option<String> {
+    let done = status.is_some_and(|status| status.is_done());
+    let label = match action {
+        AIAgentActionType::ReadFiles(ReadFilesRequest { locations }) => {
+            if !done {
+                "Reading files".to_string()
+            } else if locations.len() == 1 {
+                "Read 1 file".to_string()
+            } else {
+                format!("Read {} files", locations.len())
+            }
+        }
+        AIAgentActionType::Grep { .. } => if done {
+            "Searched code"
+        } else {
+            "Searching code"
+        }
+        .to_string(),
+        AIAgentActionType::FileGlob { .. } | AIAgentActionType::FileGlobV2 { .. } => if done {
+            "Searched files"
+        } else {
+            "Searching files"
+        }
+        .to_string(),
+        AIAgentActionType::ReadMCPResource { .. } => if done {
+            "Read resource"
+        } else {
+            "Reading resource"
+        }
+        .to_string(),
+        AIAgentActionType::CreateDocuments { .. } => if done {
+            "Created document"
+        } else {
+            "Creating document"
+        }
+        .to_string(),
+        AIAgentActionType::EditDocuments { .. } => if done {
+            "Edited document"
+        } else {
+            "Editing document"
+        }
+        .to_string(),
+        AIAgentActionType::UseComputer(_) | AIAgentActionType::RequestComputerUse(_) => if done {
+            "Used computer"
+        } else {
+            "Using computer"
+        }
+        .to_string(),
+        AIAgentActionType::ReadSkill(_) => {
+            if done { "Read skill" } else { "Reading skill" }.to_string()
+        }
+        AIAgentActionType::UploadArtifact(_) => if done {
+            "Uploaded artifact"
+        } else {
+            "Uploading artifact"
+        }
+        .to_string(),
+        _ => return None,
+    };
+    Some(label)
+}
+
+/// Wrap an agent tool call's detail element in a collapsible, Cursor-style
+/// summary row (`[status icon] [abstract label] [chevron]`), collapsed by
+/// default. Expanding reveals `detail` below the header. Actions awaiting user
+/// approval (`Blocked`) are never collapsed so the user can act on them.
+fn render_collapsible_action_summary(
+    action_id: &AIAgentActionId,
+    label: String,
+    state: &ActionSummaryState,
+    status: Option<&AIActionStatus>,
+    icon: warpui::elements::Icon,
+    detail: Box<dyn Element>,
+    app: &AppContext,
+) -> Box<dyn Element> {
+    if status.is_some_and(|status| status.is_blocked()) {
+        return detail;
+    }
+
+    let id = action_id.clone();
+    let is_expanded = state.is_expanded;
+    let header_element = HeaderConfig::new(label, app)
+        .with_interaction_mode(InteractionMode::ManuallyExpandable(
+            ExpandedConfig::new(is_expanded, state.header_toggle_mouse_state.clone())
+                .with_toggle_callback(move |ctx| {
+                    ctx.dispatch_typed_action(AIBlockAction::ToggleActionSummaryExpanded(
+                        id.clone(),
+                    ));
+                }),
+        ))
+        .with_icon(icon)
+        .render(app);
+
+    let mut container = Flex::column()
+        .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
+        .with_child(header_element);
+    if is_expanded {
+        container.add_child(detail);
+    }
+    container
+        .finish()
+        .with_agent_output_item_spacing(app)
+        .finish()
+}
+
+/// If `action` is a summarizable tool call with registered summary state, wrap
+/// its `detail` element in a collapsible summary row; otherwise return `detail`
+/// unchanged.
+fn maybe_collapse_action_summary(
+    action: &AIAgentActionType,
+    action_id: &AIAgentActionId,
+    detail: Box<dyn Element>,
+    props: Props,
+    app: &AppContext,
+) -> Box<dyn Element> {
+    let Some(state) = props.action_summary_states.get(action_id) else {
+        return detail;
+    };
+    let status = props.action_model.as_ref(app).get_action_status(action_id);
+    let Some(label) = action_summary_label(action, status.as_ref()) else {
+        return detail;
+    };
+    let icon = action_icon(action_id, props.action_model, props.model, app);
+    render_collapsible_action_summary(action_id, label, state, status.as_ref(), icon, detail, app)
 }
 
 pub fn are_all_text_sections_empty(text_sections: &[AIAgentTextSection]) -> bool {

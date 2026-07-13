@@ -2408,12 +2408,17 @@ pub(crate) fn render_udi_chip(config: UdiChipConfig, appearance: &Appearance) ->
 }
 
 pub fn udi_font_size(appearance: &Appearance) -> f32 {
-    appearance.monospace_font_size() - 1.
+    // Base is the reduced fork grid font; render the UDI composer chips (dir,
+    // `aA`, model/profile, remote-control, etc.) 2pts larger so they read clearly
+    // in the input row.
+    appearance.monospace_font_size() + 2.
 }
 
 pub fn udi_icon_size(appearance: &Appearance, app: &AppContext) -> f32 {
+    // Render chip icons larger than their labels so glyphs read clearly in the
+    // input row.
     app.font_cache().line_height(
-        appearance.monospace_font_size(),
+        appearance.monospace_font_size() + 4.,
         DEFAULT_UI_LINE_HEIGHT_RATIO / 1.4,
     )
 }

@@ -657,6 +657,11 @@ impl TryFrom<AIAgentActionResult> for api::request::input::user_inputs::user_inp
                     warp_multi_agent_api::OpenCodeReviewResult {},
                 ),
             ),
+            AIAgentActionResultType::OpenBrowserPreview => Some(
+                warp_multi_agent_api::request::input::tool_call_result::Result::OpenBrowserPreview(
+                    warp_multi_agent_api::OpenBrowserPreviewResult {},
+                ),
+            ),
             AIAgentActionResultType::InsertReviewComments(insert_review_comments_result) => {
                 Some(insert_review_comments_result.try_into()?)
             }

@@ -48,6 +48,7 @@ pub struct UpdateUserSettingsInput {
     pub cloud_conversation_storage_enabled: Option<bool>,
     pub crash_reporting_enabled: Option<bool>,
     pub telemetry_enabled: Option<bool>,
+    pub display_name: Option<String>,
 }
 
 #[derive(cynic::QueryFragment, Debug)]

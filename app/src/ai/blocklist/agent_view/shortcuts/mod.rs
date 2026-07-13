@@ -76,9 +76,26 @@ pub fn render_keystroke_with_color_overrides(
     background_color: Option<ColorU>,
     app: &AppContext,
 ) -> Box<dyn Element> {
+    render_keystroke_with_color_and_font_overrides(keystroke, color, background_color, None, app)
+}
+
+/// Like [`render_keystroke_with_color_overrides`], but lets the caller override the
+/// keystroke-chip font size (e.g. the inline-menu nav bar renders its "↑ ↓ / esc"
+/// chips a couple points larger than the default agent-shortcut keycaps). The chip
+/// box grows in step (`font_size + 2`, mirroring `styles::keystroke_size`).
+pub fn render_keystroke_with_color_and_font_overrides(
+    keystroke: &Keystroke,
+    color: Option<ColorU>,
+    background_color: Option<ColorU>,
+    font_size_override: Option<f32>,
+    app: &AppContext,
+) -> Box<dyn Element> {
     let appearance = Appearance::as_ref(app);
     let theme = appearance.theme();
-    let font_size = styles::font_size(appearance);
+    let font_size = font_size_override.unwrap_or_else(|| styles::font_size(appearance));
+    let keystroke_size = font_size_override
+        .map(|size| size + 2.)
+        .unwrap_or_else(|| styles::keystroke_size(appearance));
     appearance
         .ui_builder()
         .keyboard_shortcut(keystroke)
@@ -96,8 +113,8 @@ pub fn render_keystroke_with_color_overrides(
             font_color: Some(color.unwrap_or_else(|| theme.foreground().into_solid())),
             font_family_id: Some(appearance.ui_font_family()),
             font_size: Some(font_size),
-            width: Some(styles::keystroke_size(appearance)),
-            height: Some(styles::keystroke_size(appearance)),
+            width: Some(keystroke_size),
+            height: Some(keystroke_size),
             ..Default::default()
         })
         .with_line_height_ratio(1.0)

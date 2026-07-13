@@ -326,6 +326,23 @@ impl BlocklistAIHistoryModel {
             })
     }
 
+    /// Returns the raw live conversation IDs (oldest first) for a terminal surface,
+    /// including conversations that are persisted on disk but not currently hydrated
+    /// in `conversations_by_id`. Use this for session-restore snapshots so a prior
+    /// conversation that has been evicted from memory is still restored on relaunch —
+    /// unlike `all_live_conversations_for_terminal_surface`, which silently drops any
+    /// ID whose conversation isn't in memory.
+    pub fn all_live_conversation_ids_for_terminal_surface(
+        &self,
+        terminal_surface_id: EntityId,
+    ) -> impl Iterator<Item = AIConversationId> + '_ {
+        self.live_conversation_ids_for_terminal_surface
+            .get(&terminal_surface_id)
+            .into_iter()
+            .flatten()
+            .copied()
+    }
+
     /// Returns a flattened and ordered (oldest first) list of exchanges from a terminal surface's live conversations.
     /// This works for terminal surfaces that have been closed.
     pub fn all_live_root_task_exchanges_for_terminal_surface(

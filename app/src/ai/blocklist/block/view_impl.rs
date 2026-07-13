@@ -48,9 +48,9 @@ use warpui::elements::{
     MainAxisAlignment, MainAxisSize, MouseStateHandle, ParentElement, Radius, SavePosition,
     SelectableArea, Text,
 };
-use warpui::fonts::Properties;
+use warpui::fonts::{Properties, Weight};
 use warpui::platform::Cursor;
-use warpui::text_layout::TextStyle;
+use warpui::text_layout::{ClipConfig, TextStyle};
 use warpui::ui_components::components::UiComponent;
 use warpui::{AppContext, Element, SingletonEntity, View, ViewContext};
 
@@ -668,7 +668,7 @@ pub fn render_citation(
         }
         AIAgentCitation::WarpDocumentation { .. } => {
             let icon = Icon::Warp.to_warpui_icon(theme.foreground()).finish();
-            let name = String::from("Warp Docs");
+            let name = String::from("Bang Docs");
             (Some(icon), name)
         }
         AIAgentCitation::WebPage { url } => {
@@ -1006,6 +1006,7 @@ impl View for AIBlock {
                         .pending_context_selected_text()
                         .is_some(),
                     attachments: &attachment_name_list,
+                    image_thumbnails: &self.submitted_image_thumbnails,
                     find_context: self.find_model.as_ref(app).is_find_bar_open().then_some(
                         FindContext {
                             model: self.find_model.as_ref(app),
@@ -1087,6 +1088,7 @@ impl View for AIBlock {
                 unit_test_suggestions: &self.unit_tests_suggestions,
                 todo_list_states: &self.todo_list_states,
                 collapsible_block_states: &self.collapsible_block_states,
+                action_summary_states: &self.action_summary_states,
                 is_selecting_text: self.state_handles.selection_handle.is_selecting(),
                 is_ai_input_enabled: self
                     .context_model
@@ -1285,6 +1287,83 @@ impl View for AIBlock {
         }
 
         context
+    }
+}
+
+impl AIBlock {
+    /// Renders a compact, display-only copy of this block's user question, used as a "sticky"
+    /// header that stays pinned to the top of the agent stream while the answer scrolls beneath it
+    /// (see `BlockListElement`'s pinned-query handling). Returns `None` for blocks that don't
+    /// contain a user question (e.g. requested-command result blocks) or that shouldn't render.
+    ///
+    /// This mirrors the question portion of `render`, but is intentionally non-interactive (no text
+    /// selection, links, or attachments) and single-line, so painting a second copy on top of the
+    /// scrolling block doesn't duplicate event handlers or grow the header unbounded.
+    pub(crate) fn render_pinned_query(&self, app: &AppContext) -> Option<Box<dyn Element>> {
+        if self.is_hidden(app) {
+            return None;
+        }
+        // Bail if the backing conversation has been cleared (mirrors `render`).
+        BlocklistAIHistoryModel::as_ref(app).conversation(&self.client_ids.conversation_id)?;
+
+        let initial_conversation_query = self
+            .model
+            .conversation(app)
+            .and_then(|c| c.initial_user_query());
+        let query_for_display = self
+            .model
+            .inputs_to_render(app)
+            .iter()
+            .find_map(|input| input.display_user_query(initial_conversation_query.as_ref()))?;
+
+        let appearance = Appearance::as_ref(app);
+        let theme = appearance.theme();
+
+        let avatar = Container::new(common::render_user_avatar(
+            &self.user_display_name,
+            self.profile_image_path.as_ref(),
+            None,
+            app,
+        ))
+        .with_margin_right(16.)
+        .finish();
+
+        let query_text = Text::new(
+            query_for_display,
+            appearance.monospace_font_family(),
+            appearance.monospace_font_size(),
+        )
+        .with_style(Properties::default().weight(Weight::Bold))
+        .with_color(blended_colors::text_main(theme, theme.surface_1()))
+        .with_clip(ClipConfig::ellipsis())
+        .finish();
+
+        let row = Flex::row()
+            .with_cross_axis_alignment(CrossAxisAlignment::Center)
+            .with_child(avatar)
+            .with_child(Expanded::new(1., query_text).finish())
+            .finish();
+
+        // Use the "textarea" grey (`surface_1`) with rounded corners to match the agent input
+        // styling. In the fullscreen agent view the theme `background()` is translucent, and
+        // `surface_1` inherits that alpha, so painting it standalone would let the scrolling
+        // answer bleed through. Force full opacity so the header fully occludes the content.
+        //
+        // Note: no border here on purpose. A border would inset the content by its width, shifting
+        // the avatar/query text by 1px relative to the block's natural (border-less) rendering and
+        // causing a visible jump as the header pins and hands off. Paddings must match the block's
+        // own content so the pinned header sits exactly over the scrolling question.
+        let grey = theme.surface_1().into_solid();
+        let opaque_grey = Fill::Solid(ColorU::new(grey.r, grey.g, grey.b, 255));
+        Some(
+            Container::new(row)
+                .with_background(opaque_grey)
+                .with_corner_radius(CornerRadius::with_all(Radius::Pixels(8.)))
+                .with_horizontal_padding(CONTENT_HORIZONTAL_PADDING)
+                .with_padding_top(CONTENT_VERTICAL_PADDING)
+                .with_padding_bottom(12.)
+                .finish(),
+        )
     }
 }
 

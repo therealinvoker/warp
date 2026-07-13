@@ -1,5 +1,6 @@
 use std::io::Cursor;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use base64::Engine;
@@ -20,12 +21,34 @@ const DEFAULT_CHUNK_SIZE: u32 = 512;
 const NUM_CHANNELS: u16 = 1;
 // Voice input is typically sampled at 16000Hz (and required by Wispr)
 const TARGET_SAMPLE_RATE: f32 = 16000.0;
+// The OpenAI Realtime API expects 24kHz PCM16 for streamed input audio.
+const STREAM_TARGET_SAMPLE_RATE: f32 = 24000.0;
 const STREAM_TIMEOUT: Duration = Duration::from_secs(60 * 6);
+
+/// Handle to a continuous PCM stream (for the Realtime voice pipeline). Yields
+/// 24kHz mono PCM16 (little-endian) frames as they are captured + resampled.
+/// Dropping the [`VoiceInput`] `Streaming` state closes the channel.
+pub struct RealtimeVoiceStream {
+    pcm_rx: async_channel::Receiver<Vec<u8>>,
+}
+
+impl RealtimeVoiceStream {
+    /// Await the next 24kHz mono PCM16 LE frame, or `None` once the stream ends
+    /// (the `VoiceInput` streaming state was dropped/stopped).
+    pub async fn next_frame(&self) -> Option<Vec<u8>> {
+        self.pcm_rx.recv().await.ok()
+    }
+}
 
 pub struct VoiceInput {
     state: VoiceInputState,
     pub should_suppress_new_feature_popup: bool,
     voice_session_start: Option<instant::Instant>,
+    /// Real-time input level (RMS, 0.0..~1.0) of the current recording, stored
+    /// as `f32` bits so it can be updated from the cpal audio thread and polled
+    /// cheaply (e.g. to drive the voice-overlay puck animation). Reset to 0 when
+    /// not recording.
+    input_level: Arc<AtomicU32>,
 }
 
 #[derive(Default)]
@@ -44,6 +67,15 @@ pub enum VoiceInputState {
     },
 
     Transcribing,
+
+    /// Continuous streaming for the Realtime pipeline: each resampled frame is
+    /// converted to PCM16 and pushed to `pcm_tx` (no accumulation / WAV).
+    Streaming {
+        stream: cpal::Stream,
+        chunk_size: usize,
+        resampler: Arc<Mutex<SincFixedIn<f32>>>,
+        pcm_tx: async_channel::Sender<Vec<u8>>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -109,7 +141,14 @@ impl VoiceInput {
             state: VoiceInputState::Idle,
             should_suppress_new_feature_popup: false,
             voice_session_start: None,
+            input_level: Arc::new(AtomicU32::new(0)),
         }
+    }
+
+    /// Current real-time input level (RMS, ~0.0..1.0). Returns 0 when not
+    /// recording. Safe to poll frequently from the main thread.
+    pub fn input_level(&self) -> f32 {
+        f32::from_bits(self.input_level.load(Ordering::Relaxed))
     }
 
     pub fn is_listening(&self) -> bool {
@@ -118,6 +157,10 @@ impl VoiceInput {
 
     pub fn is_transcribing(&self) -> bool {
         matches!(self.state, VoiceInputState::Transcribing)
+    }
+
+    pub fn is_streaming(&self) -> bool {
+        matches!(self.state, VoiceInputState::Streaming { .. })
     }
 
     /// Returns true if voice is currently recording or transcribing.
@@ -210,6 +253,7 @@ impl VoiceInput {
         // identical events, so only report the first error per session at error
         // level and downgrade the rest to debug.
         let mut has_logged_stream_error = false;
+        let level_meter = self.input_level.clone();
         let stream = input_device
             .build_input_stream(
                 &stream_config,
@@ -222,6 +266,14 @@ impl VoiceInput {
                         .chunks_exact(num_channels as usize)
                         .map(|frame| frame.iter().sum::<f32>() / num_channels as f32)
                         .collect();
+
+                    // Publish a real-time RMS level for meters/animations (cheap,
+                    // lock-free). Consumers poll `input_level()`.
+                    if !mono_samples.is_empty() {
+                        let sum_sq: f32 = mono_samples.iter().map(|s| s * s).sum();
+                        let rms = (sum_sq / mono_samples.len() as f32).sqrt();
+                        level_meter.store(rms.to_bits(), Ordering::Relaxed);
+                    }
 
                     // This is blocking, but we aren't on the main thread.
                     let _ = warpui_core::r#async::block_on(audio_frame_tx.send(mono_samples));
@@ -287,6 +339,7 @@ impl VoiceInput {
         } = &mut self.state
         {
             cpal::traits::StreamTrait::pause(stream)?;
+            self.input_level.store(0, Ordering::Relaxed);
 
             // Calculate session duration before conversion
             let session_duration_ms = self
@@ -336,6 +389,7 @@ impl VoiceInput {
     /// The VoiceSession will receive VoiceSessionResult::Aborted.
     pub fn abort_listening(&mut self) {
         log::debug!("Aborting voice input");
+        self.input_level.store(0, Ordering::Relaxed);
 
         // Calculate session duration before aborting
         let session_duration_ms = self
@@ -357,6 +411,166 @@ impl VoiceInput {
 
         // Reset to Idle state
         self.state = VoiceInputState::Idle;
+    }
+
+    /// Start continuous capture for the Realtime pipeline: mic audio is
+    /// resampled to 24kHz mono PCM16 and pushed frame-by-frame to the returned
+    /// stream (no accumulation / WAV). Independent of `start_listening` (the
+    /// mic-button path); errors if either is already running.
+    pub fn start_streaming(
+        &mut self,
+        ctx: &mut ModelContext<Self>,
+    ) -> Result<RealtimeVoiceStream, StartListeningError> {
+        if self.is_active() || self.is_streaming() {
+            return Err(StartListeningError::AlreadyRunning);
+        }
+
+        let (audio_frame_tx, audio_frame_rx) = async_channel::unbounded();
+        let _ = ctx.spawn_stream_local(audio_frame_rx, Self::on_stream_audio_frame, |_, _| {
+            log::debug!("Realtime audio stream done");
+        });
+
+        let host = cpal::default_host();
+        let Some(input_device) = host.default_input_device() else {
+            return Err(anyhow::anyhow!("No default input device found").into());
+        };
+        let config = input_device.default_input_config().map_err(|e| {
+            StartListeningError::Other(anyhow::anyhow!("Failed to get default input config: {e}"))
+        })?;
+        if matches!(
+            ctx.microphone_access_state(),
+            MicrophoneAccessState::Denied | MicrophoneAccessState::Restricted
+        ) {
+            return Err(StartListeningError::AccessDenied);
+        }
+
+        let buffer_size = match config.buffer_size() {
+            cpal::SupportedBufferSize::Range { min, max } => DEFAULT_CHUNK_SIZE.clamp(*min, *max),
+            cpal::SupportedBufferSize::Unknown => DEFAULT_CHUNK_SIZE,
+        };
+        let sample_rate = config.sample_rate() as f64;
+        let num_channels = config.channels();
+        let stream_config: StreamConfig = config.into();
+        let stream_config = StreamConfig {
+            buffer_size: cpal::BufferSize::Fixed(buffer_size),
+            ..stream_config
+        };
+
+        let resampler = SincFixedIn::new(
+            STREAM_TARGET_SAMPLE_RATE as f64 / sample_rate,
+            2.0,
+            SincInterpolationParameters {
+                interpolation: SincInterpolationType::Linear,
+                window: WindowFunction::Hann,
+                sinc_len: buffer_size as usize,
+                f_cutoff: 0.95,
+                oversampling_factor: 1,
+            },
+            buffer_size as usize,
+            NUM_CHANNELS as usize,
+        )
+        .map_err(|e| {
+            StartListeningError::Other(anyhow::anyhow!("Resampler construction failed: {e}"))
+        })?;
+
+        let level_meter = self.input_level.clone();
+        let mut has_logged_stream_error = false;
+        let stream = input_device
+            .build_input_stream(
+                &stream_config,
+                move |data: &[f32], _: &cpal::InputCallbackInfo| {
+                    let mono_samples: Vec<f32> = data
+                        .chunks_exact(num_channels as usize)
+                        .map(|frame| frame.iter().sum::<f32>() / num_channels as f32)
+                        .collect();
+                    if !mono_samples.is_empty() {
+                        let sum_sq: f32 = mono_samples.iter().map(|s| s * s).sum();
+                        let rms = (sum_sq / mono_samples.len() as f32).sqrt();
+                        level_meter.store(rms.to_bits(), Ordering::Relaxed);
+                    }
+                    let _ = warpui_core::r#async::block_on(audio_frame_tx.send(mono_samples));
+                },
+                move |err| {
+                    if has_logged_stream_error {
+                        log::debug!("Error in realtime voice stream (suppressed): {err}");
+                    } else {
+                        has_logged_stream_error = true;
+                        log::error!("Error in realtime voice stream: {err}");
+                    }
+                },
+                Some(STREAM_TIMEOUT),
+            )
+            .map_err(|e| {
+                StartListeningError::Other(anyhow::anyhow!("Failed to build input stream: {e}"))
+            })?;
+        cpal::traits::StreamTrait::play(&stream)
+            .map_err(|e| StartListeningError::Other(anyhow::anyhow!("Failed to play stream: {e}")))?;
+
+        let (pcm_tx, pcm_rx) = async_channel::unbounded();
+        self.voice_session_start = Some(instant::Instant::now());
+        self.state = VoiceInputState::Streaming {
+            stream,
+            chunk_size: buffer_size as usize,
+            resampler: Arc::new(Mutex::new(resampler)),
+            pcm_tx,
+        };
+        Ok(RealtimeVoiceStream { pcm_rx })
+    }
+
+    /// Stop continuous streaming and close the PCM channel.
+    pub fn stop_streaming(&mut self) {
+        self.input_level.store(0, Ordering::Relaxed);
+        if let VoiceInputState::Streaming { stream, .. } = &self.state {
+            let _ = cpal::traits::StreamTrait::pause(stream);
+        }
+        // Dropping the state drops `pcm_tx`, closing the consumer's channel.
+        self.state = VoiceInputState::Idle;
+        self.voice_session_start = None;
+    }
+
+    // Resamples a captured frame to 24kHz PCM16 and pushes it to the stream.
+    fn on_stream_audio_frame(&mut self, mut input_buffer: Vec<f32>, ctx: &mut ModelContext<Self>) {
+        let VoiceInputState::Streaming {
+            resampler,
+            chunk_size,
+            pcm_tx,
+            ..
+        } = &mut self.state
+        else {
+            return;
+        };
+        if input_buffer.len() < *chunk_size {
+            input_buffer.resize(*chunk_size, 0.0);
+        }
+        let resampler = resampler.clone();
+        let pcm_tx = pcm_tx.clone();
+        ctx.spawn(
+            async move {
+                if let Err(e) = Self::stream_resampled_pcm16(resampler, pcm_tx, input_buffer).await {
+                    log::error!("Failed to resample streaming frame: {e}");
+                }
+            },
+            |_, _, _| {},
+        );
+    }
+
+    // Resamples one frame and sends it as PCM16 LE bytes. Background thread.
+    async fn stream_resampled_pcm16(
+        resampler: Arc<Mutex<SincFixedIn<f32>>>,
+        pcm_tx: async_channel::Sender<Vec<u8>>,
+        input_buffer: Vec<f32>,
+    ) -> Result<(), anyhow::Error> {
+        let resampled = {
+            let mut resampler = resampler.lock();
+            resampler.process(&[input_buffer], None)?[0].to_vec()
+        };
+        let mut bytes = Vec::with_capacity(resampled.len() * 2);
+        for sample in &resampled {
+            let amplitude = sample.to_sample::<i16>();
+            bytes.extend_from_slice(&amplitude.to_le_bytes());
+        }
+        let _ = pcm_tx.send(bytes).await;
+        Ok(())
     }
 
     // Enqueues a single audio frame to be processed on a background thread.

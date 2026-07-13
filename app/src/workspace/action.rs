@@ -22,6 +22,7 @@ use crate::ai::agent::api::ServerConversationToken;
 use crate::ai::agent::conversation::AIAgentHarness;
 use crate::ai::agent::conversation::AIConversationId;
 use crate::ai::agent::AIAgentExchangeId;
+use crate::ai::agent::ImageContext;
 use crate::ai::ambient_agents::AmbientAgentTaskId;
 use crate::ai::blocklist::PendingAttachment;
 use crate::ai::document::ai_document_model::{AIDocumentId, AIDocumentVersion};
@@ -357,6 +358,9 @@ pub enum WorkspaceAction {
     DispatchToSettingsTab(SettingsTabAction),
     ToggleResourceCenter,
     ToggleUserMenu,
+    /// Dev-only: re-enter the first-run welcome/onboarding experience from the
+    /// user menu. Bridges to `RootViewAction::DebugEnterOnboardingState`.
+    ReplayWelcome,
     ToggleAIAssistant,
     ClickedAIAssistantIcon,
     ToggleKeybindingsPage,
@@ -564,6 +568,26 @@ pub enum WorkspaceAction {
     },
     /// Focus a specific pane by its locator (pane_group_id and pane_id).
     FocusPane(PaneViewLocator),
+    /// Attach dropped image files to a specific pane's chat composer (e.g. from
+    /// dragging an image from Finder onto a vertical tab). Focuses the pane
+    /// first so the image lands in that tab's input. `paths` are already
+    /// filtered to image files.
+    AttachImagesToPane {
+        locator: PaneViewLocator,
+        paths: Vec<String>,
+    },
+    /// Move an already-staged composer image (dragged from a tab's chat
+    /// composer thumbnail) into another pane's chat composer. Focuses the
+    /// target pane first so the image lands in that tab's input. The source
+    /// removal is dispatched separately by the drag handler.
+    AttachImageToPane {
+        locator: PaneViewLocator,
+        image: ImageContext,
+    },
+    /// Highlight the vertical-tab row a composer image thumbnail is currently
+    /// being dragged over (or clear the highlight with `None`), so the target
+    /// tab shows its hover state during the drag.
+    SetComposerImageDragTarget(Option<PaneViewLocator>),
     /// Start a new AI conversation in a terminal view. This sets the pending query state
     /// to default and focuses the terminal view.
     StartNewConversation {
@@ -818,6 +842,12 @@ pub enum WorkspaceAction {
         images: Vec<lightbox::LightboxImage>,
         /// The index of the image to display initially.
         initial_index: usize,
+        /// When true, the initially shown image is copied to the clipboard as
+        /// soon as it finishes loading, and the copy control flashes a
+        /// "Copied!" confirmation. Used by the attachment thumbnail path so a
+        /// user viewing a pasted/screenshot image gets it on the clipboard
+        /// without an extra click.
+        auto_copy: bool,
     },
     /// Update a single image in the currently open lightbox.
     UpdateLightboxImage {
@@ -1046,6 +1076,7 @@ impl WorkspaceAction {
             | DispatchToSettingsTab { .. }
             | ToggleResourceCenter
             | ToggleUserMenu
+            | ReplayWelcome
             | ClickedAIAssistantIcon
             | ToggleAIAssistant
             | OpenCloudAgentSetupGuide
@@ -1230,6 +1261,11 @@ impl WorkspaceAction {
             #[cfg(feature = "local_fs")]
             FileDeleted { .. } => false, // File deletion doesn't change workspace state
             OpenEnvironmentManagementPane => false,
+            // Attaching a dropped image to a composer only mutates transient
+            // input state, which isn't part of the persisted workspace.
+            AttachImagesToPane { .. } => false,
+            AttachImageToPane { .. } => false,
+            SetComposerImageDragTarget(..) => false,
             #[cfg(target_os = "linux")]
             DismissWaylandCrashRecoveryBannerAndOpenLink => false,
             #[cfg(target_family = "wasm")]

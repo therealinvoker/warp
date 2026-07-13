@@ -454,25 +454,32 @@ impl MCPServersSettingsPageView {
         }
     }
 
-    /// Returns the Cursor config files to scan for the import flow: the global
-    /// `~/.cursor/mcp.json` plus the current project's `.cursor/mcp.json`, when
-    /// the active session is inside a detected repository.
-    fn cursor_config_scan_paths(&self, ctx: &mut ViewContext<Self>) -> Vec<PathBuf> {
-        let mut paths = Vec::new();
-        if let Some(home_config) = home_config_file_path(MCPProvider::Cursor) {
-            paths.push(home_config);
-        }
-        if let Some(project_config) = self.current_project_cursor_config_path(ctx) {
-            if !paths.contains(&project_config) {
-                paths.push(project_config);
+    /// Returns the `(provider, config path)` targets to scan for the import
+    /// flow: for every importable tool (all providers except Bang's own), the
+    /// global home config plus the current project's config when the active
+    /// session is inside a detected repository.
+    fn import_scan_targets(&self, ctx: &mut ViewContext<Self>) -> Vec<(MCPProvider, PathBuf)> {
+        let mut targets: Vec<(MCPProvider, PathBuf)> = Vec::new();
+        let project_root = self.current_project_repo_root(ctx);
+        for provider in MCPProvider::iter_importable() {
+            if let Some(home_config) = home_config_file_path(provider) {
+                if !targets.iter().any(|(_, path)| path == &home_config) {
+                    targets.push((provider, home_config));
+                }
+            }
+            if let Some(root) = &project_root {
+                let project_config = root.join(provider.project_config_path());
+                if !targets.iter().any(|(_, path)| path == &project_config) {
+                    targets.push((provider, project_config));
+                }
             }
         }
-        paths
+        targets
     }
 
-    /// Returns `<repo root>/.cursor/mcp.json` for the active session's working
-    /// directory, if the session is local and inside a detected repository.
-    fn current_project_cursor_config_path(&self, ctx: &mut ViewContext<Self>) -> Option<PathBuf> {
+    /// Returns the repo root for the active session's working directory, if the
+    /// session is local and inside a detected repository.
+    fn current_project_repo_root(&self, ctx: &mut ViewContext<Self>) -> Option<PathBuf> {
         let window_id = ctx.window_id();
         let workspace = ctx
             .views_of_type::<Workspace>(window_id)
@@ -484,19 +491,18 @@ impl MCPServersSettingsPageView {
                 .active_session_view(ctx)
         })?;
         let cwd = terminal.as_ref(ctx).active_session_path_if_local(ctx)?;
-        let repo_root = DetectedRepositories::as_ref(ctx)
+        DetectedRepositories::as_ref(ctx)
             .get_root_for_path(&LocalOrRemotePath::Local(cwd))
-            .and_then(|root| PathBuf::try_from(root).ok())?;
-        Some(repo_root.join(MCPProvider::Cursor.project_config_path()))
+            .and_then(|root| PathBuf::try_from(root).ok())
     }
 
     fn open_import_from_cursor_modal(&mut self, ctx: &mut ViewContext<Self>) {
-        let scan_paths = self.cursor_config_scan_paths(ctx);
+        let scan_targets = self.import_scan_targets(ctx);
         self.import_from_cursor_modal_state
             .view
             .update(ctx, |modal, ctx| {
                 modal.body().update(ctx, |body, ctx| {
-                    body.begin_scan(scan_paths, ctx);
+                    body.begin_scan(scan_targets, ctx);
                 });
             });
         self.import_from_cursor_modal_state.open();

@@ -138,6 +138,10 @@ const DEFAULT_TAB_SIZE: usize = 4;
 pub const ACCEPT_AUTOSUGGESTION_KEYBINDING_NAME: &str = "editor_view:insert_autosuggestion";
 pub const VOICE_LIMIT_HIT_TOAST_TEXT: &str = "You have hit the limit for Voice requests. Your limit will be refreshed as a part of your next cycle.";
 pub const VOICE_ERROR_TOAST_TEXT: &str = "An error occurred while processing your voice input.";
+/// Shown when the voice transcription service can't be reached (e.g. the
+/// backend doesn't have voice set up, or is overloaded/unreachable) — a
+/// friendlier, transient-sounding message than the generic error.
+pub const VOICE_OFFLINE_TOAST_TEXT: &str = "Bang voice is temporarily offline.";
 
 pub const MAX_IMAGES_PER_CONVERSATION: usize = 200;
 
@@ -1335,6 +1339,11 @@ pub enum PropagateAndNoOpEscapeKey {
 pub struct TextOptions {
     /// If font size is None, we use the settings monospace font size, otherwise we use the given one.
     pub font_size_override: Option<f32>,
+    /// Added to the resolved font size when `font_size_override` is `None`. Lets a view render its
+    /// editor a couple points larger/smaller than the monospace setting while still tracking it
+    /// (e.g. the agent composer keeps the input text at its original size after the terminal grid
+    /// font was reduced). Ignored when `font_size_override` is set.
+    pub font_size_delta: f32,
     /// Font family to use when rendering the editor. If `None`, the monospace font is used.
     pub font_family_override: Option<FamilyId>,
     /// Default font properties for editor text.
@@ -1735,6 +1744,37 @@ impl ImageContextOptions {
                 ..
             }
         )
+    }
+
+    /// Like [`is_enabled`], but ignores whether the current model supports
+    /// vision. The attach path uses this so an image can still be staged in the
+    /// composer for a non-vision model; the unsupported-model warning is instead
+    /// surfaced when the user submits the query.
+    pub fn is_enabled_ignoring_model_support(&self) -> bool {
+        match self {
+            ImageContextOptions::Enabled {
+                unsupported_model: _,
+                is_processing_attached_images,
+                num_images_attached,
+                num_images_in_conversation,
+            } => {
+                if *is_processing_attached_images {
+                    return false;
+                }
+
+                if *num_images_attached >= MAX_IMAGE_COUNT_FOR_QUERY {
+                    return false;
+                }
+
+                let total_images = *num_images_attached + *num_images_in_conversation;
+                if total_images >= MAX_IMAGES_PER_CONVERSATION {
+                    return false;
+                }
+
+                true
+            }
+            ImageContextOptions::Disabled => false,
+        }
     }
 }
 
@@ -5096,19 +5136,14 @@ impl EditorView {
         file_paths: Vec<String>,
         ctx: &mut ViewContext<Self>,
     ) {
-        if !self.image_context_options.is_enabled() {
-            if self.image_context_options.is_unsupported_model() {
-                let window_id = ctx.window_id();
-                ToastStack::handle(ctx).update(ctx, |toast_stack, ctx| {
-                    toast_stack.add_ephemeral_toast(
-                        DismissibleToast::error(
-                            "The selected model does not support images as context".to_owned(),
-                        ),
-                        window_id,
-                        ctx,
-                    );
-                });
-            }
+        // Allow staging the image even when the model lacks vision support; the
+        // unsupported-model warning is deferred to submit time. Still bail when
+        // image context is entirely unavailable (feature off / not agent mode)
+        // or when per-query/conversation limits or in-flight processing block it.
+        if !self
+            .image_context_options
+            .is_enabled_ignoring_model_support()
+        {
             return;
         }
 
@@ -5211,19 +5246,13 @@ impl EditorView {
         pending_images: Vec<AttachedImage>,
         ctx: &mut ViewContext<Self>,
     ) {
-        if !self.image_context_options.is_enabled() {
-            if self.image_context_options.is_unsupported_model() {
-                let window_id = ctx.window_id();
-                ToastStack::handle(ctx).update(ctx, |toast_stack, ctx| {
-                    toast_stack.add_ephemeral_toast(
-                        DismissibleToast::error(
-                            "The selected model does not support images as context".to_owned(),
-                        ),
-                        window_id,
-                        ctx,
-                    );
-                });
-            }
+        // Stage images regardless of vision support; the unsupported-model
+        // warning is deferred to submit time. Still bail when image context is
+        // entirely unavailable or when limits/processing block new attachments.
+        if !self
+            .image_context_options
+            .is_enabled_ignoring_model_support()
+        {
             return;
         }
 
@@ -7334,11 +7363,31 @@ impl EditorView {
         self.editor_model.as_ref(ctx).max_point(ctx)
     }
 
+    /// Number of on-screen (soft-wrapped) display rows from the most recent
+    /// layout. Unlike `max_point().row()` — which counts logical buffer rows and
+    /// so treats a single long line that wraps (with no explicit newline) as one
+    /// row — this reflects the true visual line count including soft wrapping.
+    /// Returns 1 before the first layout has run (the `SoftWrapState` is empty
+    /// until then), and is a frame behind when text first wraps (it reads the
+    /// previous frame's layout), which re-renders on the next keystroke.
+    pub fn displayed_line_count(&self, ctx: &AppContext) -> u32 {
+        self.model()
+            .as_ref(ctx)
+            .display_map(ctx)
+            .soft_wrap_state()
+            .read(|frame_layouts| {
+                frame_layouts
+                    .map(|layouts| layouts.num_lines() as u32)
+                    .unwrap_or(1)
+            })
+            .max(1)
+    }
+
     /// Font size of this editor.
     pub fn font_size(&self, appearance: &Appearance) -> f32 {
         self.text_options
             .font_size_override
-            .unwrap_or_else(|| appearance.monospace_font_size())
+            .unwrap_or_else(|| appearance.monospace_font_size() + self.text_options.font_size_delta)
     }
 
     /// Font family of this editor.

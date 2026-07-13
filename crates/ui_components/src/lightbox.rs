@@ -64,6 +64,8 @@ pub struct Lightbox {
     close_button: button::Button,
     prev_button: button::Button,
     next_button: button::Button,
+    copy_button: button::Button,
+    download_button: button::Button,
 }
 
 pub struct Params<'a> {
@@ -101,6 +103,19 @@ pub struct Options {
     /// Handler to invoke when the user navigates between images.
     /// If `None`, navigation buttons are not shown.
     pub on_navigate: Option<NavigateHandler>,
+
+    /// Handler to invoke when the user copies the current image.
+    /// If `None`, the "Copy Image" button is not shown.
+    pub on_copy: Option<DismissHandler>,
+
+    /// Handler to invoke when the user downloads the current image.
+    /// If `None`, the "Download Image" button is not shown.
+    pub on_download: Option<DismissHandler>,
+
+    /// When true, the copy control renders in its "Copied!" confirmation state
+    /// (check icon + "Copied!" label) instead of the default "Copy Image". The
+    /// caller drives this flag on/off around a copy to flash feedback.
+    pub copied: bool,
 }
 
 impl crate::Options for Options {
@@ -108,6 +123,9 @@ impl crate::Options for Options {
         Self {
             dismiss_keystroke: None,
             on_navigate: None,
+            on_copy: None,
+            on_download: None,
+            copied: false,
         }
     }
 }
@@ -120,12 +138,69 @@ impl Component for Lightbox {
         let on_dismiss = params.on_dismiss;
         let image_count = params.images.len();
         let current_index = params.current_index;
+        // Whether to render the copy control in its transient "Copied!" state.
+        let copied = params.options.copied;
 
         // Extract current image data via direct indexing.
         let current_image = params.images.get(current_index);
         let current_source = current_image.map(|img| &img.source);
         let current_description = current_image.and_then(|img| img.description.clone());
         let text_size = lightbox_text_size(appearance);
+
+        // Copy and Download controls, rendered in the footer below the image.
+        // They are only shown when the caller provides handlers and there is a
+        // resolved image to act on.
+        let has_current_image =
+            matches!(current_source, Some(LightboxImageSource::Resolved { .. }));
+
+        let copy_button = params
+            .options
+            .on_copy
+            .filter(|_| has_current_image)
+            .map(|on_copy| {
+                self.copy_button.render(
+                    appearance,
+                    button::Params {
+                        content: if copied {
+                            button::Content::IconAndLabel(Icon::Check, "Copied!".into())
+                        } else {
+                            button::Content::IconAndLabel(Icon::Copy, "Copy Image".into())
+                        },
+                        theme: &ButtonTheme,
+                        options: button::Options {
+                            size: button::Size::Small,
+                            on_click: Some(Box::new(move |ctx, app, _| {
+                                on_copy(ctx, app);
+                            })),
+                            ..button::Options::default(appearance)
+                        },
+                    },
+                )
+            });
+
+        let download_button = params
+            .options
+            .on_download
+            .filter(|_| has_current_image)
+            .map(|on_download| {
+                self.download_button.render(
+                    appearance,
+                    button::Params {
+                        content: button::Content::IconAndLabel(
+                            Icon::Download,
+                            "Download Image".into(),
+                        ),
+                        theme: &ButtonTheme,
+                        options: button::Options {
+                            size: button::Size::Small,
+                            on_click: Some(Box::new(move |ctx, app, _| {
+                                on_download(ctx, app);
+                            })),
+                            ..button::Options::default(appearance)
+                        },
+                    },
+                )
+            });
 
         // Close button in the top-right corner.
         let close_button = self.close_button.render(
@@ -175,25 +250,46 @@ impl Component for Lightbox {
                 _ => loading_element(appearance),
             };
 
-        // Show the description only when the image is fully loaded (native size known).
-        let content_with_description = if let (Some(description), Some(_)) =
-            (current_description, params.current_image_native_size)
-        {
-            let description_text = Text::new(description, appearance.ui_font_family(), text_size)
-                .with_color(ColorU::white())
-                .finish();
+        // Footer shown below the image once it is fully loaded (native size
+        // known): an optional description and the copy/download action buttons.
+        let image_loaded = params.current_image_native_size.is_some();
+        let mut footer_children: Vec<Box<dyn Element>> = Vec::new();
+        if image_loaded {
+            if let Some(description) = current_description {
+                footer_children.push(
+                    Text::new(description, appearance.ui_font_family(), text_size)
+                        .with_color(ColorU::white())
+                        .finish(),
+                );
+            }
+            if copy_button.is_some() || download_button.is_some() {
+                let mut actions = Flex::row()
+                    .with_cross_axis_alignment(CrossAxisAlignment::Center)
+                    .with_spacing(8.);
+                if let Some(copy_button) = copy_button {
+                    actions = actions.with_child(copy_button);
+                }
+                if let Some(download_button) = download_button {
+                    actions = actions.with_child(download_button);
+                }
+                footer_children.push(actions.finish());
+            }
+        }
 
-            Flex::column()
+        let content_with_footer = if footer_children.is_empty() {
+            central_content
+        } else {
+            let mut column = Flex::column()
                 .with_cross_axis_alignment(CrossAxisAlignment::Center)
                 .with_spacing(DESCRIPTION_SPACING)
-                .with_child(Shrinkable::new(1.0, central_content).finish())
-                .with_child(description_text)
-                .finish()
-        } else {
-            central_content
+                .with_child(Shrinkable::new(1.0, central_content).finish());
+            for child in footer_children {
+                column = column.with_child(child);
+            }
+            column.finish()
         };
 
-        let centered_content = Align::new(content_with_description).finish();
+        let centered_content = Align::new(content_with_footer).finish();
 
         let scrim = Container::new(
             Dismiss::new(centered_content)
@@ -205,7 +301,8 @@ impl Component for Lightbox {
         .with_uniform_padding(SCRIM_PADDING)
         .finish();
 
-        // Stack the scrim, close button, and optional navigation arrows.
+        // Stack the scrim, close button, and optional navigation arrows. The
+        // copy/download controls live in the footer below the image.
         let mut content = Stack::new().with_child(scrim);
         content.add_positioned_child(
             close_button,

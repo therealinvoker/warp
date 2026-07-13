@@ -155,8 +155,9 @@ pub struct UpsertGithubAutomationOutcome {
 // ── Conversions from generated cynic fragment types ──────────────────────────
 
 mod convert {
-    use warp_graphql::mutations::set_github_provider_key as m_key;
-    use warp_graphql::mutations::upsert_github_automation as m;
+    use warp_graphql::mutations::{
+        set_github_provider_key as m_key, upsert_github_automation as m,
+    };
     use warp_graphql::queries::list_github_automations as q;
 
     use super::*;

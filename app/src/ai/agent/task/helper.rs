@@ -129,6 +129,7 @@ impl ToolExt for api::message::tool_call::Tool {
             Tool::SuggestNewConversation(_) => "suggest_new_conversation",
             Tool::SuggestPrompt(_) => "suggest_prompt",
             Tool::OpenCodeReview(_) => "open_code_review",
+            Tool::OpenBrowserPreview(_) => "open_browser_preview",
             Tool::InitProject(_) => "init_project",
             Tool::StartAgent(_) => "start_agent",
             // Keep the logical tool name stable across the v1/v2 schema split so analytics,

@@ -88,17 +88,18 @@ use crate::editor::{
 use crate::modal::{Modal, ModalEvent, ModalViewState};
 use crate::settings::{
     AIAutoDetectionEnabled, AICommandDenylist, AISettingsChangedEvent,
-    AgentModeCodingPermissionsType, AgentModeCommandExecutionDenylist,
-    AgentModeCommandExecutionPredicate, AgentModeQuerySuggestionsEnabled, AwsBedrockAutoLogin,
-    AwsBedrockCredentialsEnabled, CanUseWarpCreditsForFallback, CodeSettings,
-    CodebaseContextEnabled, FileBasedMcpEnabled, GitOperationsAutogenEnabled,
-    IncludeAgentCommandsInHistory, InputSettings, IntelligentAutosuggestionsEnabled,
-    LongRunningCommandSubmissionMode, MemoryEnabled, NLDInTerminalEnabled,
-    NaturalLanguageAutosuggestionsEnabled, OrchestrationMessageDisplayMode, PromptSubmissionMode,
-    RuleSuggestionsEnabled, SharedBlockTitleGenerationEnabled, ShouldRenderCLIAgentToolbar,
+    AgentModeAutoApproveAllActions, AgentModeCodingPermissionsType,
+    AgentModeCommandExecutionDenylist, AgentModeCommandExecutionPredicate,
+    AgentModeQuerySuggestionsEnabled, AwsBedrockAutoLogin, AwsBedrockCredentialsEnabled,
+    CanUseWarpCreditsForFallback, CodeSettings, CodebaseContextEnabled, FileBasedMcpEnabled,
+    GitOperationsAutogenEnabled, IncludeAgentCommandsInHistory, InputSettings,
+    IntelligentAutosuggestionsEnabled, LongRunningCommandSubmissionMode, MemoryEnabled,
+    NLDInTerminalEnabled, NaturalLanguageAutosuggestionsEnabled, OrchestrationMessageDisplayMode,
+    PromptSubmissionMode, RuleSuggestionsEnabled, ScreenshotAutoAttachEnabled,
+    SharedBlockTitleGenerationEnabled, ShouldRenderCLIAgentToolbar,
     ShouldRenderUseAgentToolbarForUserCommands, ShouldShowOzUpdatesInZeroState, ShowAgentTips,
     ShowConversationHistory, ShowHintText, ThinkingDisplayMode, VoiceInputEnabled,
-    WarpDriveContextEnabled,
+    VoiceOverlayAutoSubmit, WarpDriveContextEnabled,
 };
 use crate::terminal::session_settings::{SessionSettings, SessionSettingsChangedEvent};
 use crate::terminal::CLIAgent;
@@ -487,6 +488,28 @@ pub fn init_actions_from_parent_view<T: Action + Clone>(
     ToggleSettingActionPair::add_toggle_setting_action_pairs_as_bindings(
         vec![ToggleSettingActionPair::custom(
             SettingActionPairDescriptions::new(
+                "Enable auto-approve for all agent actions",
+                "Disable auto-approve for all agent actions",
+            ),
+            builder(SettingsAction::AI(
+                AISettingsPageAction::ToggleAutoApproveAllActions,
+            )),
+            SettingActionPairContexts::new(
+                context.clone()
+                    & id!(flags::IS_ANY_AI_ENABLED)
+                    & !id!(flags::AGENT_AUTO_APPROVE_ALL_ACTIONS_FLAG),
+                context.clone()
+                    & id!(flags::IS_ANY_AI_ENABLED)
+                    & id!(flags::AGENT_AUTO_APPROVE_ALL_ACTIONS_FLAG),
+            ),
+            None,
+        )
+        .with_group(bindings::BindingGroup::WarpAi)],
+        app,
+    );
+    ToggleSettingActionPair::add_toggle_setting_action_pairs_as_bindings(
+        vec![ToggleSettingActionPair::custom(
+            SettingActionPairDescriptions::new(
                 "Show \"Use Agent\" footer",
                 "Hide \"Use Agent\" footer",
             ),
@@ -524,6 +547,16 @@ pub fn init_actions_from_parent_view<T: Action + Clone>(
                 flags::SHOW_CONVERSATION_HISTORY,
             )
             .with_group(bindings::BindingGroup::WarpAi),
+            ToggleSettingActionPair::new(
+                "auto-attach screenshots to agent input",
+                builder(SettingsAction::AI(
+                    AISettingsPageAction::ToggleScreenshotAutoAttach,
+                )),
+                &(context.clone() & id!(flags::IS_ANY_AI_ENABLED)),
+                flags::SCREENSHOT_AUTO_ATTACH_FLAG,
+            )
+            .with_group(bindings::BindingGroup::WarpAi)
+            .with_enabled(|| FeatureFlag::ScreenshotAutoAttach.is_enabled()),
             ToggleSettingActionPair::new(
                 "model picker in prompt",
                 builder(SettingsAction::AI(
@@ -568,7 +601,7 @@ pub fn init_actions_from_parent_view<T: Action + Clone>(
                 FeatureFlag::AIRules.is_enabled() && FeatureFlag::SuggestedRules.is_enabled()
             }),
             ToggleSettingActionPair::new(
-                "Warp Drive as agent context",
+                "Bang Drive as agent context",
                 builder(SettingsAction::AI(
                     AISettingsPageAction::ToggleWarpDriveContext,
                 )),
@@ -578,7 +611,7 @@ pub fn init_actions_from_parent_view<T: Action + Clone>(
             .with_group(bindings::BindingGroup::WarpAi)
             .with_enabled(|| FeatureFlag::AIRules.is_enabled()),
             ToggleSettingActionPair::new(
-                "Auto-spawn servers from third-party agents",
+                "Auto-import",
                 builder(SettingsAction::AI(AISettingsPageAction::ToggleFileBasedMcp)),
                 &(context.clone() & id!(flags::IS_ANY_AI_ENABLED)),
                 flags::FILE_BASED_MCP_FLAG,
@@ -3612,6 +3645,7 @@ pub enum AISettingsPageAction {
     ToggleCLIAgentToolbar,
     ToggleUseAgentToolbar,
     ToggleVoiceInput,
+    ToggleVoiceOverlayAutoSubmit,
     ToggleCanUseWarpCreditsForFallback,
     HyperlinkClick(HyperlinkUrl),
     ToggleCodebaseContext,
@@ -3664,6 +3698,7 @@ pub enum AISettingsPageAction {
     ToggleCloudAgentComputerUse,
     ToggleFileBasedMcp,
     ToggleIncludeAgentCommandsInHistory,
+    ToggleAutoApproveAllActions,
     ToggleAgentAttribution,
 
     // Custom model routers
@@ -3682,6 +3717,7 @@ pub enum AISettingsPageAction {
     ToggleAmpersandHandoff,
     ToggleAutoHandoffOnSleep,
     ToggleShowConversationHistory,
+    ToggleScreenshotAutoAttach,
     ToggleAutoToggleRichInput,
     ToggleAutoOpenRichInputOnCLIAgentStart,
     ToggleAutoDismissRichInputAfterSubmit,
@@ -4026,6 +4062,14 @@ impl TypedActionView for AISettingsPageView {
                         log::warn!("Failed to set value for Voice Input: {e:?}");
                     }
                 }
+                ctx.notify();
+            }
+            AISettingsPageAction::ToggleVoiceOverlayAutoSubmit => {
+                AISettings::handle(ctx).update(ctx, |settings, ctx| {
+                    report_if_error!(settings
+                        .voice_overlay_auto_submit
+                        .toggle_and_save_value(ctx));
+                });
                 ctx.notify();
             }
             AISettingsPageAction::ToggleCanUseWarpCreditsForFallback => {
@@ -4427,6 +4471,14 @@ impl TypedActionView for AISettingsPageView {
                 });
                 ctx.notify();
             }
+            AISettingsPageAction::ToggleAutoApproveAllActions => {
+                AISettings::handle(ctx).update(ctx, |settings, ctx| {
+                    report_if_error!(settings
+                        .agent_mode_auto_approve_all_actions
+                        .toggle_and_save_value(ctx));
+                });
+                ctx.notify();
+            }
             #[cfg(feature = "local_fs")]
             AISettingsPageAction::SetConversationLayout(layout) => {
                 crate::util::file::external_editor::EditorSettings::handle(ctx).update(
@@ -4450,6 +4502,14 @@ impl TypedActionView for AISettingsPageView {
                 AISettings::handle(ctx).update(ctx, |settings, ctx| {
                     report_if_error!(settings
                         .show_conversation_history
+                        .toggle_and_save_value(ctx));
+                });
+                ctx.notify();
+            }
+            AISettingsPageAction::ToggleScreenshotAutoAttach => {
+                AISettings::handle(ctx).update(ctx, |settings, ctx| {
+                    report_if_error!(settings
+                        .screenshot_auto_attach_enabled
                         .toggle_and_save_value(ctx));
                 });
                 ctx.notify();
@@ -6057,7 +6117,7 @@ impl AgentsWidget {
         );
         render_ai_list(
             "Command denylist",
-            "Regular expressions to match commands that the Warp Agent should always ask permission to execute.",
+            "Regular expressions to match commands that the Bang Agent should always ask permission to execute.",
             list,
             view,
             ai_settings,
@@ -6092,7 +6152,7 @@ impl AgentsWidget {
 
         render_ai_list(
             "Command allowlist",
-            "Regular expressions to match commands that can be automatically executed by the Warp Agent.",
+            "Regular expressions to match commands that can be automatically executed by the Bang Agent.",
             list,
             view,
             ai_settings,
@@ -6194,7 +6254,7 @@ impl AgentsWidget {
             appearance,
             "Base model",
             Some(
-                "This model serves as the primary engine behind the Warp Agent. It powers most interactions and invokes other models for tasks like planning or code generation when necessary. Warp may automatically switch to alternate models based on model availability or for auxiliary tasks such as conversation summarization.",
+                "This model serves as the primary engine behind the Bang Agent. It powers most interactions and invokes other models for tasks like planning or code generation when necessary. Bang may automatically switch to alternate models based on model availability or for auxiliary tasks such as conversation summarization.",
             ),
             Some(show_in_prompt_checkbox),
             LocalOnlyIconState::Hidden,
@@ -6225,7 +6285,7 @@ impl AgentsWidget {
 
         let codebase_context_description = vec![
             FormattedTextFragment::plain_text(
-                "Allow the Warp Agent to generate an outline of your codebase that can be used for context. No code is ever stored on our servers. ",
+                "Allow the Bang Agent to generate an outline of your codebase that can be used for context. No code is ever stored on our servers. ",
             ),
             FormattedTextFragment::hyperlink(
                 "Learn more",
@@ -6298,7 +6358,7 @@ impl AgentsWidget {
         let subtext = {
             let subtext_fragments = vec![
                 FormattedTextFragment::plain_text(
-                    "You haven't added any MCP servers yet. Once you do, you'll be able to control how much autonomy the Warp Agent has when interacting with them. ",
+                    "You haven't added any MCP servers yet. Once you do, you'll be able to control how much autonomy the Bang Agent has when interacting with them. ",
                 ),
                 FormattedTextFragment::hyperlink_action(
                     "Add a server",
@@ -6379,7 +6439,7 @@ impl AgentsWidget {
         {
             let allowlist = self.render_mcp_list(
                 "MCP allowlist",
-                "Allow the Warp Agent to call these MCP servers.",
+                "Allow the Bang Agent to call these MCP servers.",
                 &view.mcp_allowlist_dropdown,
                 BlocklistAIPermissions::as_ref(app).get_mcp_allowlist(app, None),
                 view.mcp_allowlist_mouse_state_handles.clone(),
@@ -6396,7 +6456,7 @@ impl AgentsWidget {
         {
             let denylist = self.render_mcp_list(
                 "MCP denylist",
-                "The Warp Agent will always ask for permission before calling any MCP servers on this list.",
+                "The Bang Agent will always ask for permission before calling any MCP servers on this list.",
                 &view.mcp_denylist_dropdown,
                 BlocklistAIPermissions::as_ref(app).get_mcp_denylist(app, None),
                 view.mcp_denylist_mouse_state_handles.clone(),
@@ -6486,6 +6546,7 @@ struct AIInputWidget {
     show_input_hint_toggle: SwitchStateHandle,
     show_agent_tips_toggle: SwitchStateHandle,
     include_agent_commands_in_history_toggle: SwitchStateHandle,
+    auto_approve_all_actions_toggle: SwitchStateHandle,
 }
 
 impl SettingsWidget for AIInputWidget {
@@ -6532,9 +6593,20 @@ impl SettingsWidget for AIInputWidget {
             app,
         );
 
+        let auto_approve_all_actions = render_ai_setting_toggle::<AgentModeAutoApproveAllActions>(
+            "Auto-approve all agent actions (no confirmation prompts)",
+            AISettingsPageAction::ToggleAutoApproveAllActions,
+            *ai_settings.agent_mode_auto_approve_all_actions,
+            is_any_ai_enabled,
+            self.auto_approve_all_actions_toggle.clone(),
+            &view.local_only_icon_tooltip_states,
+            app,
+        );
+
         let mut widget_children = vec![
             render_separator(appearance),
             input_header,
+            auto_approve_all_actions,
             natural_language_detection_section,
             show_input_hint_text,
         ];
@@ -6816,7 +6888,7 @@ impl SettingsWidget for MCPServersWidget {
 
         let mcp_description = vec![
             FormattedTextFragment::plain_text(
-                "Add MCP servers to extend the Warp Agent's capabilities. \
+                "Add MCP servers to extend the Bang Agent's capabilities. \
             MCP servers expose data sources or tools to agents through a standardized interface, essentially acting like plugins. ",
             ),
             FormattedTextFragment::hyperlink(
@@ -6849,7 +6921,7 @@ impl SettingsWidget for MCPServersWidget {
             Some(
                 Flex::column()
                     .with_child(render_ai_setting_toggle::<FileBasedMcpEnabled>(
-                        "Auto-spawn servers from third-party agents",
+                        "Auto-import",
                         AISettingsPageAction::ToggleFileBasedMcp,
                         *ai_settings.file_based_mcp_enabled,
                         is_any_ai_enabled,
@@ -6948,7 +7020,7 @@ impl AIFactWidget {
 
         let rules_description = vec![
             FormattedTextFragment::plain_text(
-                "Rules help the Warp Agent follow your conventions, whether for codebases or specific workflows. ",
+                "Rules help the Bang Agent follow your conventions, whether for codebases or specific workflows. ",
             ),
             FormattedTextFragment::hyperlink(
                 "Learn more",
@@ -7016,7 +7088,7 @@ impl AIFactWidget {
         app: &warpui::AppContext,
     ) -> Box<dyn Element> {
         let toggle = render_ai_setting_toggle::<WarpDriveContextEnabled>(
-            "Warp Drive as agent context",
+            "Bang Drive as agent context",
             AISettingsPageAction::ToggleWarpDriveContext,
             *ai_settings.warp_drive_context_enabled,
             ai_settings.is_any_ai_enabled(app),
@@ -7026,7 +7098,7 @@ impl AIFactWidget {
         );
 
         let description = render_ai_setting_description(
-            "The Warp Agent can leverage your Warp Drive Contents to tailor responses to your personal and team developer workflows and environments. This includes any Workflows, Notebooks, and Environment Variables.",
+            "The Bang Agent can leverage your Bang Drive Contents to tailor responses to your personal and team developer workflows and environments. This includes any Workflows, Notebooks, and Environment Variables.",
             ai_settings.is_any_ai_enabled(app),
             app,
         );
@@ -7093,6 +7165,7 @@ impl SettingsWidget for AIFactWidget {
 #[derive(Default)]
 struct VoiceWidget {
     voice_input_toggle: SwitchStateHandle,
+    voice_overlay_auto_submit_toggle: SwitchStateHandle,
     wispr_highlight_index: HighlightedHyperlink,
 }
 
@@ -7117,7 +7190,7 @@ impl VoiceWidget {
 
         let voice_input_description_text_fragments = vec![
             FormattedTextFragment::plain_text(
-                "Voice input allows you to control Warp by speaking directly to your terminal (powered by ",
+                "Voice input allows you to control Bang by speaking directly to your terminal (powered by ",
             ),
             FormattedTextFragment::hyperlink("Wispr Flow", WISPR_FLOW_URL),
             FormattedTextFragment::plain_text(")."),
@@ -7145,6 +7218,17 @@ impl VoiceWidget {
                 .with_margin_right(styles::TOGGLE_WIDTH_MARGIN)
                 .finish(),
         );
+
+        // Hands-free auto-submit for the voice overlay.
+        column.add_child(render_ai_setting_toggle::<VoiceOverlayAutoSubmit>(
+            "Auto-submit in voice overlay",
+            AISettingsPageAction::ToggleVoiceOverlayAutoSubmit,
+            *ai_settings.voice_overlay_auto_submit,
+            is_toggleable,
+            self.voice_overlay_auto_submit_toggle.clone(),
+            &view.local_only_icon_tooltip_states,
+            app,
+        ));
 
         if ai_settings.is_voice_input_enabled(app) {
             column.add_child(render_dropdown_item(
@@ -7206,6 +7290,7 @@ struct OtherAIWidget {
     show_oz_updates_in_zero_state_toggle: SwitchStateHandle,
     use_agent_footer_toggle: SwitchStateHandle,
     show_conversation_history_toggle: SwitchStateHandle,
+    screenshot_auto_attach_toggle: SwitchStateHandle,
 }
 
 impl OtherAIWidget {
@@ -7375,6 +7460,18 @@ impl SettingsWidget for OtherAIWidget {
             app,
         ));
 
+        if FeatureFlag::ScreenshotAutoAttach.is_enabled() {
+            column.add_child(render_ai_setting_toggle::<ScreenshotAutoAttachEnabled>(
+                "Auto-attach screenshots to agent input",
+                AISettingsPageAction::ToggleScreenshotAutoAttach,
+                *ai_settings.screenshot_auto_attach_enabled,
+                is_toggleable,
+                self.screenshot_auto_attach_toggle.clone(),
+                &view.local_only_icon_tooltip_states,
+                app,
+            ));
+        }
+
         column.add_child(render_dropdown_item(
             appearance,
             "Agent thinking display",
@@ -7534,7 +7631,7 @@ impl SettingsWidget for CLIAgentWidget {
                         on_click_action: None,
                         secondary_text: None,
                         tooltip_override_text: Some(
-                            "Requires the Warp plugin for your coding agent".to_owned(),
+                            "Requires the Bang plugin for your coding agent".to_owned(),
                         ),
                     }),
                     LocalOnlyIconState::for_setting(
@@ -7949,7 +8046,7 @@ impl SettingsWidget for CloudAgentComputerUseWidget {
             )
             .with_child(toggle_row)
             .with_child(render_ai_setting_description(
-                "Enable computer use in cloud agent conversations started from the Warp app.",
+                "Enable computer use in cloud agent conversations started from the Bang app.",
                 !is_disabled,
                 app,
             ))
@@ -8082,7 +8179,7 @@ impl SettingsWidget for CloudHandoffWidget {
                 );
                 column.add_child(auto_handoff_on_sleep_row);
                 column.add_child(render_ai_setting_description(
-                    "When macOS is about to sleep, automatically moves the most recently focused running local Warp Agent conversation to Cloud Mode so it can keep working.",
+                    "When macOS is about to sleep, automatically moves the most recently focused running local Bang Agent conversation to Cloud Mode so it can keep working.",
                     true,
                     app,
                 ));
@@ -8435,7 +8532,7 @@ impl ApiKeysWidget {
         let appearance = Appearance::as_ref(app);
         let text_fragments = vec![
             FormattedTextFragment::plain_text(
-                "Use your own API keys from model providers for Warp Agent. You can also add custom endpoints to use third-party models. Custom endpoints must support the OpenAI-compatible Chat Completions API. API keys are stored only on your device, never on Warp's servers. They're used to make requests to your chosen model provider. Using auto models or models from providers you have not provided API keys for will consume Bang credits. ",
+                "Use your own API keys from model providers for Bang Agent. You can also add custom endpoints to use third-party models. Custom endpoints must support the OpenAI-compatible Chat Completions API. API keys are stored only on your device, never on Bang's servers. They're used to make requests to your chosen model provider. Using auto models or models from providers you have not provided API keys for will consume Bang credits. ",
             ),
             FormattedTextFragment::hyperlink("Learn more", CUSTOM_INFERENCE_LEARN_MORE_URL),
         ];
@@ -8475,9 +8572,9 @@ impl ApiKeysWidget {
             FormattedTextFragment::plain_text(
                 "By using BYOK or custom endpoints, you agree to use them only as permitted by ",
             ),
-            FormattedTextFragment::hyperlink("Warp's Terms of Service", CUSTOM_INFERENCE_TERMS_URL),
+            FormattedTextFragment::hyperlink("Bang's Terms of Service", CUSTOM_INFERENCE_TERMS_URL),
             FormattedTextFragment::plain_text(
-                ". BYOK and custom endpoints are intended for individual use and small teams. Companies or organizations with more than 10 employees should use Warp Business or Enterprise.",
+                ". BYOK and custom endpoints are intended for individual use and small teams. Companies or organizations with more than 10 employees should use Bang Business or Enterprise.",
             ),
         ])]);
         let tooltip_background = appearance.theme().tooltip_background();
@@ -8660,7 +8757,7 @@ impl ApiKeysWidget {
 
         let description = Container::new(
             Text::new(
-                "Connect your SuperGrok subscription to use Grok models in the Warp Agent through your xAI account.",
+                "Connect your SuperGrok subscription to use Grok models in the Bang Agent through your xAI account.",
                 appearance.ui_font_family(),
                 CONTENT_FONT_SIZE,
             )
@@ -8771,7 +8868,7 @@ impl ApiKeysWidget {
         );
 
         let description = render_ai_setting_description(
-            "When enabled, agent requests may be routed to one of Warp's provided models in the event of an error. Warp will prioritize using your API keys over your Bang credits.",
+            "When enabled, agent requests may be routed to one of Bang's provided models in the event of an error. Bang will prioritize using your API keys over your Bang credits.",
             ai_settings.is_any_ai_enabled(app),
             app,
         );
@@ -9227,9 +9324,9 @@ impl AwsBedrockWidget {
         let are_credentials_enabled = user_workspaces.is_aws_bedrock_credentials_enabled(app);
         let is_usage_enabled = is_section_enabled && are_credentials_enabled;
         let toggle_description = if is_admin_enforced {
-            "Warp loads and sends local AWS CLI credentials for Bedrock-supported models. This setting is managed by your organization.".to_string()
+            "Bang loads and sends local AWS CLI credentials for Bedrock-supported models. This setting is managed by your organization.".to_string()
         } else {
-            "Warp loads and sends local AWS CLI credentials for Bedrock-supported models."
+            "Bang loads and sends local AWS CLI credentials for Bedrock-supported models."
                 .to_string()
         };
 

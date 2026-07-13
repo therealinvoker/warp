@@ -156,7 +156,7 @@ pub(super) fn wrap_input_with_terminal_padding_and_focus_handler(
 }
 
 /// Shared corner radius (px) for the floating input box.
-pub(super) const FLOATING_INPUT_CORNER_RADIUS: f32 = 8.;
+pub(super) const FLOATING_INPUT_CORNER_RADIUS: f32 = 12.;
 /// Shared edge margin (px) so the floating input box sits off the surrounding edges.
 pub(super) const FLOATING_INPUT_MARGIN: f32 = 6.;
 

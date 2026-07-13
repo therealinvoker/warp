@@ -15,8 +15,7 @@ fn test_from_user_input_extension_id() {
 
 #[test]
 fn test_from_user_input_url() {
-    let plugin =
-        MarketplacePlugin::from_user_input("https://example.com/plugins/my-plugin.vsix");
+    let plugin = MarketplacePlugin::from_user_input("https://example.com/plugins/my-plugin.vsix");
     assert_eq!(plugin.name, "my-plugin.vsix");
     assert_eq!(
         plugin.source,

@@ -84,10 +84,7 @@ use crate::terminal::cli_agent_sessions::{
     CLIAgentInputState, CLIAgentSessionsModel, CLIAgentSessionsModelEvent,
 };
 use crate::terminal::input::models::InlineModelSelectorTab;
-use crate::terminal::input::{
-    render_session_mode_segmented_control, HandoffComposeState, MenuPositioningProvider,
-    SessionModeSegment, SessionModeSegmentMouseStates,
-};
+use crate::terminal::input::{HandoffComposeState, MenuPositioningProvider};
 #[cfg(not(target_family = "wasm"))]
 use crate::terminal::local_shell::LocalShellState;
 use crate::terminal::profile_model_selector::{ProfileModelSelector, ProfileModelSelectorEvent};
@@ -197,6 +194,9 @@ pub struct AgentInputFooter {
     terminal_view_id: EntityId,
     #[cfg_attr(not(feature = "voice_input"), allow(unused))]
     mic_button: ViewHandle<ActionButton>,
+    /// Launches the floating voice + annotation overlay. Shown only when
+    /// `FeatureFlag::VoiceOverlay` is enabled (see render paths).
+    lightning_button: ViewHandle<ActionButton>,
     nld_button: ViewHandle<ActionButton>,
     file_button: ViewHandle<ActionButton>,
     start_remote_control_button: ViewHandle<ActionButton>,
@@ -263,10 +263,6 @@ pub struct AgentInputFooter {
     /// yellow notification dot on the context-window chip when the
     /// `PromptCacheExpiryWarning` flag is enabled.
     prompt_cache_expired: bool,
-
-    /// Mouse state handles for the leftmost session-mode segmented control
-    /// ("Agent | Cloud Agent | Terminal") rendered at the start of the footer's left row.
-    session_mode_mouse_states: SessionModeSegmentMouseStates,
 }
 
 impl AgentInputFooter {
@@ -359,13 +355,26 @@ impl AgentInputFooter {
         }
 
         let file_button = ctx.add_typed_action_view(|_ctx| {
-            ActionButton::new("", AgentInputButtonTheme)
+            ActionButton::new("", PlusButtonTheme)
                 .with_icon(Icon::Plus)
                 .with_tooltip("Attach file")
                 .with_size(button_size)
+                // Icon-only buttons are square; a 50% radius renders a full circle.
+                .with_corner_radius(CornerRadius::with_all(Radius::Percentage(50.)))
                 .with_tooltip_alignment(TooltipAlignment::Left)
                 .on_click(|ctx| {
                     ctx.dispatch_typed_action(AgentInputFooterAction::SelectFile);
+                })
+        });
+
+        let lightning_button = ctx.add_typed_action_view(|_ctx| {
+            ActionButton::new("", GhostIconButtonTheme)
+                .with_icon(Icon::Lightning)
+                .with_tooltip("Voice + annotation overlay")
+                .with_size(button_size)
+                .with_tooltip_alignment(TooltipAlignment::Left)
+                .on_click(|ctx| {
+                    ctx.dispatch_typed_action(AgentInputFooterAction::ToggleOverlay);
                 })
         });
 
@@ -847,6 +856,7 @@ impl AgentInputFooter {
             ambient_agent_view_model,
             nld_button,
             mic_button,
+            lightning_button,
             file_button,
             file_explorer_button,
             rich_input_button,
@@ -881,7 +891,6 @@ impl AgentInputFooter {
             harness_selector: None,
             prompt_cache_expiry_timer_handle: None,
             prompt_cache_expired: false,
-            session_mode_mouse_states: Default::default(),
         };
         me.sync_fast_forward_button(ctx);
         me.sync_remote_control_button(ctx);
@@ -952,18 +961,10 @@ impl AgentInputFooter {
     }
 
     fn render_cloud_mode_v2_footer(&self, app: &AppContext) -> Box<dyn Element> {
-        let appearance = Appearance::as_ref(app);
-
         let mut left = Flex::row()
             .with_main_axis_size(MainAxisSize::Min)
             .with_cross_axis_alignment(CrossAxisAlignment::Center)
             .with_spacing(CLOUD_MODE_V2_FOOTER_GAP);
-        left = left.with_child(render_session_mode_segmented_control(
-            SessionModeSegment::CloudAgent,
-            FeatureFlag::CloudMode.is_enabled(),
-            &self.session_mode_mouse_states,
-            appearance,
-        ));
         // Harness selector ("Warp ⌄") sits immediately to the left of the
         // environment selector. It shares the same handle owned by `Input`.
         if let Some(harness_selector) = self.harness_selector.as_ref() {
@@ -1001,6 +1002,11 @@ impl AgentInputFooter {
         #[cfg(feature = "voice_input")]
         if AISettings::as_ref(app).is_voice_input_enabled(app) {
             right = right.with_child(ChildView::new(&self.mic_button).finish());
+        }
+
+        // Lightning button opens the floating voice + annotation overlay.
+        if crate::features::FeatureFlag::VoiceOverlay.is_enabled() {
+            right = right.with_child(ChildView::new(&self.lightning_button).finish());
         }
 
         right = right.with_child(ChildView::new(&self.file_button).finish());
@@ -1482,13 +1488,28 @@ impl AgentInputFooter {
                 .then(|| ChildView::new(&self.rich_input_button).finish()),
             AgentToolbarItemKind::FileAttach => Some(ChildView::new(&self.file_button).finish()),
             AgentToolbarItemKind::VoiceInput => {
+                let show_overlay = crate::features::FeatureFlag::VoiceOverlay.is_enabled();
                 #[cfg(feature = "voice_input")]
-                {
-                    let enabled = AISettings::as_ref(app).is_voice_input_enabled(app);
-                    enabled.then(|| ChildView::new(&self.mic_button).finish())
-                }
+                let show_mic = AISettings::as_ref(app).is_voice_input_enabled(app);
                 #[cfg(not(feature = "voice_input"))]
-                None
+                let show_mic = false;
+
+                if !show_mic && !show_overlay {
+                    None
+                } else {
+                    let mut row = Flex::row()
+                        .with_main_axis_size(MainAxisSize::Min)
+                        .with_cross_axis_alignment(CrossAxisAlignment::Center)
+                        .with_spacing(4.);
+                    #[cfg(feature = "voice_input")]
+                    if show_mic {
+                        row = row.with_child(ChildView::new(&self.mic_button).finish());
+                    }
+                    if show_overlay {
+                        row = row.with_child(ChildView::new(&self.lightning_button).finish());
+                    }
+                    Some(row.finish())
+                }
             }
             AgentToolbarItemKind::ShareSession => {
                 if is_conversation_transcript_context {
@@ -1884,6 +1905,12 @@ impl AgentInputFooter {
                 TranscribeError::QuotaLimit => {
                     self.show_cli_voice_error_toast("Voice input limit reached", ctx);
                 }
+                // Service unreachable / not set up on the backend — friendlier
+                // transient message than implying the audio failed.
+                TranscribeError::Transport | TranscribeError::ServerOverloaded => {
+                    log::warn!("CLI voice transcription unavailable: {e:?}");
+                    self.show_cli_voice_error_toast("Bang voice is temporarily offline.", ctx);
+                }
                 _ => {
                     log::error!("Failed to transcribe CLI voice input: {e:?}");
                     self.show_cli_voice_error_toast("Failed to transcribe voice input", ctx);
@@ -2116,14 +2143,28 @@ impl AgentInputFooter {
             }
             AgentToolbarItemKind::NLDToggle => Some(ChildView::new(&self.nld_button).finish()),
             AgentToolbarItemKind::VoiceInput => {
+                let show_overlay = crate::features::FeatureFlag::VoiceOverlay.is_enabled();
                 #[cfg(feature = "voice_input")]
-                {
-                    let enabled =
-                        crate::settings::AISettings::as_ref(app).is_voice_input_enabled(app);
-                    enabled.then(|| ChildView::new(&self.mic_button).finish())
-                }
+                let show_mic = crate::settings::AISettings::as_ref(app).is_voice_input_enabled(app);
                 #[cfg(not(feature = "voice_input"))]
-                None
+                let show_mic = false;
+
+                if !show_mic && !show_overlay {
+                    None
+                } else {
+                    let mut row = Flex::row()
+                        .with_main_axis_size(MainAxisSize::Min)
+                        .with_cross_axis_alignment(CrossAxisAlignment::Center)
+                        .with_spacing(4.);
+                    #[cfg(feature = "voice_input")]
+                    if show_mic {
+                        row = row.with_child(ChildView::new(&self.mic_button).finish());
+                    }
+                    if show_overlay {
+                        row = row.with_child(ChildView::new(&self.lightning_button).finish());
+                    }
+                    Some(row.finish())
+                }
             }
             AgentToolbarItemKind::FileAttach => Some(ChildView::new(&self.file_button).finish()),
             AgentToolbarItemKind::ContextWindowUsage => {
@@ -2200,6 +2241,248 @@ impl AgentInputFooter {
         }
     }
 
+    /// Whether this footer control belongs *inside* the grey input box
+    /// (microphone, lightning, attachment) rather than on the row below it.
+    /// Everything else (dir chip, `aA`, model selector, remote-control, etc.)
+    /// renders outside. Drives the `render_inside_controls` /
+    /// `render_outside_controls` split.
+    fn is_inside_control(item: &AgentToolbarItemKind) -> bool {
+        matches!(
+            item,
+            AgentToolbarItemKind::VoiceInput
+                | AgentToolbarItemKind::FileAttach
+                // The model/profile selector renders inside the box beside the mic
+                // (see `render_inside_controls_split`), so keep it off the outside row.
+                | AgentToolbarItemKind::ModelSelector
+        )
+    }
+
+    /// True when this footer uses the standard agent layout (not cloud-mode v2,
+    /// not an active CLI-agent session). Only in this layout does the terminal
+    /// `Input` split the toolbar across the grey input box: mic/lightning/attach
+    /// stay inside and the remaining controls render on a row below the box.
+    /// Both inputs are lock-free, so this is safe to call while the terminal
+    /// model lock is held.
+    pub fn uses_standard_split_layout(&self, app: &AppContext) -> bool {
+        !self.should_render_cloud_mode_v2(app) && !self.is_cli_agent_session_active(app)
+    }
+
+    /// Renders the controls that stay inside the grey input box for the standard
+    /// single-row composer: the attachment button (left of the editor) and the
+    /// mic/lightning voice controls (right of the editor). Returns
+    /// `(left, right)`; either is `None` when disabled or when a prompt alert has
+    /// taken over the toolbar. These are shown regardless of the user's
+    /// left/right chip selection — that selection only orders the *outside* row.
+    ///
+    /// Locks the terminal model, so callers must not hold that lock (the terminal
+    /// `Input` releases its model guard before calling this).
+    pub fn render_inside_controls_split(
+        &self,
+        app: &AppContext,
+    ) -> (Option<Box<dyn Element>>, Option<Box<dyn Element>>) {
+        // A prompt alert takes over the outside row; keep the composer row clean.
+        if !self.prompt_alert.as_ref(app).is_no_alert() {
+            return (None, None);
+        }
+
+        let terminal_model = self.terminal_model.lock();
+        let shared_status = terminal_model.shared_session_status();
+        let is_cloud_context = super::is_in_cloud_context(
+            terminal_model.block_list().agent_view_state(),
+            &terminal_model,
+        );
+        let is_conversation_transcript_context =
+            is_conversation_transcript_context(self.terminal_view_id, &terminal_model, app);
+
+        let left = self.render_toolbar_item(
+            &AgentToolbarItemKind::FileAttach,
+            shared_status,
+            is_cloud_context,
+            is_conversation_transcript_context,
+            app,
+        );
+        // The model/profile selector ("Default | Bang") lives inside the box beside
+        // the mic (rather than on the outside row) in both the single- and multi-line
+        // composer, so it sits with the voice cluster at the right end of the row (or
+        // the controls row below the editor when the text wraps to 2+ lines).
+        let model_selector = self.render_toolbar_item(
+            &AgentToolbarItemKind::ModelSelector,
+            shared_status,
+            is_cloud_context,
+            is_conversation_transcript_context,
+            app,
+        );
+        let voice = self.render_toolbar_item(
+            &AgentToolbarItemKind::VoiceInput,
+            shared_status,
+            is_cloud_context,
+            is_conversation_transcript_context,
+            app,
+        );
+        drop(terminal_model);
+
+        let right = match (model_selector, voice) {
+            (Some(model_selector), Some(voice)) => Some(
+                Flex::row()
+                    .with_main_axis_size(MainAxisSize::Min)
+                    .with_cross_axis_alignment(CrossAxisAlignment::Center)
+                    .with_spacing(4.)
+                    .with_child(model_selector)
+                    .with_child(voice)
+                    .finish(),
+            ),
+            (Some(model_selector), None) => Some(model_selector),
+            (None, Some(voice)) => Some(voice),
+            (None, None) => None,
+        };
+
+        (left, right)
+    }
+
+    /// Assembles the mic/lightning voice controls that sit at the right end of the
+    /// single-row composer. The editor and the "+" attach button are rendered by
+    /// the terminal `Input` (the `+` is `Input`-owned so it can flank the editor on
+    /// the left as a real flex child); this footer draws only the right-hand voice
+    /// cluster so those buttons stay parented to `AgentInputFooter` and their
+    /// `AgentInputFooterAction` clicks route to `AgentInputFooter::handle_action`.
+    /// `Input` composes `[+] [editor] [this]` into one centered flex row.
+    pub fn render_inside_controls_row(&self, app: &AppContext) -> Box<dyn Element> {
+        let (_left, right) = self.render_inside_controls_split(app);
+        let right = right.unwrap_or_else(|| Empty::new().finish());
+        Container::new(
+            Flex::row()
+                .with_main_axis_size(MainAxisSize::Min)
+                .with_cross_axis_alignment(CrossAxisAlignment::Center)
+                .with_child(right)
+                .finish(),
+        )
+        .finish()
+    }
+
+    /// Renders the controls that live on the row *below* the grey input box:
+    /// everything except mic/lightning/attachment, with the same left/right
+    /// grouping, prompt-alert handling, and right-click context menu as the
+    /// combined toolbar. Locks the terminal model, so callers must not hold that
+    /// lock.
+    pub fn render_outside_controls(&self, app: &AppContext) -> Box<dyn Element> {
+        self.render_standard_toolbar(&|item| !Self::is_inside_control(item), app)
+    }
+
+    /// Shared builder for the standard agent toolbar row. `include` selects which
+    /// items to render, so the same layout backs both the combined toolbar
+    /// (`|_| true`) and the split "outside" row (everything but inside controls).
+    fn render_standard_toolbar(
+        &self,
+        include: &dyn Fn(&AgentToolbarItemKind) -> bool,
+        app: &AppContext,
+    ) -> Box<dyn Element> {
+        let session_settings = SessionSettings::as_ref(app);
+        let left_items = session_settings.agent_footer_chip_selection.left_items();
+        let right_items = session_settings.agent_footer_chip_selection.right_items();
+
+        let mut left_buttons = Wrap::row()
+            .with_main_axis_size(MainAxisSize::Min)
+            .with_cross_axis_alignment(CrossAxisAlignment::Center)
+            .with_main_axis_alignment(MainAxisAlignment::Start)
+            .with_run_spacing(4.)
+            .with_spacing(4.);
+
+        let is_ambient_agent = FeatureFlag::CloudMode.is_enabled()
+            && self
+                .ambient_agent_view_model
+                .as_ref()
+                .is_some_and(|ambient_agent_model| {
+                    ambient_agent_model.as_ref(app).is_ambient_agent()
+                });
+
+        if is_ambient_agent {
+            if let Some(environment_selector) = self.environment_selector.as_ref() {
+                left_buttons =
+                    left_buttons.with_child(ChildView::new(environment_selector).finish());
+            }
+        } else if self.handoff_compose_state.as_ref(app).is_active() {
+            left_buttons = left_buttons
+                .with_child(ChildView::new(&self.handoff_environment_selector).finish());
+        }
+
+        let terminal_model = self.terminal_model.lock();
+        let shared_status = terminal_model.shared_session_status();
+        let is_cloud_context = super::is_in_cloud_context(
+            terminal_model.block_list().agent_view_state(),
+            &terminal_model,
+        );
+        let is_conversation_transcript_context =
+            is_conversation_transcript_context(self.terminal_view_id, &terminal_model, app);
+
+        for item in &left_items {
+            if !include(item) {
+                continue;
+            }
+            if let Some(element) = self.render_toolbar_item(
+                item,
+                shared_status,
+                is_cloud_context,
+                is_conversation_transcript_context,
+                app,
+            ) {
+                left_buttons.add_child(element);
+            }
+        }
+
+        let mut right_buttons = Flex::row()
+            .with_cross_axis_alignment(CrossAxisAlignment::Center)
+            .with_main_axis_size(MainAxisSize::Min)
+            .with_spacing(4.);
+
+        let has_prompt_alert = !self.prompt_alert.as_ref(app).is_no_alert();
+        if has_prompt_alert {
+            right_buttons.add_child(
+                Shrinkable::new(
+                    1.,
+                    Clipped::new(ChildView::new(&self.prompt_alert).finish()).finish(),
+                )
+                .finish(),
+            );
+        } else {
+            for item in &right_items {
+                if !include(item) {
+                    continue;
+                }
+                if let Some(element) = self.render_toolbar_item(
+                    item,
+                    shared_status,
+                    is_cloud_context,
+                    is_conversation_transcript_context,
+                    app,
+                ) {
+                    right_buttons.add_child(element);
+                }
+            }
+        }
+
+        let content = Wrap::row()
+            .with_main_axis_size(MainAxisSize::Max)
+            .with_main_axis_alignment(MainAxisAlignment::SpaceBetween)
+            .with_cross_axis_alignment(CrossAxisAlignment::Center)
+            .with_child(WrapFill::new(0., left_buttons.finish()).finish())
+            .with_child(WrapFill::new(0., right_buttons.finish()).finish())
+            .with_run_spacing(context_chips::spacing::UDI_ROW_RUN_SPACING)
+            .finish();
+        let content = EventHandler::new(content)
+            .on_right_mouse_down(|ctx, _, position| {
+                ctx.dispatch_typed_action(AgentInputFooterAction::ShowContextMenu { position });
+                DispatchEventResult::StopPropagation
+            })
+            .finish();
+
+        let mut container = Container::new(content).with_padding_bottom(8.0);
+        if !has_prompt_alert {
+            container = container.with_padding_right(16.);
+        }
+
+        container.finish()
+    }
+
     #[cfg(test)]
     pub fn displayed_chip_kinds(
         &self,
@@ -2247,121 +2530,17 @@ impl View for AgentInputFooter {
             return self.render_cli_mode_footer(app);
         }
 
-        let appearance = Appearance::as_ref(app);
-        let session_settings = SessionSettings::as_ref(app);
-        let left_items = session_settings.agent_footer_chip_selection.left_items();
-        let right_items = session_settings.agent_footer_chip_selection.right_items();
-
-        let mut left_buttons = Wrap::row()
-            .with_main_axis_size(MainAxisSize::Min)
-            .with_cross_axis_alignment(CrossAxisAlignment::Center)
-            .with_main_axis_alignment(MainAxisAlignment::Start)
-            .with_run_spacing(4.)
-            .with_spacing(4.);
-
-        let is_ambient_agent = FeatureFlag::CloudMode.is_enabled()
-            && self
-                .ambient_agent_view_model
-                .as_ref()
-                .is_some_and(|ambient_agent_model| {
-                    ambient_agent_model.as_ref(app).is_ambient_agent()
-                });
-
-        // Leftmost persistent session-mode segmented control ("Agent | Cloud Agent | Terminal").
-        // This footer only renders in agent/CLI/cloud contexts, so the current segment is either
-        // Cloud Agent (ambient/cloud pane) or Agent.
-        let session_mode_current = if is_ambient_agent {
-            SessionModeSegment::CloudAgent
-        } else {
-            SessionModeSegment::Agent
-        };
-        left_buttons = left_buttons.with_child(render_session_mode_segmented_control(
-            session_mode_current,
-            FeatureFlag::CloudMode.is_enabled(),
-            &self.session_mode_mouse_states,
-            appearance,
-        ));
-
-        if is_ambient_agent {
-            if let Some(environment_selector) = self.environment_selector.as_ref() {
-                left_buttons =
-                    left_buttons.with_child(ChildView::new(environment_selector).finish());
-            }
-        } else if self.handoff_compose_state.as_ref(app).is_active() {
-            left_buttons = left_buttons
-                .with_child(ChildView::new(&self.handoff_environment_selector).finish());
-        }
-
-        let terminal_model = self.terminal_model.lock();
-        let shared_status = terminal_model.shared_session_status();
-        let is_cloud_context = super::is_in_cloud_context(
-            terminal_model.block_list().agent_view_state(),
-            &terminal_model,
-        );
-        let is_conversation_transcript_context =
-            is_conversation_transcript_context(self.terminal_view_id, &terminal_model, app);
-
-        for item in &left_items {
-            if let Some(element) = self.render_toolbar_item(
-                item,
-                shared_status,
-                is_cloud_context,
-                is_conversation_transcript_context,
-                app,
-            ) {
-                left_buttons.add_child(element);
-            }
-        }
-
-        let mut right_buttons = Flex::row()
-            .with_cross_axis_alignment(CrossAxisAlignment::Center)
-            .with_main_axis_size(MainAxisSize::Min)
-            .with_spacing(4.);
-
-        let has_prompt_alert = !self.prompt_alert.as_ref(app).is_no_alert();
-        if has_prompt_alert {
-            right_buttons.add_child(
-                Shrinkable::new(
-                    1.,
-                    Clipped::new(ChildView::new(&self.prompt_alert).finish()).finish(),
-                )
-                .finish(),
-            );
-        } else {
-            for item in &right_items {
-                if let Some(element) = self.render_toolbar_item(
-                    item,
-                    shared_status,
-                    is_cloud_context,
-                    is_conversation_transcript_context,
-                    app,
-                ) {
-                    right_buttons.add_child(element);
-                }
-            }
-        }
-
-        let content = Wrap::row()
-            .with_main_axis_size(MainAxisSize::Max)
-            .with_main_axis_alignment(MainAxisAlignment::SpaceBetween)
-            .with_cross_axis_alignment(CrossAxisAlignment::Center)
-            .with_child(WrapFill::new(0., left_buttons.finish()).finish())
-            .with_child(WrapFill::new(0., right_buttons.finish()).finish())
-            .with_run_spacing(context_chips::spacing::UDI_ROW_RUN_SPACING)
-            .finish();
-        let content = EventHandler::new(content)
-            .on_right_mouse_down(|ctx, _, position| {
-                ctx.dispatch_typed_action(AgentInputFooterAction::ShowContextMenu { position });
-                DispatchEventResult::StopPropagation
-            })
-            .finish();
-
-        let mut container = Container::new(content).with_padding_bottom(8.0);
-        if !has_prompt_alert {
-            container = container.with_padding_right(16.);
-        }
-
-        container.finish()
+        // Standard agent layout: the terminal `Input` renders this footer as a
+        // `ChildView` inside the grey input box, where it draws the controls that
+        // stay inside the box (attachment on the left, mic/lightning on the
+        // right). Rendering these here — rather than having `Input` build the
+        // buttons inline in its own element tree — keeps the buttons parented to
+        // this footer view, so their `AgentInputFooterAction` clicks route to
+        // `AgentInputFooter::handle_action`. (Embedding them from `Input`'s tree
+        // reparents them to `Input`, and the actions are silently dropped, which
+        // made the buttons appear unclickable.) The remaining controls render on
+        // the row below the box via `render_outside_controls`.
+        self.render_inside_controls_row(app)
     }
 }
 
@@ -2369,6 +2548,8 @@ impl View for AgentInputFooter {
 pub enum AgentInputFooterAction {
     #[cfg(feature = "voice_input")]
     ToggleVoiceInput,
+    /// Open/close the floating voice + annotation overlay.
+    ToggleOverlay,
     SelectFile,
     InsertFilePath(String),
     ToggleCodeReview,
@@ -2408,6 +2589,9 @@ impl TypedActionView for AgentInputFooter {
                         voice_input::VoiceInputToggledFrom::Button,
                     ));
                 }
+            }
+            AgentInputFooterAction::ToggleOverlay => {
+                ctx.emit(AgentInputFooterEvent::ToggleOverlay);
             }
             AgentInputFooterAction::SelectFile => {
                 // Fork based on CLI agent session: in CLI mode, open a file
@@ -2601,6 +2785,8 @@ impl TypedActionView for AgentInputFooter {
 pub enum AgentInputFooterEvent {
     #[cfg(feature = "voice_input")]
     ToggleVoiceInput(voice_input::VoiceInputToggledFrom),
+    /// Open/close the floating voice + annotation overlay.
+    ToggleOverlay,
     SelectFile,
     WriteToPty(String),
     /// Insert text into the CLI agent rich input.
@@ -2697,6 +2883,46 @@ impl ActionButtonTheme for AgentInputButtonTheme {
     }
 }
 
+/// Circular, filled treatment for the composer "+" (attach) button: a soft
+/// surface disc with the plus glyph centered and no border, so it reads as a
+/// distinct round button rather than the flat rounded-rect used by the other
+/// footer controls. Pair with `with_corner_radius(Radius::Percentage(50.))` on
+/// the (square, icon-only) button to complete the circle.
+pub(crate) struct PlusButtonTheme;
+
+impl ActionButtonTheme for PlusButtonTheme {
+    fn background(&self, hovered: bool, appearance: &Appearance) -> Option<Fill> {
+        let theme = appearance.theme();
+        // Blend the foreground over the surface so the disc reads as a distinct
+        // grey circle against the input background (the plain `surface_2/3` fills
+        // are too close to the input bg to be visible). Brighten on hover.
+        let base = theme.surface_1();
+        let fg = Fill::Solid(theme.foreground().into_solid());
+        Some(if hovered {
+            base.blend(&fg.with_opacity(32))
+        } else {
+            base.blend(&fg.with_opacity(20))
+        })
+    }
+
+    fn text_color(
+        &self,
+        _hovered: bool,
+        background: Option<Fill>,
+        appearance: &Appearance,
+    ) -> ColorU {
+        let base_bg = appearance.theme().surface_2();
+        let effective_bg = background
+            .map(|overlay| base_bg.blend(&overlay))
+            .unwrap_or(base_bg);
+        appearance.theme().sub_text_color(effective_bg).into_solid()
+    }
+
+    fn should_opt_out_of_contrast_adjustment(&self) -> bool {
+        true
+    }
+}
+
 struct RemoteControlButtonTheme;
 
 impl ActionButtonTheme for RemoteControlButtonTheme {
@@ -2727,8 +2953,9 @@ impl ActionButtonTheme for RemoteControlButtonTheme {
 pub(crate) struct ActiveMicButtonTheme;
 
 impl ActionButtonTheme for ActiveMicButtonTheme {
-    fn background(&self, hovered: bool, appearance: &Appearance) -> Option<Fill> {
-        AgentInputButtonTheme.background(hovered, appearance)
+    fn background(&self, _hovered: bool, _appearance: &Appearance) -> Option<Fill> {
+        // Ghost button: no disc/fill so the mic reads as a bare icon in the input row.
+        None
     }
 
     fn text_color(
@@ -2747,8 +2974,9 @@ impl ActionButtonTheme for ActiveMicButtonTheme {
         }
     }
 
-    fn border(&self, appearance: &Appearance) -> Option<ColorU> {
-        AgentInputButtonTheme.border(appearance)
+    fn border(&self, _appearance: &Appearance) -> Option<ColorU> {
+        // Ghost button: no border.
+        None
     }
 
     fn should_opt_out_of_contrast_adjustment(&self) -> bool {
@@ -2757,6 +2985,37 @@ impl ActionButtonTheme for ActiveMicButtonTheme {
 
     fn font_properties(&self) -> Option<warpui::fonts::Properties> {
         AgentInputButtonTheme.font_properties()
+    }
+}
+
+/// Ghost (transparent) treatment for icon-only footer controls such as the
+/// lightning overlay toggle: no fill and no border so the glyph sits bare in the
+/// input row, matching the mic.
+pub(crate) struct GhostIconButtonTheme;
+
+impl ActionButtonTheme for GhostIconButtonTheme {
+    fn background(&self, _hovered: bool, _appearance: &Appearance) -> Option<Fill> {
+        None
+    }
+
+    fn text_color(
+        &self,
+        _hovered: bool,
+        _background: Option<Fill>,
+        appearance: &Appearance,
+    ) -> ColorU {
+        appearance
+            .theme()
+            .sub_text_color(appearance.theme().surface_1())
+            .into_solid()
+    }
+
+    fn border(&self, _appearance: &Appearance) -> Option<ColorU> {
+        None
+    }
+
+    fn should_opt_out_of_contrast_adjustment(&self) -> bool {
+        true
     }
 }
 

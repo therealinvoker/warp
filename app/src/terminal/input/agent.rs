@@ -1,9 +1,11 @@
+use std::sync::atomic::Ordering;
+
 use warp_cli::agent::Harness;
 use warp_core::settings::Setting;
 use warpui::elements::{
     AnchorPair, ConstrainedBox, Container, CrossAxisAlignment, DispatchEventResult, DropTarget,
-    Element, Empty, EventHandler, Flex, Hoverable, MainAxisSize, OffsetPositioning, OffsetType,
-    ParentElement, PositionedElementOffsetBounds, PositioningAxis, SavePosition, Stack,
+    Element, Empty, EventHandler, Expanded, Flex, Hoverable, MainAxisSize, OffsetPositioning,
+    OffsetType, ParentElement, PositionedElementOffsetBounds, PositioningAxis, SavePosition, Stack,
     XAxisAnchor, YAxisAnchor,
 };
 use warpui::presenter::ChildView;
@@ -12,7 +14,7 @@ use warpui::{AppContext, SingletonEntity as _};
 use super::common::{
     add_command_xray_overlay, add_input_suggestions_overlays, add_voltron_overlay,
     add_workflow_info_overlay, floating_input_box, maybe_add_buy_credits_banner,
-    wrap_input_with_terminal_padding_and_focus_handler,
+    wrap_input_with_terminal_padding_and_focus_handler, FLOATING_INPUT_MARGIN,
 };
 use super::{Input, InputAction, InputDropTargetData};
 use crate::ai::blocklist::agent_view::shortcuts::{
@@ -64,7 +66,14 @@ impl Input {
         let appearance = Appearance::as_ref(app);
         let menu_positioning = self.menu_positioning(app);
 
-        let model = self.model.lock();
+        // In the standard agent layout the footer toolbar is split across the
+        // grey input box: mic/lightning/attachment stay inside, the rest render
+        // on a row below the box. Cloud-mode-v2 and active CLI-agent footers keep
+        // the combined single row. Computed once; both inputs are lock-free.
+        let use_split_footer = self
+            .agent_input_footer
+            .as_ref(app)
+            .uses_standard_split_layout(app);
 
         // We should likely rework this stack to not need to use `with_constrain_absolute_children`,
         // by reworking the positioning of the children to not depend on this.
@@ -126,21 +135,143 @@ impl Input {
 
         let terminal_spacing = TerminalSettings::as_ref(app)
             .terminal_input_spacing(appearance.line_height_ratio(), app);
-        column.add_child(
-            Container::new(self.render_input_box(/*show_vim_status=*/ false, appearance, app))
-                .with_margin_top(
-                    terminal_spacing.prompt_to_editor_padding
-                        * spacing::UDI_PROMPT_BOTTOM_PADDING_FACTOR,
-                )
-                .finish(),
+        let editor_top_margin =
+            terminal_spacing.prompt_to_editor_padding * spacing::UDI_PROMPT_BOTTOM_PADDING_FACTOR;
+        // Small, balanced vertical padding for the single-row composer: the editor
+        // is rendered with this bottom padding (instead of the larger
+        // footer-below padding) and mirrored on top below so the text sits centered
+        // with tight, equal space above and below.
+        const SPLIT_EDITOR_VPAD: f32 = 4.;
+        let split_bottom_padding = if use_split_footer {
+            Some(SPLIT_EDITOR_VPAD)
+        } else {
+            None
+        };
+        let editor_box = self.render_input_box(
+            /*show_vim_status=*/ false,
+            split_bottom_padding,
+            appearance,
+            app,
         );
-        column.add_child(
-            SavePosition::new(
-                ChildView::new(&self.agent_input_footer).finish(),
-                &self.prompt_save_position_id(),
-            )
-            .finish(),
-        );
+        // The footer view is always drawn as a `ChildView` (never by building its
+        // buttons inline here) so its controls stay parented to `AgentInputFooter`
+        // and their `AgentInputFooterAction` clicks route to the footer's handler —
+        // otherwise the mic/lightning buttons render but are silently unclickable.
+        let footer_controls = SavePosition::new(
+            ChildView::new(&self.agent_input_footer).finish(),
+            &self.prompt_save_position_id(),
+        )
+        .finish();
+
+        if use_split_footer {
+            // Single composer row: `[+] [editor] [mic/lightning]` laid out as a
+            // real, vertically-centered flex row (no overlay). The "+" attach
+            // button is owned by `Input` (it dispatches `InputAction::SelectImage`)
+            // so it can sit as a first-class flex child to the *left* of the editor
+            // while still routing correctly; the footer `ChildView` draws only the
+            // right-hand mic/lightning cluster, keeping those parented to
+            // `AgentInputFooter`. A plain flex row (rather than the previous
+            // Stack overlay) keeps the editor a normal hit target so it stays
+            // clickable, and `CrossAxisAlignment::Center` vertically aligns the
+            // buttons with the editor's text.
+            let attach_button =
+                Container::new(ChildView::new(&self.composer_attach_button).finish())
+                    .with_margin_right(spacing::UDI_CHIP_MARGIN)
+                    .finish();
+            // The editor is rendered with a small bottom padding (`SPLIT_EDITOR_VPAD`)
+            // for this inline-footer layout; mirror it on top so the single text line
+            // is vertically centered with tight, equal space above and below, and
+            // `CrossAxisAlignment::Center` lines the `+`/mic/lightning up with it.
+            let editor_box = Container::new(editor_box)
+                .with_padding_top(SPLIT_EDITOR_VPAD)
+                .finish();
+
+            // Decide single-row (controls inline, right of the editor) vs. stacked
+            // (controls on a row *below* the full-width editor) from a *width-stable*
+            // signal rather than the editor's live soft-wrap count. The editor is
+            // narrower when the controls sit inline and grows to full width once they
+            // drop below, so a soft-wrap count read from the current layout flip-flops
+            // for borderline-length text — and any re-render (notably mouseover) makes
+            // the flip visible, so the box jumps from one line to two on hover.
+            //
+            // Instead, compare the text's width against the single-row editor width
+            // *captured while the composer was actually in the single-row layout*
+            // (cached across frames). That reference doesn't change when the controls
+            // drop below (which widens the live editor) or on hover, so the layout
+            // only changes when the text itself does: it stays one line until the text
+            // no longer fits beside the inline controls.
+            let is_multiline = {
+                let editor = self.editor.as_ref(app);
+                let text = editor.buffer_text(app);
+                if text.contains('\n') {
+                    // An explicit newline is unambiguously multiline, width aside.
+                    true
+                } else {
+                    let was_multiline = self.composer_controls_below.load(Ordering::Relaxed);
+                    // While rendering the single row, the editor's measured width *is*
+                    // the authoritative "fits on one line" width — cache it so the
+                    // decision stays put after the controls drop below.
+                    if !was_multiline {
+                        let window_id = self.editor.window_id(app);
+                        if let Some(rect) = app.element_position_by_id_at_last_frame(
+                            window_id,
+                            self.editor_save_position_id(),
+                        ) {
+                            self.composer_single_row_editor_width_bits
+                                .store(rect.width().to_bits(), Ordering::Relaxed);
+                        }
+                    }
+                    let single_row_width = f32::from_bits(
+                        self.composer_single_row_editor_width_bits
+                            .load(Ordering::Relaxed),
+                    );
+                    let em_width = editor.em_width(app.font_cache(), appearance);
+                    let text_width = text.chars().count() as f32 * em_width;
+                    // Switch a couple of characters early (the cached width includes the
+                    // box's inner padding) so we drop the controls below *before* the
+                    // text would visibly wrap inside the single row.
+                    single_row_width > 1. && text_width > single_row_width - em_width * 2.
+                }
+            };
+            self.composer_controls_below
+                .store(is_multiline, Ordering::Relaxed);
+
+            if is_multiline {
+                let controls_row = Flex::row()
+                    .with_main_axis_size(MainAxisSize::Max)
+                    .with_cross_axis_alignment(CrossAxisAlignment::Center)
+                    .with_child(attach_button)
+                    .with_child(Expanded::new(1., Empty::new().finish()).finish())
+                    .with_child(footer_controls)
+                    .finish();
+                let stacked = Flex::column()
+                    .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
+                    .with_child(editor_box)
+                    .with_child(controls_row)
+                    .finish();
+                column.add_child(Container::new(stacked).finish());
+            } else {
+                let row = Flex::row()
+                    .with_main_axis_size(MainAxisSize::Max)
+                    .with_cross_axis_alignment(CrossAxisAlignment::Center)
+                    .with_child(attach_button)
+                    .with_child(Expanded::new(1., editor_box).finish())
+                    .with_child(footer_controls)
+                    .finish();
+                // No top margin here: the balanced `SPLIT_EDITOR_VPAD` on the editor is
+                // the only vertical padding, keeping the box tight and symmetric.
+                column.add_child(Container::new(row).finish());
+            }
+        } else {
+            // CLI-agent / non-split layout: the footer renders its own toolbar row
+            // directly below the editor.
+            column.add_child(
+                Container::new(editor_box)
+                    .with_margin_top(editor_top_margin)
+                    .finish(),
+            );
+            column.add_child(footer_controls);
+        }
 
         stack.add_child(wrap_input_with_terminal_padding_and_focus_handler(
             self.is_active_session(app),
@@ -214,13 +345,19 @@ impl Input {
             appearance,
         )
         // Paint the same stable opaque fill the Terminal input uses
-        // (`neutral_3` = 15% fg over the background) so the Agent, Terminal, and
+        // (`neutral_2` = 10% fg over the background) so the Agent, Terminal, and
         // Cloud Agent input boxes read identically regardless of what surface is
-        // composited behind them.
-        .with_background_color(crate::ui_components::blended_colors::neutral_3(
+        // composited behind them. Kept a step darker than the border
+        // (`default_border_color` = `neutral_3`) so the border reads as a subtle
+        // lighter outline around the box.
+        .with_background_color(crate::ui_components::blended_colors::neutral_2(
             appearance.theme(),
         ))
-        .with_padding_bottom(4.)
+        // Give the mic/lightning cluster breathing room from the box's right edge
+        // (the left side already gets `PADDING_LEFT` via the terminal-padding
+        // wrapper), and keep the box tight vertically.
+        .with_padding_right(*PADDING_LEFT)
+        .with_padding_bottom(0.)
         .finish();
 
         let mut column = Flex::column();
@@ -313,14 +450,36 @@ impl Input {
         }
         column.add_child(input);
 
+        if use_split_footer {
+            // The remaining toolbar controls (dir chip, aA, model selector,
+            // remote-control, etc.) render on their own row below the grey input
+            // box, on the surrounding pane background. Left-inset to line up with
+            // the box's content (box margin + terminal padding).
+            let outside = self
+                .agent_input_footer
+                .as_ref(app)
+                .render_outside_controls(app);
+            column.add_child(
+                Container::new(outside)
+                    .with_margin_left(FLOATING_INPUT_MARGIN + *PADDING_LEFT)
+                    .with_margin_right(FLOATING_INPUT_MARGIN)
+                    .finish(),
+            );
+        }
+
         let mut outer_stack = Stack::new().with_constrain_absolute_children();
         outer_stack.add_child(column.finish());
+        // Re-acquire the model lock only for the banner check; kept out of the
+        // span above so the footer split methods can lock the model safely.
+        let model = self.model.lock();
+        let is_input_at_top = self.is_input_at_top(&model, app);
+        drop(model);
         maybe_add_buy_credits_banner(
             &mut outer_stack,
             &self.buy_credits_banner,
             self.is_pane_focused(app),
             self.terminal_view_id,
-            self.is_input_at_top(&model, app),
+            is_input_at_top,
             app,
         );
 
@@ -633,13 +792,16 @@ impl Input {
         // Natural (content-driven) height editor with the same top spacing as the
         // agent input, left-inset by terminal `PADDING_LEFT`.
         editor_column.add_child(
-            Container::new(self.render_input_box(/*show_vim_status=*/ false, appearance, app))
-                .with_margin_top(
-                    terminal_spacing.prompt_to_editor_padding
-                        * spacing::UDI_PROMPT_BOTTOM_PADDING_FACTOR,
-                )
-                .with_padding_left(*PADDING_LEFT)
-                .finish(),
+            Container::new(self.render_input_box(
+                /*show_vim_status=*/ false, /*bottom_padding_override=*/ None,
+                appearance, app,
+            ))
+            .with_margin_top(
+                terminal_spacing.prompt_to_editor_padding
+                    * spacing::UDI_PROMPT_BOTTOM_PADDING_FACTOR,
+            )
+            .with_padding_left(*PADDING_LEFT)
+            .finish(),
         );
 
         let editor = editor_column.finish();
@@ -681,7 +843,7 @@ impl Input {
         )
         // Match the Agent and Terminal input boxes' stable opaque fill so the
         // Cloud Agent box reads identically (see `render_agent_input`).
-        .with_background_color(crate::ui_components::blended_colors::neutral_3(
+        .with_background_color(crate::ui_components::blended_colors::neutral_2(
             appearance.theme(),
         ))
         .with_padding_bottom(4.);
@@ -739,6 +901,8 @@ pub mod styles {
     use crate::ui_components::blended_colors;
 
     pub fn default_border_color(theme: &WarpTheme) -> ColorU {
-        blended_colors::neutral_2(theme)
+        // One step lighter than the box fill (`neutral_2`) so the border reads as
+        // a subtle lighter outline around the input box.
+        blended_colors::neutral_3(theme)
     }
 }

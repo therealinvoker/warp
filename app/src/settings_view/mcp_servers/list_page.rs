@@ -70,7 +70,7 @@ use crate::workspace::Workspace;
 use crate::workspaces::user_workspaces::UserWorkspaces;
 use crate::ToastStack;
 
-const DESCRIPTION_TEXT: &str = "Add MCP servers to extend the Warp Agent's capabilities. MCP servers expose data sources or tools to agents through a standardized interface, essentially acting like plugins. Add a custom server, or use the presets to get started with popular servers. You can also find team servers that have been shared with you here. ";
+const DESCRIPTION_TEXT: &str = "Add MCP servers to extend the Bang Agent's capabilities. MCP servers expose data sources or tools to agents through a standardized interface, essentially acting like plugins. Add a custom server, or use the presets to get started with popular servers. You can also find team servers that have been shared with you here. ";
 
 #[derive(Debug, Clone)]
 pub enum MCPServersListPageViewEvent {
@@ -88,7 +88,7 @@ pub enum MCPServersListPageViewEvent {
     },
     ShowModal,
     HideModal,
-    /// Open the "Import from Cursor" modal (gated on `CursorMcpImport`).
+    /// Open the "Import" modal, which scans other tools' MCP configs on demand.
     ImportFromCursor,
 }
 
@@ -251,8 +251,8 @@ impl MCPServersListPageView {
         });
 
         let import_from_cursor_button = ctx.add_typed_action_view(|_| {
-            ActionButton::new("Import from Cursor…", NakedTheme)
-                .with_icon(Icon::CursorLogo)
+            ActionButton::new("Import…", NakedTheme)
+                .with_icon(Icon::Import)
                 .on_click(|ctx| {
                     ctx.dispatch_typed_action(MCPServersListPageViewAction::ImportFromCursor)
                 })
@@ -1172,7 +1172,7 @@ impl MCPServersListPageView {
         let is_any_ai_enabled = ai_settings.is_any_ai_enabled(app);
 
         let label = render_body_item_label::<MCPServersListPageViewAction>(
-            "Auto-spawn servers from third-party agents".to_string(),
+            "Auto-import".to_string(),
             None,
             None,
             LocalOnlyIconState::Hidden,
@@ -1351,8 +1351,8 @@ impl MCPServersListPageView {
                         .current_team()
                         .map(|team| team.name.clone());
                     let shared_by_text = match team_name {
-                        Some(name) => format!("Shared by Warp and {name}"),
-                        None => "Shared by Warp and from other devices".to_string(),
+                        Some(name) => format!("Shared by Bang and {name}"),
+                        None => "Shared by Bang and from other devices".to_string(),
                     };
 
                     page.add_child(self.render_server_cards_section(
@@ -1363,7 +1363,7 @@ impl MCPServersListPageView {
                     ));
                 } else if !filtered_gallery_cards.is_empty() {
                     page.add_child(self.render_server_cards_section(
-                        "Shared from Warp",
+                        "Shared from Bang",
                         &filtered_gallery_cards,
                         appearance,
                         app,
@@ -1390,13 +1390,13 @@ impl MCPServersListPageView {
         let mut controls = Flex::row()
             .with_cross_axis_alignment(CrossAxisAlignment::Center)
             .with_child(Expanded::new(1., ChildView::new(&self.search_bar).finish()).finish());
-        if FeatureFlag::CursorMcpImport.is_enabled() {
-            controls.add_child(
-                Container::new(ChildView::new(&self.import_from_cursor_button).finish())
-                    .with_margin_left(style::SECTION_MARGIN)
-                    .finish(),
-            );
-        }
+        // One-time on-demand import: scans other tools' MCP configs when clicked
+        // (Auto-import handles the passive path). Always available.
+        controls.add_child(
+            Container::new(ChildView::new(&self.import_from_cursor_button).finish())
+                .with_margin_left(style::SECTION_MARGIN)
+                .finish(),
+        );
         controls.add_child(self.render_add_button());
         controls.finish()
     }

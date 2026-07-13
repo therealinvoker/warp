@@ -279,6 +279,12 @@ impl BlocklistAIActionModel {
             BlocklistAIActionExecutorEvent::OpenCodeReview(id) => {
                 ctx.emit(BlocklistAIActionEvent::ToggleCodeReview(id.clone()))
             }
+            BlocklistAIActionExecutorEvent::OpenBrowserPreview { action_id, url } => {
+                ctx.emit(BlocklistAIActionEvent::OpenBrowserPreview {
+                    action_id: action_id.clone(),
+                    url: url.clone(),
+                })
+            }
             BlocklistAIActionExecutorEvent::InsertCodeReviewComments {
                 action_id,
                 repo_path,
@@ -1414,6 +1420,10 @@ pub enum BlocklistAIActionEvent {
     },
     InitProject(AIAgentActionId),
     ToggleCodeReview(AIAgentActionId),
+    OpenBrowserPreview {
+        action_id: AIAgentActionId,
+        url: String,
+    },
     InsertCodeReviewComments {
         action_id: AIAgentActionId,
         repo_path: PathBuf,
@@ -1431,6 +1441,7 @@ impl BlocklistAIActionEvent {
             BlocklistAIActionEvent::FinishedAction { action_id, .. } => action_id,
             BlocklistAIActionEvent::InitProject(action_id) => action_id,
             BlocklistAIActionEvent::ToggleCodeReview(action_id) => action_id,
+            BlocklistAIActionEvent::OpenBrowserPreview { action_id, .. } => action_id,
             BlocklistAIActionEvent::InsertCodeReviewComments { action_id, .. } => action_id,
         }
     }

@@ -21,17 +21,86 @@ for a in "$@"; do
     *) ARGS+=("$a") ;;
   esac
 done
+
+# Give the dev build a distinct name + bundle id so it's easy to tell apart from
+# the stable `bang` snapshot in Finder / the Dock / the app switcher (Cmd-Tab),
+# and so macOS treats it as a separate app (own LaunchServices/notification
+# identity) instead of colliding with the snapshot's `dev.warp.WarpOss`.
+export WARP_APP_DISPLAY_NAME="bang-dev"
+# Distinct from the stable snapshot's `dev.warp.WarpOss` so macOS treats it as a
+# separate app (own LaunchServices/notification identity). Must be exactly three
+# period-separated components — `warp_core::AppId::parse` panics on anything else
+# (a 4-component id like `dev.warp.WarpOss.dev` crashes on startup).
+export WARP_APP_BUNDLE_ID="dev.warp.WarpOssDev"
+# Distinct black icon so the dev build stands out from the stable snapshot.
+export WARP_APP_ICON="$ROOT/app/channels/oss/icon/bang-dev.icns"
 if [ "$TARGET" = prod ]; then
   export WARP_SERVER_ROOT_URL="https://api.trybang.ai"
   # Keep RTC-served HTTP endpoints (agent-event SSE) on the harness too:
   # rtc_http_url() derives from the WS URL, which otherwise stays pointed at
   # production Warp (wss://rtc.app.warp.dev) and 401s with harness JWTs.
   export WARP_WS_SERVER_URL="wss://api.trybang.ai/graphql/v2"
+  # Session sharing ("remote control") talks to its own WS server, which is NOT
+  # derived from the root/WS URLs — it defaults to production Warp
+  # (wss://sessions.app.warp.dev) and 401s with harness JWTs ("You must be
+  # logged in to share sessions"). Point it at the harness relay (/sessions/*).
+  export WARP_SESSION_SHARING_SERVER_URL="wss://api.trybang.ai"
   export WARP_DATA_PROFILE="production-harness"
 else
   export WARP_SERVER_ROOT_URL="http://localhost:8088"
   export WARP_WS_SERVER_URL="ws://localhost:8088/graphql/v2"
-  export WARP_DATA_PROFILE="local-harness"
+  export WARP_SESSION_SHARING_SERVER_URL="ws://localhost:8088"
+  # Dedicated, persistent dev profile — separate from the stable snapshot's
+  # `stable` profile so dev churn (schema migrations, settings resets) never
+  # touches the daily driver. Log in once here and it sticks across rebuilds.
+  export WARP_DATA_PROFILE="bang-dev"
 fi
-echo "[script/dev] target=$TARGET  WARP_SERVER_ROOT_URL=$WARP_SERVER_ROOT_URL  WARP_DATA_PROFILE=$WARP_DATA_PROFILE"
+echo "[script/dev] target=$TARGET  WARP_SERVER_ROOT_URL=$WARP_SERVER_ROOT_URL  WARP_SESSION_SHARING_SERVER_URL=$WARP_SESSION_SHARING_SERVER_URL  WARP_DATA_PROFILE=$WARP_DATA_PROFILE"
+
+# The macOS launcher (`open`, used by script/run's default launchd path) just
+# re-activates an already-running instance with the same bundle id instead of
+# launching the freshly-built binary — so a rebuild silently never comes up and
+# the terminal appears to "hang" on the `tail -F` log follower. Quit any running
+# dev instance first so the rebuild actually launches. This targets the dev
+# bundle id specifically, leaving the stable `bang` snapshot untouched.
+if command -v osascript >/dev/null 2>&1; then
+  osascript -e "quit app id \"$WARP_APP_BUNDLE_ID\"" >/dev/null 2>&1 || true
+  # Give LaunchServices a moment to release the bundle id before script/run's
+  # `open` fires (the rebuild itself usually covers this, but be safe). Poll the
+  # app's running state by bundle id rather than the process list, since the id
+  # lives in Info.plist and not the `warp-oss` command line.
+  for _ in 1 2 3 4 5 6; do
+    running=$(osascript -e "application id \"$WARP_APP_BUNDLE_ID\" is running" 2>/dev/null || echo false)
+    [ "$running" = "true" ] || break
+    sleep 0.5
+  done
+fi
+
+# Ensure the local harness backend is up before launching the client, so voice
+# transcription and agent runs don't hit "connection refused" / "Bang voice is
+# offline". Only for the local target (prod talks to a remote backend).
+if [ "$TARGET" = local ]; then
+  HARNESS_DIR="$ROOT/../harness-backend"
+  # Any HTTP response (even 401/404) means it's up; curl exits non-zero only on
+  # connection refused. Uses localhost to match the client (harness binds IPv6).
+  harness_up() { curl -sS -m 2 -o /dev/null "http://localhost:8088/" 2>/dev/null; }
+  if harness_up; then
+    echo "[script/dev] harness already running on :8088"
+  elif [ -d "$HARNESS_DIR" ]; then
+    echo "[script/dev] starting harness backend ($HARNESS_DIR)"
+    ( cd "$HARNESS_DIR" && nohup npm start > /tmp/harness-backend.log 2>&1 < /dev/null & disown )
+    for _ in $(seq 1 20); do
+      harness_up && break
+      sleep 0.5
+    done
+    if harness_up; then
+      echo "[script/dev] harness is up on :8088"
+    else
+      echo "[script/dev] WARNING: harness did not come up; see /tmp/harness-backend.log"
+    fi
+  else
+    echo "[script/dev] WARNING: harness dir not found at $HARNESS_DIR — voice/AI will be offline"
+  fi
+fi
+
 exec "$ROOT/script/run" "${ARGS[@]}"

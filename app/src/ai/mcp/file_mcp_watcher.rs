@@ -18,6 +18,7 @@ use watcher::HomeDirectoryWatcherEvent;
 
 use crate::ai::mcp::parsing::{normalize_codex_toml_to_json, normalize_cursor_json};
 use crate::ai::mcp::{home_config_file_path, MCPProvider, ParsedTemplatableMCPServerResult};
+use crate::settings::{AISettings, AISettingsChangedEvent};
 use crate::warp_managed_paths_watcher::{
     warp_managed_mcp_config_path, WarpManagedPathsWatcher, WarpManagedPathsWatcherEvent,
 };
@@ -42,6 +43,13 @@ fn home_subdir_to_watch(provider: MCPProvider) -> Option<PathBuf> {
         .captures(path_str)
         .and_then(|caps| caps.get(1))
         .map(|m| PathBuf::from(m.as_str()))
+}
+
+/// Whether third-party (non-Warp) MCP configs are scanned passively. Tied to the
+/// Auto-import setting: when off, Bang watches only its own config and never
+/// reads other apps' data on its own.
+fn auto_import_enabled(ctx: &ModelContext<FileMCPWatcher>) -> bool {
+    *AISettings::as_ref(ctx).file_based_mcp_enabled
 }
 
 /// Messages sent from `RepositorySubscriber`s to detect file-based MCPs.
@@ -178,6 +186,21 @@ impl FileMCPWatcher {
             },
         );
 
+        // Re-scan third-party configs when the user turns Auto-import on, so it
+        // takes effect immediately (rather than only on the next launch).
+        ctx.subscribe_to_model(&AISettings::handle(ctx), |me, _, event, ctx| {
+            if matches!(event, AISettingsChangedEvent::FileBasedMcpEnabled { .. })
+                && auto_import_enabled(ctx)
+            {
+                let file_mcp_tx = me.file_mcp_tx.clone();
+                Self::scan_third_party_home_configs(
+                    &mut me.home_provider_watchers,
+                    &file_mcp_tx,
+                    ctx,
+                );
+            }
+        });
+
         let mut home_provider_watchers = HashMap::new();
         if let Some(mcp_config_path) = warp_managed_mcp_config_path() {
             Self::spawn_config_parse(
@@ -188,36 +211,12 @@ impl FileMCPWatcher {
             );
         }
 
-        if let Some(home_dir) = dirs::home_dir() {
-            for provider in MCPProvider::iter_available() {
-                if provider == MCPProvider::Warp {
-                    continue;
-                }
-                match home_subdir_to_watch(provider) {
-                    None => {
-                        // Initial scan of config files for providers whose config lives directly in
-                        // home (i.e. ~/.claude.json). HomeDirectoryWatcher handles incremental updates.
-                        let Some(config_path) = home_config_file_path(provider) else {
-                            continue;
-                        };
-                        Self::spawn_config_parse(config_path, home_dir.clone(), provider, ctx);
-                    }
-                    Some(subdir) => {
-                        // For providers whose home config lives in a subdir (e.g. ~/.codex for Codex)
-                        // start watching the subdir for file-based MCP servers, if it exists.
-                        let subdir_path = home_dir.join(&subdir);
-                        // Note: this will fail if the subdir doesn't exist yet.
-                        // We register upon creation of the subdir via HomeDirectoryWatcher.
-                        Self::watch_home_provider_dir(
-                            &subdir_path,
-                            home_dir.clone(),
-                            file_mcp_tx.clone(),
-                            &mut home_provider_watchers,
-                            ctx,
-                        );
-                    }
-                }
-            }
+        // Third-party (Claude/Codex/Agents/Cursor) home configs are only scanned
+        // passively when Auto-import is on. Otherwise Bang never reads other
+        // apps' data on its own — avoiding macOS's cross-app data-access prompt.
+        // On-demand import via Settings → MCP → Import works regardless.
+        if auto_import_enabled(ctx) {
+            Self::scan_third_party_home_configs(&mut home_provider_watchers, &file_mcp_tx, ctx);
         }
 
         Self {
@@ -225,6 +224,48 @@ impl FileMCPWatcher {
             home_provider_watchers,
             project_repo_watchers: HashSet::new(),
             cloud_env_pending: HashMap::new(),
+        }
+    }
+
+    /// Scans every third-party provider's home config (all providers except
+    /// Warp, which is handled separately), registering subdir watchers for those
+    /// whose config lives in a subdir (e.g. `~/.codex`). Gated by Auto-import.
+    fn scan_third_party_home_configs(
+        home_provider_watchers: &mut HashMap<PathBuf, (ModelHandle<Repository>, SubscriberId)>,
+        file_mcp_tx: &Sender<FileMCPDetectionMessage>,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        let Some(home_dir) = dirs::home_dir() else {
+            return;
+        };
+        for provider in MCPProvider::iter_available() {
+            if provider == MCPProvider::Warp {
+                continue;
+            }
+            match home_subdir_to_watch(provider) {
+                None => {
+                    // Initial scan of config files for providers whose config lives directly in
+                    // home (i.e. ~/.claude.json). HomeDirectoryWatcher handles incremental updates.
+                    let Some(config_path) = home_config_file_path(provider) else {
+                        continue;
+                    };
+                    Self::spawn_config_parse(config_path, home_dir.clone(), provider, ctx);
+                }
+                Some(subdir) => {
+                    // For providers whose home config lives in a subdir (e.g. ~/.codex for Codex)
+                    // start watching the subdir for file-based MCP servers, if it exists.
+                    let subdir_path = home_dir.join(&subdir);
+                    // Note: this will fail if the subdir doesn't exist yet.
+                    // We register upon creation of the subdir via HomeDirectoryWatcher.
+                    Self::watch_home_provider_dir(
+                        &subdir_path,
+                        home_dir.clone(),
+                        file_mcp_tx.clone(),
+                        home_provider_watchers,
+                        ctx,
+                    );
+                }
+            }
         }
     }
 
@@ -346,6 +387,12 @@ impl FileMCPWatcher {
         let Some(home_dir) = dirs::home_dir() else {
             return;
         };
+
+        // Only react to third-party home config changes when Auto-import is on;
+        // Warp's own config is handled via WarpManagedPathsWatcher.
+        if !auto_import_enabled(ctx) {
+            return;
+        }
 
         for provider in MCPProvider::iter_available() {
             if provider == MCPProvider::Warp {

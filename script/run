@@ -19,7 +19,10 @@ cd "${REPO_ROOT}"
 OS_TYPE="$(uname -s)"
 
 FEATURES="gui"
-INSTALL_COMMON_SKILLS=1
+# Common agent skills are opt-in on this fork: skipped by default so `./script/run`
+# never prompts to update skills-lock.json. Enable for a given run with the
+# --install-common-skills flag or by exporting WARP_SKIP_COMMON_SKILLS_INSTALL=0.
+INSTALL_COMMON_SKILLS=0
 FORCE_COMMON_SKILLS=0
 COMMON_SKILLS_TARGET="${WARP_COMMON_SKILLS_INSTALL_TARGET:-}"
 
@@ -31,13 +34,13 @@ if command -v warp-channel-config &>/dev/null; then
     WARP_BIN_NAME="warp"
     WARP_CHANNEL="local"
 else
-    WARP_BIN_NAME="warp-oss"
+    WARP_BIN_NAME="bang"
     WARP_CHANNEL="oss"
 fi
 
 # Shared argument parsing. macOS-specific flags (--dont-open,
-# --open_with_launchd, --generate-schema) are forwarded through MAC_ARGS and
-# silently ignored on other platforms.
+# --open_with_launchd, --no_open_with_launchd, --generate-schema) are forwarded
+# through MAC_ARGS and silently ignored on other platforms.
 MAC_ARGS=()
 CARGO_PARAMS=()
 WARP_ARGS=()
@@ -68,6 +71,7 @@ while (( "$#" )); do
       fi
       ;;
     --install-common-skills)
+      INSTALL_COMMON_SKILLS=1
       FORCE_COMMON_SKILLS=1
       shift
       ;;
@@ -100,6 +104,11 @@ install_common_skills_or_continue() {
     echo "error: unable to install common skills; continuing without them." >&2
   fi
 }
+# Explicit env opt-in: WARP_SKIP_COMMON_SKILLS_INSTALL=0 re-enables installation
+# for a run even without the flag. (=1 still skips, and skip remains the default.)
+if [[ "${WARP_SKIP_COMMON_SKILLS_INSTALL:-}" = "0" ]]; then
+  INSTALL_COMMON_SKILLS=1
+fi
 if [[ "$INSTALL_COMMON_SKILLS" -eq 1 ]]; then
   COMMON_SKILLS_ARGS=()
   if [[ "${COMMON_SKILLS_TARGET}" = "project" || "${COMMON_SKILLS_TARGET}" = "global" ]]; then

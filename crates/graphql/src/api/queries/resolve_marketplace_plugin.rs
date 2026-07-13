@@ -1,9 +1,8 @@
+use super::search_marketplace::MarketplaceSourceKind;
 use crate::error::UserFacingError;
 use crate::request_context::RequestContext;
 use crate::response_context::ResponseContext;
 use crate::schema;
-
-use super::search_marketplace::MarketplaceSourceKind;
 
 // Resolves a marketplace plugin's full component contents (MCP configs and the
 // bodies of its rule / command / agent / skill files) for installation. Kept
@@ -56,7 +55,10 @@ pub struct ResolveMarketplacePluginOutput {
 }
 
 #[derive(cynic::QueryFragment, Debug)]
-#[cynic(graphql_type = "RootQuery", variables = "ResolveMarketplacePluginVariables")]
+#[cynic(
+    graphql_type = "RootQuery",
+    variables = "ResolveMarketplacePluginVariables"
+)]
 pub struct ResolveMarketplacePlugin {
     #[arguments(input: $input, requestContext: $request_context)]
     pub resolve_marketplace_plugin: ResolveMarketplacePluginResult,

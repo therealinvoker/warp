@@ -13,15 +13,22 @@ use warpui::ui_components::keyboard_shortcut::keystroke_to_keys;
 use warpui::{AppContext, SingletonEntity};
 
 use crate::ai::blocklist::agent_view::agent_view_bg_color;
-use crate::ai::blocklist::agent_view::shortcuts::render_keystroke_with_color_overrides;
+use crate::ai::blocklist::agent_view::shortcuts::render_keystroke_with_color_and_font_overrides;
 use crate::terminal;
 use crate::terminal::input::message_bar::{ChipHorizontalAlignment, Message, MessageItem};
 use crate::ui_components::blended_colors;
 
 pub fn standard_message_bar_height(app: &AppContext) -> f32 {
+    standard_message_bar_height_with_font(app, styles::font_size(app))
+}
+
+/// Same as [`standard_message_bar_height`] but computed for a caller-supplied font
+/// size, so a bar rendered with a font override (e.g. the inline-menu nav bar)
+/// reserves the correct height and its positioning stays in sync.
+pub fn standard_message_bar_height_with_font(app: &AppContext, font_size: f32) -> f32 {
     let appearance = Appearance::as_ref(app);
     app.font_cache()
-        .line_height(styles::font_size(app), appearance.line_height_ratio())
+        .line_height(font_size, appearance.line_height_ratio())
         + styles::VERTICAL_PADDING * 2.
 }
 
@@ -30,7 +37,24 @@ pub fn render_standard_message_bar(
     right_element: Option<Box<dyn Element>>,
     app: &AppContext,
 ) -> Box<dyn Element> {
+    render_standard_message_bar_with_font(message, right_element, None, app)
+}
+
+/// Like [`render_standard_message_bar`], but lets the caller render the bar's text
+/// and keystroke chips at a font size other than the default `styles::font_size`
+/// (used by the inline-menu nav bar, which sits a couple points larger than the
+/// terminal/agent status bars). Pass `None` for the default size.
+pub fn render_standard_message_bar_with_font(
+    message: Message,
+    right_element: Option<Box<dyn Element>>,
+    font_size_override: Option<f32>,
+    app: &AppContext,
+) -> Box<dyn Element> {
     use warpui::prelude::MainAxisAlignment;
+
+    let bar_height = font_size_override
+        .map(|font_size| standard_message_bar_height_with_font(app, font_size))
+        .unwrap_or_else(|| standard_message_bar_height(app));
 
     let (left_items, right_chips): (Vec<_>, Vec<_>) = message.items.into_iter().partition(|item| {
         !matches!(
@@ -45,7 +69,7 @@ pub fn render_standard_message_bar(
     let right_element = if right_chips.is_empty() {
         right_element
     } else {
-        let right_chips_element = render_message_bar_items(&right_chips, app);
+        let right_chips_element = render_message_bar_items(&right_chips, font_size_override, app);
         Some(if let Some(existing_right) = right_element {
             Flex::row()
                 .with_cross_axis_alignment(CrossAxisAlignment::Center)
@@ -62,13 +86,21 @@ pub fn render_standard_message_bar(
             .with_main_axis_size(MainAxisSize::Max)
             .with_main_axis_alignment(MainAxisAlignment::SpaceBetween)
             .with_cross_axis_alignment(CrossAxisAlignment::Center)
-            .with_child(render_message_bar_items(&left_items, app))
+            .with_child(render_message_bar_items(
+                &left_items,
+                font_size_override,
+                app,
+            ))
             .with_child(right_element)
             .finish()
     } else {
-        Align::new(render_message_bar_items(&left_items, app))
-            .left()
-            .finish()
+        Align::new(render_message_bar_items(
+            &left_items,
+            font_size_override,
+            app,
+        ))
+        .left()
+        .finish()
     };
 
     ConstrainedBox::new(
@@ -79,7 +111,7 @@ pub fn render_standard_message_bar(
         )
         .finish(),
     )
-    .with_height(standard_message_bar_height(app))
+    .with_height(bar_height)
     .finish()
 }
 /// Renders a standard message bar variant for inline text and hyperlinks that need to soft-wrap.
@@ -129,14 +161,27 @@ pub fn render_wrapping_standard_message_bar(
 }
 
 pub fn render_standard_message(message: Message, app: &AppContext) -> Box<dyn Element> {
-    render_message_bar_items(&message.items, app)
+    render_message_bar_items(&message.items, None, app)
 }
 
 /// Renders a sequence of message items into a flex row.
 /// Currently used for agent message bar items and zero state message bar items.
-fn render_message_bar_items(items: &[MessageItem], app: &AppContext) -> Box<dyn Element> {
+///
+/// `font_size_override` renders the text, hyperlinks, icons, and keystroke chips at
+/// a size other than the default `styles::font_size` (the inline-menu nav bar uses
+/// this to sit a couple points larger than the terminal/agent status bars). Pass
+/// `None` for the default size.
+fn render_message_bar_items(
+    items: &[MessageItem],
+    font_size_override: Option<f32>,
+    app: &AppContext,
+) -> Box<dyn Element> {
     let appearance = Appearance::as_ref(app);
     let default_font_color = styles::default_font_color(app);
+    let font_size = font_size_override.unwrap_or_else(|| styles::font_size(app));
+    // Keep the keystroke chips 2pts below the text, mirroring the default gap
+    // between `message_bar::styles::font_size` and `shortcuts::styles::font_size`.
+    let keystroke_font_override = font_size_override.map(|size| size - 2.);
 
     let mut row = Flex::row()
         .with_cross_axis_alignment(CrossAxisAlignment::Center)
@@ -148,23 +193,20 @@ fn render_message_bar_items(items: &[MessageItem], app: &AppContext) -> Box<dyn 
                 keystroke,
                 color,
                 background_color,
-            } => Container::new(render_keystroke_with_color_overrides(
+            } => Container::new(render_keystroke_with_color_and_font_overrides(
                 keystroke,
                 *color,
                 *background_color,
+                keystroke_font_override,
                 app,
             ))
             .finish(),
             MessageItem::Text { content, color } => {
                 let font_color = color.unwrap_or(default_font_color);
-                Text::new(
-                    content.clone(),
-                    appearance.ui_font_family(),
-                    styles::font_size(app),
-                )
-                .with_color(font_color)
-                .soft_wrap(false)
-                .finish()
+                Text::new(content.clone(), appearance.ui_font_family(), font_size)
+                    .with_color(font_color)
+                    .soft_wrap(false)
+                    .finish()
             }
             MessageItem::Hyperlink {
                 content,
@@ -176,14 +218,10 @@ fn render_message_bar_items(items: &[MessageItem], app: &AppContext) -> Box<dyn 
                 let content = content.clone();
                 let url = url.clone();
                 Hoverable::new(mouse_state.clone(), |_| {
-                    Text::new(
-                        content.clone(),
-                        appearance.ui_font_family(),
-                        styles::font_size(app),
-                    )
-                    .with_color(link_color)
-                    .soft_wrap(false)
-                    .finish()
+                    Text::new(content.clone(), appearance.ui_font_family(), font_size)
+                        .with_color(link_color)
+                        .soft_wrap(false)
+                        .finish()
                 })
                 .on_click(move |_, app, _| {
                     app.open_url(&url);
@@ -194,8 +232,8 @@ fn render_message_bar_items(items: &[MessageItem], app: &AppContext) -> Box<dyn 
             MessageItem::Icon { icon, color } => {
                 let icon_color = color.unwrap_or(default_font_color);
                 ConstrainedBox::new(icon.to_warpui_icon(Fill::Solid(icon_color)).finish())
-                    .with_height(styles::font_size(app))
-                    .with_width(styles::font_size(app))
+                    .with_height(font_size)
+                    .with_width(font_size)
                     .finish()
             }
             MessageItem::Clickable {
@@ -204,7 +242,8 @@ fn render_message_bar_items(items: &[MessageItem], app: &AppContext) -> Box<dyn 
                 mouse_state,
                 disabled,
             } => {
-                let message_items = render_message_bar_items(clickable_items, app);
+                let message_items =
+                    render_message_bar_items(clickable_items, font_size_override, app);
 
                 if !disabled {
                     let action = action.clone();
@@ -230,7 +269,7 @@ fn render_message_bar_items(items: &[MessageItem], app: &AppContext) -> Box<dyn 
                 if !disabled {
                     Hoverable::new(mouse_state.clone(), move |state| {
                         render_message_chip_container(
-                            render_message_bar_items(&chip_items, app),
+                            render_message_bar_items(&chip_items, font_size_override, app),
                             state.is_hovered(),
                             app,
                         )
@@ -242,7 +281,7 @@ fn render_message_bar_items(items: &[MessageItem], app: &AppContext) -> Box<dyn 
                     .finish()
                 } else {
                     render_message_chip_container(
-                        render_message_bar_items(chip_items.as_slice(), app),
+                        render_message_bar_items(chip_items.as_slice(), font_size_override, app),
                         false,
                         app,
                     )
@@ -311,7 +350,9 @@ fn render_terminal_message_items(items: &[MessageItem], app: &AppContext) -> Box
     let theme = appearance.theme();
     let default_text_color = theme.disabled_text_color(theme.background()).into_solid();
     let font_family = appearance.monospace_font_family();
-    let font_size = appearance.monospace_font_size() - 2.;
+    // The fork's terminal font is 2pts smaller; keep the message bar hint/chip text
+    // at its original size (previously `monospace - 2`) by rendering at the full font size.
+    let font_size = appearance.monospace_font_size();
     let icon_size = font_size;
 
     let mut row = Flex::row()
@@ -524,7 +565,9 @@ pub mod styles {
 
     pub fn font_size(app: &AppContext) -> f32 {
         let appearance = Appearance::as_ref(app);
-        appearance.monospace_font_size() - 2.
+        // The fork's terminal font is 2pts smaller; keep message bar text at its
+        // original size (previously `monospace - 2`) by using the full font size.
+        appearance.monospace_font_size()
     }
 
     pub fn default_font_color(app: &AppContext) -> ColorU {

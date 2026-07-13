@@ -523,6 +523,7 @@ impl BlocklistAIActionExecutor {
                 .update(ctx, |executor, ctx| executor.preprocess_action(input, ctx)),
             AIAgentActionType::InitProject => futures::future::ready(()).boxed(),
             AIAgentActionType::OpenCodeReview => futures::future::ready(()).boxed(),
+            AIAgentActionType::OpenBrowserPreview { .. } => futures::future::ready(()).boxed(),
             AIAgentActionType::InsertCodeReviewComments { .. } => {
                 futures::future::ready(()).boxed()
             }
@@ -658,6 +659,13 @@ impl BlocklistAIActionExecutor {
             AIAgentActionType::OpenCodeReview => {
                 ctx.emit(BlocklistAIActionExecutorEvent::OpenCodeReview(action.id));
                 ActionExecution::<()>::Sync(AIAgentActionResultType::OpenCodeReview).into()
+            }
+            AIAgentActionType::OpenBrowserPreview { url } => {
+                ctx.emit(BlocklistAIActionExecutorEvent::OpenBrowserPreview {
+                    action_id: action.id,
+                    url: url.clone(),
+                });
+                ActionExecution::<()>::Sync(AIAgentActionResultType::OpenBrowserPreview).into()
             }
             AIAgentActionType::InsertCodeReviewComments {
                 repo_path,
@@ -959,6 +967,7 @@ impl BlocklistAIActionExecutor {
                 .update(ctx, |executor, ctx| executor.should_autoexecute(input, ctx)),
             AIAgentActionType::InitProject => true,
             AIAgentActionType::OpenCodeReview => true,
+            AIAgentActionType::OpenBrowserPreview { .. } => true,
             AIAgentActionType::InsertCodeReviewComments { .. } => true,
             AIAgentActionType::SuggestNewConversation { .. } => self
                 .suggest_new_conversation_executor
@@ -1037,6 +1046,10 @@ pub enum BlocklistAIActionExecutorEvent {
 
     InitProject(AIAgentActionId),
     OpenCodeReview(AIAgentActionId),
+    OpenBrowserPreview {
+        action_id: AIAgentActionId,
+        url: String,
+    },
     InsertCodeReviewComments {
         action_id: AIAgentActionId,
         repo_path: PathBuf,

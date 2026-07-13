@@ -119,6 +119,11 @@ pub enum AIAgentActionType {
     InitProject,
     OpenCodeReview,
 
+    /// Point the in-app browser preview (macOS Preview tab) at a URL.
+    OpenBrowserPreview {
+        url: String,
+    },
+
     ReadDocuments(ReadDocumentsRequest),
     EditDocuments(EditDocumentsRequest),
     CreateDocuments(CreateDocumentsRequest),
@@ -410,6 +415,7 @@ impl AIAgentActionType {
                 AIAgentActionResultType::SuggestPrompt(SuggestPromptResult::Cancelled)
             }
             Self::OpenCodeReview => AIAgentActionResultType::OpenCodeReview,
+            Self::OpenBrowserPreview { .. } => AIAgentActionResultType::OpenBrowserPreview,
             Self::InitProject => AIAgentActionResultType::InitProject,
             Self::ReadDocuments(_) => {
                 AIAgentActionResultType::ReadDocuments(ReadDocumentsResult::Cancelled)
@@ -500,6 +506,7 @@ impl AIAgentActionType {
             Self::SuggestPrompt { .. } => "Suggest prompt".to_string(),
             Self::InitProject => "Init project".to_string(),
             Self::OpenCodeReview => "Open code review".to_string(),
+            Self::OpenBrowserPreview { .. } => "Open browser preview".to_string(),
             Self::ReadDocuments(_) => "Read documents".to_string(),
             Self::EditDocuments(_) => "Edit documents".to_string(),
             Self::CreateDocuments(_) => "Create documents".to_string(),
@@ -645,6 +652,9 @@ impl Display for AIAgentActionType {
             }
             AIAgentActionType::OpenCodeReview => {
                 write!(f, "OpenCodeReview")
+            }
+            AIAgentActionType::OpenBrowserPreview { url } => {
+                write!(f, "OpenBrowserPreview({url})")
             }
             AIAgentActionType::ReadDocuments(request) => {
                 let ids: Vec<String> = request

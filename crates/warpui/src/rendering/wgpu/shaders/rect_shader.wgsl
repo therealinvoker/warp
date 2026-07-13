@@ -202,12 +202,42 @@ fn rect_fs_main(in: RectVertexShaderOutput) -> @location(0) vec4<f32> {
         background_color = vec4(new_background_color, alpha);
     }
 
+    // Dither low-contrast gradients to eliminate visible 8-bit banding. A
+    // gradient that varies by only a few 1/255 steps across a wide rect (e.g. a
+    // subtle panel background) quantizes into visible bands; adding a sub-LSB,
+    // screen-space noise offset before the framebuffer quantizes breaks the
+    // bands into imperceptible noise. Gated to actual gradients so solid fills
+    // (and pixel-exact snapshots) are untouched.
+    var background_color_delta: vec4<f32> = abs(in.background_start_color - in.background_end_color);
+    if (background_color_delta.x + background_color_delta.y + background_color_delta.z + background_color_delta.w) > 0.0 {
+        // Triangular-PDF dither spanning ~1 LSB peak — the standard amount to
+        // fully break 8-bit banding while staying imperceptible. Uses
+        // structure-free hash white noise (two decorrelated samples) rather than
+        // interleaved-gradient-noise, whose diagonal/axis-aligned pattern can
+        // itself resolve as faint lines on sharp high-DPI displays.
+        var n1: f32 = hash_white_noise(in.position.xy);
+        var n2: f32 = hash_white_noise(in.position.xy + vec2<f32>(17.0, 23.0));
+        var dither: f32 = (n1 + n2 - 1.0) / 255.0;
+        background_color = clamp(background_color + vec4<f32>(dither), vec4<f32>(0.0), vec4<f32>(1.0));
+    }
+
     // If there's a corner radius we need to do some anti aliasing to smooth out the rounded corner effect.
     if outer_corner_radius > 0. {
         background_color.a *= 1.0 - saturate(outer_distance + 0.5);
     }
 
     return background_color;
+}
+
+// Structure-free hash white noise (Dave Hoskins' hash12) used as a dither
+// source. Returns a value in [0, 1) that is decorrelated between neighboring
+// pixels in every direction, so it breaks up gradient banding without adding
+// any directional pattern of its own (unlike interleaved-gradient-noise, whose
+// diagonal structure can read as faint lines on sharp high-DPI displays).
+fn hash_white_noise(pos: vec2<f32>) -> f32 {
+    var p3: vec3<f32> = fract(vec3<f32>(pos.x, pos.y, pos.x) * 0.1031);
+    p3 = p3 + dot(p3, vec3<f32>(p3.y, p3.z, p3.x) + 33.33);
+    return fract((p3.x + p3.y) * p3.z);
 }
 
 fn derive_color(

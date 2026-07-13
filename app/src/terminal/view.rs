@@ -774,16 +774,16 @@ impl NotificationsTrigger {
     pub fn discovery_banner_copy(&self) -> &'static str {
         match self {
             NotificationsTrigger::LongRunningCommand(..) => {
-                "Warp can notify you when long-running commands finish."
+                "Bang can notify you when long-running commands finish."
             }
             NotificationsTrigger::AgentTaskCompleted(..) => {
-                "Warp can notify you when an agent finishes responding."
+                "Bang can notify you when an agent finishes responding."
             }
             NotificationsTrigger::NeedsAttention => {
-                "Warp can notify you when a command or agent needs your attention."
+                "Bang can notify you when a command or agent needs your attention."
             }
             NotificationsTrigger::PasswordPrompt => {
-                "Warp can notify you when you're prompted to enter a password."
+                "Bang can notify you when you're prompted to enter a password."
             }
         }
     }
@@ -1944,6 +1944,10 @@ pub enum Event {
     ToggleLeftPanel {
         target_view: LeftPanelTargetView,
         force_open: bool,
+    },
+    /// Open the browser preview tab in the left panel and navigate it to `url`.
+    OpenBrowserPreview {
+        url: String,
     },
     SlowBootstrap,
     OpenAgentProfileEditor {
@@ -3907,7 +3911,7 @@ impl TerminalView {
         let incompatible_configuration_banner = ctx.add_typed_action_view(|_| {
             Banner::new(BannerTextContent::formatted_text(vec![
                 FormattedTextFragment::plain_text(
-                    "Your shell configuration is incompatible with Warp...  ",
+                    "Your shell configuration is incompatible with Bang...  ",
                 ),
                 FormattedTextFragment::hyperlink("More info", KNOWN_ISSUES_URL),
             ]))
@@ -7307,6 +7311,9 @@ impl TerminalView {
                     ctx,
                 );
             }
+            BlocklistAIActionEvent::OpenBrowserPreview { url, .. } => {
+                ctx.emit(Event::OpenBrowserPreview { url: url.clone() });
+            }
             BlocklistAIActionEvent::InsertCodeReviewComments {
                 action_id: _,
                 repo_path,
@@ -9813,11 +9820,11 @@ impl TerminalView {
 
         let a11y_message = match &warpify_keybinding {
             Some(keystroke) => format!(
-                "You can press {} to Warpify this {} for more Warp features.",
+                "You can press {} to Bangify this {} for more Bang features.",
                 keystroke.displayed(),
                 lowercase_title
             ),
-            None => format!("You can Warpify this {lowercase_title} for more Warp features."),
+            None => format!("You can Bangify this {lowercase_title} for more Bang features."),
         };
 
         model
@@ -9980,7 +9987,7 @@ impl TerminalView {
 
         let a11y_content = AccessibilityContent::new(
             banner_title,
-            "Make sure you have enabled access for Warp notifications in System Preferences.",
+            "Make sure you have enabled access for Bang notifications in System Preferences.",
             WarpA11yRole::TextRole,
         );
         ctx.emit_a11y_content(a11y_content);
@@ -16503,7 +16510,7 @@ impl TerminalView {
 
                             if is_markdown_file(&path) {
                                 items.push(
-                                    MenuItemFields::new("Open in Warp")
+                                    MenuItemFields::new("Open in Bang")
                                         .with_on_select_action(TerminalAction::OpenFileInWarp(path))
                                         .into_item(),
                                 );
@@ -16721,7 +16728,7 @@ impl TerminalView {
                     } else {
                         items.extend([
                             MenuItem::Separator,
-                            MenuItemFields::new("Ask Warp AI")
+                            MenuItemFields::new("Ask Bang AI")
                                 .with_on_select_action(TerminalAction::ContextMenu(
                                     ContextMenuAction::AskAI(AskAISource::SelectedBlockOrText),
                                 ))
@@ -17388,7 +17395,7 @@ impl TerminalView {
 
             if !selected_input_text.is_empty() && !FeatureFlag::AgentMode.is_enabled() {
                 items.push(
-                    MenuItemFields::new("Ask Warp AI")
+                    MenuItemFields::new("Ask Bang AI")
                         .with_on_select_action(TerminalAction::InputContextMenuItem(
                             InputContextMenuAction::AskWarpAI,
                         ))
@@ -22137,7 +22144,7 @@ impl TerminalView {
         let show_banner = if honor_ps1 {
             let banner_content = if shell_plugins.contains("p10k_unsupported") {
                 Some(BannerTextContent::formatted_text(vec![
-                    FormattedTextFragment::bold("Powerlevel10k now supports Warp!  "),
+                    FormattedTextFragment::bold("Powerlevel10k now supports Bang!  "),
                     FormattedTextFragment::plain_text(
                         "You seem to be running an older (unsupported) version, please follow ",
                     ),
@@ -26118,7 +26125,7 @@ impl TypedActionView for TerminalView {
                 WarpA11yRole::TextareaRole,
             )),
             ShowWarpifySettings => Custom(AccessibilityContent::new_without_help(
-                "Opened Warpify Settings",
+                "Opened Bangify Settings",
                 WarpA11yRole::ButtonRole,
             )),
             OpenFilesPalette { .. } => Custom(AccessibilityContent::new_without_help(
@@ -26957,7 +26964,7 @@ impl TypedActionView for TerminalView {
                                 id: asset_id,
                             },
                         },
-                        description: Some(image.file_name.clone()),
+                        description: None,
                     });
                 }
 
@@ -26968,6 +26975,9 @@ impl TypedActionView for TerminalView {
                 ctx.dispatch_typed_action(&WorkspaceAction::OpenLightbox {
                     images,
                     initial_index,
+                    // Attachment thumbnails auto-copy on open so a screenshot or
+                    // pasted image lands on the clipboard without an extra click.
+                    auto_copy: true,
                 });
             }
             WriteCodebaseIndex => {

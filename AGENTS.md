@@ -2,6 +2,11 @@
 
 This file provides guidance when working with code in this repository.
 
+> **UI / design notes:** See [`doc/design.md`](doc/design.md) for durable,
+> non-obvious findings about the client UI (composer font sizing, icon-only
+> button glyph sizing, input-box padding, SVG icon masking, etc.). Read it before
+> doing composer/input UI work.
+
 ## Fork Notes — Personal Fork (Do Not Upstream)
 
 > **This checkout is a personal fork.** Work here targets the owner's own repository and a custom backend — it is **not** meant to be contributed back to `warpdotdev/warp`. Do **not** open pull requests, push branches, or file issues against the upstream Warp repo from this checkout.

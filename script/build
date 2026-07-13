@@ -19,7 +19,7 @@ FEATURES="gui"
 if command -v warp-channel-config >/dev/null 2>&1; then
   WARP_BIN_NAME="warp"
 else
-  WARP_BIN_NAME="warp-oss"
+  WARP_BIN_NAME="bang"
 fi
 
 echo "[script/build] cargo build --bin $WARP_BIN_NAME --features \"$FEATURES\" $*"

@@ -1712,10 +1712,11 @@ impl ProfileModelSelector {
 
         content = content.with_child(model_text);
 
-        // Only show chevron icon if the user can click to open the menu (i.e. has edit access)
-        // and the InlineMenuHeaders feature flag is not enabled
-        // (when enabled, clicking opens the inline model selector instead of a dropdown).
-        if has_edit_access && !FeatureFlag::InlineMenuHeaders.is_enabled() {
+        // Show a down chevron after the model name whenever the user can open the
+        // selector (has edit access), regardless of `InlineMenuHeaders`, so the
+        // model label always advertises that clicking opens a menu (whether that's
+        // the dropdown or the inline model selector).
+        if has_edit_access {
             let chevron_icon = Icon::ChevronDown
                 .to_warpui_icon(Fill::Solid(text_color))
                 .finish();
@@ -2012,7 +2013,7 @@ impl ProfileModelSelector {
         let theme = appearance.theme();
         let header = self.render_model_spec_header(
             "Model Specs".to_string(),
-            "Warp’s benchmarks for how well a model performs in our harness, the rate at which it consumes credits, and task speed.".to_string(),
+            "Bang’s benchmarks for how well a model performs in our harness, the rate at which it consumes credits, and task speed.".to_string(),
             app,
         );
         let spec = self.render_all_model_spec_values(
@@ -2188,8 +2189,6 @@ impl View for ProfileModelSelector {
     }
 
     fn render(&self, app: &AppContext) -> Box<dyn Element> {
-        let appearance = Appearance::as_ref(app);
-        let theme = appearance.theme();
         let profiles_model = AIExecutionProfilesModel::as_ref(app);
         let has_multiple_profiles = profiles_model.has_multiple_profiles();
 
@@ -2240,12 +2239,12 @@ impl View for ProfileModelSelector {
         }
         chip_content.add_child(self.render_model_section(app));
 
+        // No resting background/border on the chip: the profile + model selector
+        // reads as plain text beside the mic/lightning controls (per design). The
+        // per-section hover states (`surface_2` in `render_profile_section` /
+        // `render_model_section`) still provide click affordance on hover.
         let unified_chip = Container::new(
             Container::new(chip_content.finish())
-                .with_background(theme.surface_1())
-                .with_border(
-                    Border::all(BORDER_WIDTH).with_border_color(internal_colors::neutral_3(theme)),
-                )
                 .with_corner_radius(CornerRadius::with_all(Radius::Pixels(CORNER_RADIUS)))
                 .finish(),
         )

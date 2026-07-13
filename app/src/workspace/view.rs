@@ -1,4 +1,5 @@
 pub(crate) mod auto_handoff_sleep_modal;
+pub(crate) mod browser_preview;
 mod build_plan_migration_modal;
 pub(crate) mod cloud_agent_capacity_modal;
 pub(crate) mod code_review_panel;
@@ -14,6 +15,7 @@ pub(crate) mod left_panel;
 pub(crate) mod onboarding;
 pub(crate) mod openwarp_launch_modal;
 pub(crate) mod orchestration_launch_modal;
+mod shimmering_bolt;
 mod startup_directory;
 mod tab_grouping;
 #[cfg(test)]
@@ -164,7 +166,7 @@ use crate::ai::agent::conversation::AIAgentHarness;
 use crate::ai::agent::conversation::{AIConversation, AIConversationId};
 #[cfg(all(feature = "local_fs", not(target_family = "wasm")))]
 use crate::ai::agent::CancellationReason;
-use crate::ai::agent::{AIAgentInput, EntrypointType};
+use crate::ai::agent::{AIAgentInput, EntrypointType, ImageContext};
 #[cfg(target_family = "wasm")]
 use crate::ai::agent_conversations_model::AgentConversationsModelEvent;
 use crate::ai::agent_conversations_model::{
@@ -290,12 +292,11 @@ use crate::palette::PaletteMode;
 use crate::pane_group::pane::ActionOrigin;
 #[cfg(feature = "local_fs")]
 use crate::pane_group::FilePane;
-use crate::pane_group::MarketplacePane;
 use crate::pane_group::{
     self, AIFactPane, AnyPaneContent, ChildAgentOrigin, CodeDiffPane, CodePane, CodeReviewPanelArg,
     CustomRouterEditorPane, Direction as PaneGroupDirection, Direction, EnvironmentManagementPane,
-    ExecutionProfileEditorPane, NetworkLogPane, NewTerminalOptions, PaneGroup, PaneId, PanesLayout,
-    TabBarHoverIndex, TerminalPaneId,
+    ExecutionProfileEditorPane, MarketplacePane, NetworkLogPane, NewTerminalOptions, PaneGroup,
+    PaneId, PanesLayout, TabBarHoverIndex, TerminalPaneId,
 };
 use crate::persistence::ModelEvent;
 use crate::projects::ProjectManagementModel;
@@ -311,7 +312,9 @@ use crate::resource_center::{
     ResourceCenterEvent, ResourceCenterPage, ResourceCenterView, Tip, TipAction, TipsCompleted,
 };
 use crate::reward_view::{RewardEvent, RewardKind, RewardView};
-use crate::root_view::{quake_mode_window_id, NewWorkspaceSource, OpenLaunchConfigArg};
+use crate::root_view::{
+    quake_mode_window_id, NewWorkspaceSource, OpenLaunchConfigArg, RootViewAction,
+};
 use crate::search::command_palette::view::{
     Event as CommandPaletteEvent, NavigationMode, View as CommandPalette,
 };
@@ -434,9 +437,7 @@ use crate::themes::theme_chooser::{ThemeChooser, ThemeChooserEvent, ThemeChooser
 use crate::themes::theme_creator_modal::{ThemeCreatorModal, ThemeCreatorModalEvent};
 use crate::themes::theme_deletion_modal::{ThemeDeletionModal, ThemeDeletionModalEvent};
 use crate::tips::{TipsEvent, TipsView};
-use crate::ui_components::avatar::{Avatar, AvatarContent, StatusElementTypes};
 use crate::ui_components::buttons::{combo_inner_button, icon_button_with_color};
-use crate::ui_components::red_notification_dot::RedNotificationDot;
 use crate::ui_components::window_focus_dimming::WindowFocusDimming;
 use crate::ui_components::{blended_colors, icons};
 use crate::undo_close::UndoCloseStack;
@@ -568,7 +569,7 @@ const TAB_BAR_PILL_WIDTH: f32 = 100.;
 const PILL_FONT_SIZE: f32 = 12.;
 // We use the word "Warp" in the Update Ready button to make it obvious that the terminal is Warp.
 // This can lead to free advertising when users screen-share Warp when an update is available.
-const UPDATE_READY_TEXT: &str = "Update Warp";
+const UPDATE_READY_TEXT: &str = "Update Bang";
 
 const TAB_BAR_OVERFLOW_MENU_WIDTH: f32 = 300.;
 
@@ -597,7 +598,7 @@ const AI_ASSISTANT_BUTTON_ID: &str = "workspace_view:ai_assistant_button";
 
 const VERSION_DEPRECATION_BANNER_TEXT: &str = "Your app is out of date and some features may not work as expected. Please update immediately.";
 
-const VERSION_DEPRECATION_WITHOUT_PERMISSIONS_BANNER_TEXT: &str = "Some Warp features may not work as expected without updating immediately, but Warp is unable to perform the update.";
+const VERSION_DEPRECATION_WITHOUT_PERMISSIONS_BANNER_TEXT: &str = "Some Bang features may not work as expected without updating immediately, but Bang is unable to perform the update.";
 
 const ASK_AI_ASSISTANT_KEYBINDING_NAME: &str = "workspace:toggle_ai_assistant";
 const TOGGLE_RESOURCE_CENTER_KEYBINDING_NAME: &str = "workspace:toggle_resource_center";
@@ -677,10 +678,7 @@ const MAX_WINDOW_TITLE_LENGTH: usize = 80;
 
 #[cfg(all(feature = "local_fs", not(target_family = "wasm")))]
 const AUTO_CLOUD_HANDOFF_PROMPT: &str =
-    "Continue this local Warp Agent task in the cloud from the current conversation state.";
-
-/// The default display name used for the user if they have no associated display name.
-pub const DEFAULT_USER_DISPLAY_NAME: &str = "User";
+    "Continue this local Bang Agent task in the cloud from the current conversation state.";
 
 lazy_static! {
     static ref OPENING_WARP_DRIVE_ON_START_UP: Arc<Mutex<bool>> = Arc::new(Mutex::new(false));
@@ -4235,6 +4233,7 @@ impl Workspace {
                 LeftPanelDisplayedTab::WarpDrive => ToolPanelView::WarpDrive,
                 LeftPanelDisplayedTab::ConversationListView => ToolPanelView::ConversationListView,
                 LeftPanelDisplayedTab::CodeReview => ToolPanelView::CodeReview,
+                LeftPanelDisplayedTab::BrowserPreview => ToolPanelView::BrowserPreview,
             };
             lp.restore_active_view_from_snapshot(active_view, ctx);
         });
@@ -5969,6 +5968,73 @@ impl Workspace {
             self.activate_tab_internal(index, ctx);
             ctx.notify();
         }
+    }
+
+    /// Focuses the pane identified by `locator` and attaches the given image
+    /// files to its chat composer. Used when the user drags image files from the
+    /// OS onto a vertical tab: the drop should land in that tab's input, not the
+    /// previously focused one, so we focus first and then route the paths to the
+    /// pane's terminal input. `paths` are expected to already be image files.
+    fn attach_images_to_pane(
+        &mut self,
+        locator: PaneViewLocator,
+        paths: Vec<String>,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        if paths.is_empty() {
+            return;
+        }
+        // Focus the drop target first so the images attach to its composer.
+        self.focus_pane(locator, ctx);
+
+        let terminal_view = self
+            .tabs
+            .iter()
+            .find(|tab| tab.pane_group.id() == locator.pane_group_id)
+            .and_then(|tab| {
+                tab.pane_group
+                    .as_ref(ctx)
+                    .terminal_view_from_pane_id(locator.pane_id, ctx)
+            });
+        let Some(terminal_view) = terminal_view else {
+            return;
+        };
+        terminal_view.update(ctx, |view, ctx| {
+            view.input().update(ctx, |input, ctx| {
+                input.handle_pasted_or_dragdropped_image_filepaths(paths, ctx);
+            });
+        });
+    }
+
+    /// Moves an already-staged composer image (dragged from another tab's chat
+    /// composer thumbnail) into the target pane's composer. The image is already
+    /// processed (base64), so it's appended directly rather than re-read from
+    /// disk. Focuses the target pane first so the image lands in its input.
+    fn attach_image_to_pane(
+        &mut self,
+        locator: PaneViewLocator,
+        image: ImageContext,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        self.focus_pane(locator, ctx);
+
+        let terminal_view = self
+            .tabs
+            .iter()
+            .find(|tab| tab.pane_group.id() == locator.pane_group_id)
+            .and_then(|tab| {
+                tab.pane_group
+                    .as_ref(ctx)
+                    .terminal_view_from_pane_id(locator.pane_id, ctx)
+            });
+        let Some(terminal_view) = terminal_view else {
+            return;
+        };
+        terminal_view.update(ctx, |view, ctx| {
+            view.input().update(ctx, |input, ctx| {
+                input.append_pending_image(image, ctx);
+            });
+        });
     }
 
     /// Searches this workspace's tabs for the given terminal view and focuses it.
@@ -7931,7 +7997,7 @@ impl Workspace {
                             .into_item(),
                     ),
                     AutoupdateStage::UnableToUpdateToNewVersion { .. } => menu_items.push(
-                        MenuItemFields::new("Update Warp manually")
+                        MenuItemFields::new("Update Bang manually")
                             .with_on_select_action(WorkspaceAction::DownloadNewVersion)
                             .into_item(),
                     ),
@@ -9039,7 +9105,7 @@ impl Workspace {
     fn install_oz(&mut self, ctx: &mut ViewContext<Self>) {
         ctx.spawn(async { cli_install::install_oz() }, |view, result, ctx| {
             let command_name = ChannelState::channel().cli_command_name();
-            let message = format!("Installed the Oz CLI globally. You can now run '{command_name}' from any terminal outside of Warp.");
+            let message = format!("Installed the Oz CLI globally. You can now run '{command_name}' from any terminal outside of Bang.");
             let toast = DismissibleToast::success(message).with_link(
                 ToastLink::new("Learn more".to_string())
                     .with_href("https://docs.warp.dev/reference/cli".to_string()),
@@ -9055,7 +9121,7 @@ impl Workspace {
             async { cli_install::uninstall_oz() },
             |view, result, ctx| {
                 let toast = DismissibleToast::success(
-                    "Removed the global Oz CLI installation — it still works inside Warp."
+                    "Removed the global Oz CLI installation — it still works inside Bang."
                         .to_string(),
                 );
                 view.handle_cli_command_result(
@@ -9075,12 +9141,12 @@ impl Workspace {
             async { cli_install::install_warpctrl() },
             |view, result, ctx| {
                 let command_name = ChannelState::channel().warpctrl_command_name();
-                let message = format!("Installed the Warp Control CLI globally. You can now run '{command_name}' from any terminal outside of Warp.");
+                let message = format!("Installed the Bang Control CLI globally. You can now run '{command_name}' from any terminal outside of Bang.");
                 let toast = DismissibleToast::success(message);
                 view.handle_cli_command_result(
                     result,
                     toast,
-                    "Failed to install Warp Control command",
+                    "Failed to install Bang Control command",
                     ctx,
                 );
             },
@@ -9094,13 +9160,13 @@ impl Workspace {
             async { cli_install::uninstall_warpctrl() },
             |view, result, ctx| {
                 let toast = DismissibleToast::success(
-                    "Removed the global Warp Control CLI installation — it still works inside Warp."
+                    "Removed the global Bang Control CLI installation — it still works inside Bang."
                         .to_string(),
                 );
                 view.handle_cli_command_result(
                     result,
                     toast,
-                    "Failed to uninstall Warp Control command",
+                    "Failed to uninstall Bang Control command",
                     ctx,
                 );
             },
@@ -9652,7 +9718,7 @@ impl Workspace {
                     ) =>
                 {
                     items.push(
-                        MenuItemFields::new("Update and relaunch Warp")
+                        MenuItemFields::new("Update and relaunch Bang")
                             .with_on_select_action(WorkspaceAction::ApplyUpdate)
                             .with_override_text_color(appearance.theme().ansi_fg_red())
                             .into_item(),
@@ -9675,7 +9741,7 @@ impl Workspace {
                     ) =>
                 {
                     items.push(
-                        MenuItemFields::new("Update Warp manually")
+                        MenuItemFields::new("Update Bang manually")
                             .with_on_select_action(WorkspaceAction::DownloadNewVersion)
                             .with_override_text_color(appearance.theme().ansi_fg_red())
                             .into_item(),
@@ -9706,10 +9772,21 @@ impl Workspace {
 
         #[cfg(not(target_family = "wasm"))]
         items.push(
-            MenuItemFields::new("View Warp logs")
+            MenuItemFields::new("View Bang logs")
                 .with_on_select_action(WorkspaceAction::ViewLogs)
                 .into_item(),
         );
+
+        // Dev-only: replay the first-run welcome/onboarding experience. Gated to
+        // debug builds with onboarding enabled, matching the "[Debug] Enter
+        // Onboarding State" keybinding (shift-f12) it bridges to.
+        if ChannelState::enable_debug_features() && FeatureFlag::AgentOnboarding.is_enabled() {
+            items.push(
+                MenuItemFields::new("Replay Welcome")
+                    .with_on_select_action(WorkspaceAction::ReplayWelcome)
+                    .into_item(),
+            );
+        }
 
         items.extend([
             MenuItemFields::new("Slack")
@@ -12563,11 +12640,12 @@ impl Workspace {
             )
         });
 
-        // Serially name plain new terminal tabs ("Terminal 1", "Terminal 2", ...)
-        // instead of using the shell/hostname title. Agent/Cloud Agent tabs keep
-        // their own naming, so skip when the tab will enter agent view. Docker
-        // sandbox tabs also keep their descriptive shell name.
-        let custom_tab_title = if should_enter_agent_view || is_docker_sandbox {
+        // Serially name new tabs ("Terminal 1", "Terminal 2", ...) instead of
+        // falling back to the shell/hostname title. Agent-view tabs get the same
+        // placeholder; it's replaced by the first user query's text via
+        // `update_tab_title_from_conversation` (which overrides any "Terminal {n}"
+        // title). Docker sandbox tabs keep their descriptive shell name.
+        let custom_tab_title = if is_docker_sandbox {
             None
         } else {
             Some(format!("Terminal {}", self.next_terminal_tab_number(ctx)))
@@ -14276,7 +14354,7 @@ impl Workspace {
                         let url = NOTIFICATIONS_TROUBLESHOOT_URL.to_string();
                         view.toast_stack.update(ctx, |toast_stack, ctx| {
                             let toast = DismissibleToast::error(
-                                "Warp doesn't have permission to send desktop notifications.".to_string(),
+                                "Bang doesn't have permission to send desktop notifications.".to_string(),
                             )
                             .with_link(ToastLink::new("Troubleshoot notifications".to_string()).with_href(url));
                             toast_stack.add_persistent_toast(toast, ctx);
@@ -14940,7 +15018,7 @@ impl Workspace {
                                 link = link.with_keystroke(keystroke);
                             }
 
-                            let toast = DismissibleToast::default(String::from("Warp updated!"))
+                            let toast = DismissibleToast::default(String::from("Bang updated!"))
                                 .with_link(link);
 
                             stack.add_ephemeral_toast(toast, ctx);
@@ -15547,7 +15625,7 @@ impl Workspace {
             WorkspaceToastStack::handle(ctx).update(ctx, |toast_stack, ctx| {
                 toast_stack.add_ephemeral_toast(
                     DismissibleToast::error(
-                        "Couldn't open a cloud pane for handoff. Try again, or restart Warp if this keeps happening."
+                        "Couldn't open a cloud pane for handoff. Try again, or restart Bang if this keeps happening."
                             .to_owned(),
                     ),
                     window_id,
@@ -15962,7 +16040,7 @@ impl Workspace {
                 WorkspaceToastStack::handle(ctx).update(ctx, |toast_stack, ctx| {
                     toast_stack.add_ephemeral_toast(
                         DismissibleToast::error(
-                            "Couldn't open a cloud pane for handoff. Try again, or restart Warp if this keeps happening."
+                            "Couldn't open a cloud pane for handoff. Try again, or restart Bang if this keeps happening."
                                 .to_owned(),
                         ),
                         window_id,
@@ -17142,6 +17220,22 @@ impl Workspace {
                     });
                 }
             }
+            pane_group::Event::OpenBrowserPreview { url } => {
+                if !self.active_tab_pane_group().as_ref(ctx).left_panel_open {
+                    self.toggle_left_panel(ctx);
+                }
+                self.left_panel_view.update(ctx, |left_panel, ctx| {
+                    left_panel.handle_action_with_force_open(
+                        &LeftPanelAction::BrowserPreview,
+                        true,
+                        ctx,
+                    );
+                    let preview = left_panel.browser_preview_view().clone();
+                    preview.update(ctx, |preview, ctx| {
+                        preview.navigate(url.clone(), ctx);
+                    });
+                });
+            }
             #[cfg(feature = "local_fs")]
             pane_group::Event::OpenFileWithTarget {
                 path,
@@ -18295,7 +18389,7 @@ impl Workspace {
                                             },
                                         ) {
                                             new_toast = DismissibleToast::success(
-                                                "Plan synced to your Warp Drive".to_string(),
+                                                "Plan synced to your Bang Drive".to_string(),
                                             )
                                             .with_object_id(object_id_clone)
                                             .with_link(
@@ -19038,7 +19132,7 @@ impl Workspace {
                 let command = code.trim().to_string();
                 let args_state =
                     ArgumentsState::for_command_workflow(&Default::default(), command.clone());
-                let workflow = Workflow::new("Command from Warp AI", command)
+                let workflow = Workflow::new("Command from Bang AI", command)
                     .with_arguments(args_state.arguments);
                 self.run_workflow_in_active_input(
                     &WorkflowType::AIGenerated {
@@ -19842,7 +19936,7 @@ impl Workspace {
         let body = appearance
             .ui_builder()
             .wrappable_text(
-                "Ask Warp AI to explain errors, suggest commands or write scripts.".to_owned(),
+                "Ask Bang AI to explain errors, suggest commands or write scripts.".to_owned(),
                 true,
             )
             .with_style(UiComponentStyles {
@@ -20465,6 +20559,7 @@ impl Workspace {
                         ToolPanelView::WarpDrive => "Bang drive",
                         ToolPanelView::ConversationListView => "Agent conversations",
                         ToolPanelView::CodeReview => "Code review",
+                        ToolPanelView::BrowserPreview => "Preview",
                     }
                 } else {
                     "Tools panel"
@@ -20520,6 +20615,7 @@ impl Workspace {
                 ToolPanelView::WarpDrive => "Bang drive",
                 ToolPanelView::ConversationListView => "Agent conversations",
                 ToolPanelView::CodeReview => "Code review",
+                ToolPanelView::BrowserPreview => "Preview",
             }
         } else {
             "Tools panel"
@@ -20530,7 +20626,7 @@ impl Workspace {
                 Align::new(
                     self.render_tab_bar_icon_button(
                         appearance,
-                        icons::Icon::Tool2,
+                        icons::Icon::RightSidebarOpen,
                         &self.mouse_states.tools_panel_icon,
                         WorkspaceAction::ToggleLeftPanel,
                         tooltip_text.to_string(),
@@ -21288,6 +21384,11 @@ impl Workspace {
         }
 
         for item in config.right_items() {
+            // The tools/drawer toggle is rendered to the right of the resource
+            // center below, so skip it here.
+            if item == HeaderToolbarItemKind::ToolsPanel {
+                continue;
+            }
             if let Some(button) = self.render_header_toolbar_button(&item, appearance, ctx) {
                 target.add_child(button);
             }
@@ -21312,27 +21413,22 @@ impl Workspace {
             );
         }
 
-        if FeatureFlag::AvatarInTabBar.is_enabled() {
+        // The user avatar and settings now live in the side-nav footer
+        // (bottom-left). The top-right shows the resource center (when
+        // applicable) followed by the tools/drawer toggle.
+        let resource_center_closed = !self.current_workspace_state.is_resource_center_open;
+        if resource_center_closed && ContextFlag::WarpEssentials.is_enabled() {
             target.add_child(
-                Container::new(self.render_avatar_button(appearance, ctx))
+                Container::new(self.render_resource_center_button(appearance, ctx))
                     .with_margin_left(TAB_BAR_PADDING_LEFT)
                     .finish(),
             );
-        } else {
-            let resource_center_closed = !self.current_workspace_state.is_resource_center_open;
-            if resource_center_closed && ContextFlag::WarpEssentials.is_enabled() {
-                target.add_child(
-                    Container::new(self.render_resource_center_button(appearance, ctx))
-                        .with_margin_left(TAB_BAR_PADDING_LEFT)
-                        .finish(),
-                );
-            }
+        }
 
-            target.add_child(
-                Container::new(self.render_settings_button(appearance))
-                    .with_margin_left(TAB_BAR_PADDING_LEFT)
-                    .finish(),
-            );
+        if let Some(button) =
+            self.render_header_toolbar_button(&HeaderToolbarItemKind::ToolsPanel, appearance, ctx)
+        {
+            target.add_child(button);
         }
 
         if self.auth_state.is_anonymous_or_logged_out()
@@ -21626,101 +21722,6 @@ impl Workspace {
         .finish()
     }
 
-    fn render_avatar_button(&self, appearance: &Appearance, ctx: &AppContext) -> Box<dyn Element> {
-        let is_anonymous = self.auth_state.is_anonymous_or_logged_out();
-        let display_name = self
-            .auth_state
-            .username_for_display()
-            .unwrap_or(DEFAULT_USER_DISPLAY_NAME.to_owned());
-
-        let avatar_content = if self.auth_state.is_anonymous_or_logged_out() {
-            AvatarContent::Icon(icons::Icon::Gear)
-        } else {
-            self.auth_state
-                .user_photo_url()
-                .map(|url| AvatarContent::Image {
-                    url,
-                    display_name: display_name.clone(),
-                })
-                .unwrap_or(AvatarContent::DisplayName(display_name.clone()))
-        };
-
-        let mut avatar = Avatar::new(
-            avatar_content,
-            UiComponentStyles {
-                width: Some(20.),
-                height: Some(20.),
-                border_radius: Some(CornerRadius::with_all(Radius::Percentage(50.))),
-                font_family_id: Some(appearance.ui_font_family()),
-                font_weight: Some(Weight::Bold),
-                background: Some(appearance.theme().accent().into()),
-                font_size: Some(12.),
-                font_color: Some(ColorU::black()),
-                ..Default::default()
-            },
-        );
-
-        // Render the subtle autoupdate UI if autoupdate is ready and there is no incoming prominent update version.
-        let autoupdate_stage = autoupdate::get_update_state(ctx);
-        if FeatureFlag::AutoupdateUIRevamp.is_enabled()
-            && autoupdate_stage.ready_for_update()
-            && autoupdate_stage
-                .available_new_version()
-                .map(|version| {
-                    !is_incoming_version_past_current(version.last_prominent_update.as_deref())
-                })
-                .unwrap_or(false)
-        {
-            avatar = avatar.with_status_element(
-                StatusElementTypes::Circle,
-                RedNotificationDot::default_styles(appearance),
-            );
-        }
-
-        let button = Hoverable::new(self.mouse_states.avatar_icon.clone(), |state| {
-            let mut stack = Stack::new();
-            let mut container = Container::new(avatar.build().finish())
-                .with_corner_radius(CornerRadius::with_all(Radius::Pixels(4.)))
-                .with_uniform_padding(2.);
-
-            if state.is_mouse_over_element() {
-                if !state.is_clicked() {
-                    container = container.with_background(appearance.theme().surface_2());
-                }
-                // On hover, show tooltip of user's display name (if it exists)
-                if !self.is_user_menu_open && !is_anonymous {
-                    stack.add_positioned_overlay_child(
-                        appearance
-                            .ui_builder()
-                            .tool_tip(display_name.clone())
-                            .with_style(UiComponentStyles {
-                                background: Some(appearance.theme().tooltip_background().into()),
-                                font_color: Some(appearance.theme().background().into_solid()),
-                                ..Default::default()
-                            })
-                            .build()
-                            .finish(),
-                        OffsetPositioning::offset_from_parent(
-                            vec2f(0., 4.),
-                            ParentOffsetBounds::WindowByPosition,
-                            ParentAnchor::BottomMiddle,
-                            ChildAnchor::TopMiddle,
-                        ),
-                    );
-                }
-            }
-            stack.add_child(container.finish());
-            stack.finish()
-        })
-        .on_click(move |ctx, _, _| {
-            ctx.dispatch_typed_action(WorkspaceAction::ToggleUserMenu);
-        })
-        .with_cursor(Cursor::PointingHand)
-        .finish();
-
-        SavePosition::new(Align::new(button).finish(), USER_AVATAR_BUTTON_POSITION_ID).finish()
-    }
-
     fn render_resource_center_button(
         &self,
         appearance: &Appearance,
@@ -21767,23 +21768,6 @@ impl Workspace {
         }
 
         Align::new(button).finish()
-    }
-
-    fn render_settings_button(&self, appearance: &Appearance) -> Box<dyn Element> {
-        Align::new(
-            self.render_tab_bar_icon_button(
-                appearance,
-                icons::Icon::Gear,
-                &self.mouse_states.settings_icon,
-                WorkspaceAction::ShowSettings,
-                "Settings".to_string(),
-                self.cached_keybindings[SHOW_SETTINGS_KEYBINDING_NAME].clone(),
-                false,
-                false,
-            )
-            .finish(),
-        )
-        .finish()
     }
 
     fn render_web_anonymous_user_sign_in_button(
@@ -23330,6 +23314,14 @@ impl Workspace {
                 .set
                 .insert(flags::INCLUDE_AGENT_COMMANDS_IN_HISTORY_FLAG);
         }
+        if *ai_settings.screenshot_auto_attach_enabled.value() {
+            context.set.insert(flags::SCREENSHOT_AUTO_ATTACH_FLAG);
+        }
+        if *ai_settings.agent_mode_auto_approve_all_actions.value() {
+            context
+                .set
+                .insert(flags::AGENT_AUTO_APPROVE_ALL_ACTIONS_FLAG);
+        }
         if *ai_settings.memory_enabled.value() {
             context.set.insert(flags::AI_RULES_FLAG);
         }
@@ -23707,6 +23699,9 @@ impl Workspace {
         }
         if cfg!(feature = "local_fs") && *TabSettings::as_ref(ctx).show_code_review_button.value() {
             views.push(ToolPanelView::CodeReview);
+        }
+        if cfg!(target_os = "macos") && FeatureFlag::BrowserPreview.is_enabled() {
+            views.push(ToolPanelView::BrowserPreview);
         }
         views
     }
@@ -24352,6 +24347,15 @@ impl TypedActionView for Workspace {
             ToggleShowMemoryStats => self.toggle_show_memory_stats(ctx),
             ToggleResourceCenter => self.toggle_resource_center(ctx),
             ToggleUserMenu => self.toggle_user_menu(ctx),
+            ReplayWelcome => {
+                // Close the user menu and hand off to RootView, which owns the
+                // onboarding state, to re-enter the first-run welcome flow.
+                // Deferred so RootView swaps its child view (replacing this
+                // workspace) after the current action finishes, not mid-update.
+                self.is_user_menu_open = false;
+                ctx.dispatch_typed_action_deferred(RootViewAction::DebugEnterOnboardingState);
+                ctx.notify();
+            }
             ToggleKeybindingsPage => self.toggle_keybindings_page(ctx),
             ShowCommandSearch(CommandSearchOptions {
                 filter,
@@ -25311,6 +25315,21 @@ impl TypedActionView for Workspace {
             FocusPane(locator) => {
                 self.focus_pane(*locator, ctx);
             }
+            AttachImagesToPane { locator, paths } => {
+                self.attach_images_to_pane(*locator, paths.clone(), ctx);
+            }
+            AttachImageToPane { locator, image } => {
+                self.attach_image_to_pane(*locator, image.clone(), ctx);
+            }
+            SetComposerImageDragTarget(target) => {
+                let pane_id = target.map(|locator| locator.pane_id);
+                if self
+                    .vertical_tabs_panel
+                    .set_composer_image_drag_target(pane_id)
+                {
+                    ctx.notify();
+                }
+            }
             StartNewConversation { terminal_view_id } => {
                 Self::set_pending_query_state_for_terminal_view(
                     *terminal_view_id,
@@ -26087,10 +26106,12 @@ impl TypedActionView for Workspace {
             OpenLightbox {
                 images,
                 initial_index,
+                auto_copy,
             } => {
                 let params = LightboxParams {
                     images: images.clone(),
                     initial_index: *initial_index,
+                    auto_copy: *auto_copy,
                 };
                 if let Some(handle) = &self.lightbox_view {
                     handle.update(ctx, |view, ctx| view.update_params(params, ctx));
@@ -27395,15 +27416,18 @@ impl View for Workspace {
             );
         }
 
-        if FeatureFlag::AvatarInTabBar.is_enabled() && self.is_user_menu_open {
+        if self.is_user_menu_open {
+            // The avatar trigger lives in the bottom-left side-nav footer, so the
+            // menu opens upward from it (menu bottom-left anchored to the avatar
+            // top-left, lifted slightly).
             stack.add_positioned_overlay_child(
                 ChildView::new(&self.user_menu).finish(),
                 OffsetPositioning::offset_from_save_position_element(
                     USER_AVATAR_BUTTON_POSITION_ID,
-                    Vector2F::zero(),
+                    vec2f(0., -4.),
                     PositionedElementOffsetBounds::WindowByPosition,
-                    PositionedElementAnchor::BottomRight,
-                    ChildAnchor::TopRight,
+                    PositionedElementAnchor::TopLeft,
+                    ChildAnchor::BottomLeft,
                 ),
             );
         }

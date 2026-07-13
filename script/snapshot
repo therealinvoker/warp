@@ -1,0 +1,205 @@
+#!/bin/bash
+# script/snapshot — capture a persistent "daily driver" build of the Bang client.
+#
+# Builds the .app bundle (via script/run --dont-open) and copies it out of the
+# ephemeral target/ directory — which every `script/run`/`script/dev` rebuild
+# wipes — into a persistent location. The copy keeps working as your stable
+# daily driver while you keep iterating on the latest code in this checkout.
+#
+# Usage:
+#   script/snapshot                       # debug build -> ~/Applications/<App>.app
+#   script/snapshot --gui                 # also bake env into Info.plist so it's double-clickable
+#   script/snapshot --gui --prod          # GUI daily driver pointed at the production backend
+#   script/snapshot --dest ~/Apps/Bang.app
+#   script/snapshot --release             # optimized daily driver
+#   script/snapshot --profile my-profile  # custom cargo profile bundle
+#   script/snapshot --gui-profile foo     # override the baked WARP_DATA_PROFILE (default: stable)
+#
+# Any other args are forwarded to script/run.
+#
+# Data isolation: launch the snapshot with its own WARP_DATA_PROFILE so dev
+# churn (schema migrations, settings resets) can't corrupt it. script/dev uses
+# `local-harness` / `production-harness`, so the snapshot should use a different
+# profile (defaults to `stable`).
+#
+# --gui bakes WARP_DATA_PROFILE / WARP_SERVER_ROOT_URL / WARP_WS_SERVER_URL into
+# the copied bundle's Info.plist via LSEnvironment (applied by LaunchServices for
+# Finder/Dock/Spotlight launches) and re-signs the bundle. Without --gui the app
+# still works, but only when launched from a terminal with those vars set (a
+# double-click would hit the default backend and share the default data dir).
+set -e
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")"/.. && pwd)"
+cd "$ROOT"
+
+if [ "$(uname -s)" != "Darwin" ]; then
+  echo "[script/snapshot] only supported on macOS (produces a .app bundle)." >&2
+  exit 1
+fi
+
+# Pin common agent skills to whatever skills-lock.json has (mirrors script/dev),
+# so building the snapshot never triggers the per-launch skills fetch/prompt.
+export WARP_SKIP_COMMON_SKILLS_INSTALL=1
+
+DEST=""
+BUILD_SUBDIR="debug"
+GUI=false
+PROD=false
+GUI_PROFILE="stable"
+RUN_ARGS=()
+while (( "$#" )); do
+  case "$1" in
+    --dest)
+      if [ -n "$2" ] && [ "${2:0:1}" != "-" ]; then
+        DEST="$2"
+        shift 2
+      else
+        echo "[script/snapshot] --dest requires a path" >&2
+        exit 1
+      fi
+      ;;
+    --gui)
+      GUI=true
+      shift
+      ;;
+    --prod|--production)
+      PROD=true
+      shift
+      ;;
+    --gui-profile)
+      if [ -n "$2" ] && [ "${2:0:1}" != "-" ]; then
+        GUI_PROFILE="$2"
+        shift 2
+      else
+        echo "[script/snapshot] --gui-profile requires a value" >&2
+        exit 1
+      fi
+      ;;
+    --release)
+      BUILD_SUBDIR="release"
+      RUN_ARGS+=("$1")
+      shift
+      ;;
+    --profile)
+      if [ -n "$2" ] && [ "${2:0:1}" != "-" ]; then
+        BUILD_SUBDIR="$2"
+        RUN_ARGS+=("$1" "$2")
+        shift 2
+      else
+        echo "[script/snapshot] --profile requires a value" >&2
+        exit 1
+      fi
+      ;;
+    *)
+      RUN_ARGS+=("$1")
+      shift
+      ;;
+  esac
+done
+
+# Backend the GUI daily driver should talk to (mirrors script/dev).
+if $PROD; then
+  GUI_SERVER_URL="https://api.trybang.ai"
+  GUI_WS_URL="wss://api.trybang.ai/graphql/v2"
+  # Session sharing ("remote control") uses its own WS server that is NOT
+  # derived from the root/WS URLs; without this it defaults to production Warp
+  # and 401s with harness JWTs. Point it at the harness relay (/sessions/*).
+  GUI_SESSION_SHARING_URL="wss://api.trybang.ai"
+else
+  GUI_SERVER_URL="http://localhost:8088"
+  GUI_WS_URL="ws://localhost:8088/graphql/v2"
+  GUI_SESSION_SHARING_URL="ws://localhost:8088"
+fi
+
+# Mirror script/run: Local channel bundle when warp-channel-config is available,
+# otherwise the OSS channel bundle (this fork).
+if command -v warp-channel-config >/dev/null 2>&1; then
+  WARP_BIN_NAME="warp"
+  APP_NAME="WarpLocal.app"
+else
+  WARP_BIN_NAME="bang"
+  APP_NAME="Bang.app"
+fi
+
+# Resolve Cargo's actual target directory (honors a shared CARGO_TARGET_DIR /
+# build.target-dir), matching script/macos/run.
+TARGET_DIR="$(cargo metadata --no-deps --format-version 1 | jq -r .target_directory)"
+if [ -z "$TARGET_DIR" ] || [ "$TARGET_DIR" = "null" ]; then
+  TARGET_DIR="${ROOT}/target"
+fi
+
+BUNDLE_PATH="${TARGET_DIR}/${BUILD_SUBDIR}/bundle/osx/${APP_NAME}"
+
+# Default destination: ~/Applications/<AppBaseName>.app (shows as "Bang" in
+# Finder). The dev build is named "bang-dev" (see script/dev) so the two are
+# distinguishable despite sharing a bundle id.
+if [ -z "$DEST" ]; then
+  APP_BASE="${APP_NAME%.app}"
+  DEST="${HOME}/Applications/${APP_BASE}.app"
+fi
+
+# Step 1: build the bundle without launching it.
+echo "[script/snapshot] building bundle (bin: $WARP_BIN_NAME, profile dir: $BUILD_SUBDIR)..."
+"$ROOT/script/run" --dont-open "${RUN_ARGS[@]}"
+
+if [ ! -d "$BUNDLE_PATH" ]; then
+  echo "[script/snapshot] expected bundle not found at $BUNDLE_PATH" >&2
+  exit 1
+fi
+
+# Step 2: copy it to the persistent destination.
+echo "[script/snapshot] copying bundle -> $DEST"
+mkdir -p "$(dirname "$DEST")"
+rm -rf "$DEST"
+cp -R "$BUNDLE_PATH" "$DEST"
+
+# Optional step 3: bake env into Info.plist so the app is double-clickable, then
+# re-sign (editing Info.plist invalidates the copied bundle's signature).
+if $GUI; then
+  PLIST="$DEST/Contents/Info.plist"
+  echo "[script/snapshot] baking LSEnvironment into $PLIST"
+  if [ "$BUILD_SUBDIR" != "debug" ]; then
+    echo "[script/snapshot] warning: WARP_DATA_PROFILE only applies to debug builds;" >&2
+    echo "                  a --release/--profile snapshot will ignore the baked profile" >&2
+    echo "                  and share the default data dir." >&2
+  fi
+  /usr/libexec/PlistBuddy -c "Delete :LSEnvironment" "$PLIST" 2>/dev/null || true
+  /usr/libexec/PlistBuddy -c "Add :LSEnvironment dict" "$PLIST"
+  /usr/libexec/PlistBuddy -c "Add :LSEnvironment:WARP_DATA_PROFILE string $GUI_PROFILE" "$PLIST"
+  /usr/libexec/PlistBuddy -c "Add :LSEnvironment:WARP_SERVER_ROOT_URL string $GUI_SERVER_URL" "$PLIST"
+  /usr/libexec/PlistBuddy -c "Add :LSEnvironment:WARP_WS_SERVER_URL string $GUI_WS_URL" "$PLIST"
+  /usr/libexec/PlistBuddy -c "Add :LSEnvironment:WARP_SESSION_SHARING_SERVER_URL string $GUI_SESSION_SHARING_URL" "$PLIST"
+
+  echo "[script/snapshot] re-signing bundle..."
+  SIGNING_CERT="$(security find-identity -p codesigning -v | grep "Apple Development" | awk '{print $2}' | head -1)"
+  codesign --force --deep --options runtime \
+    --sign "${SIGNING_CERT:--}" \
+    "$DEST" \
+    --entitlements "$ROOT/script/Debug-Entitlements.plist"
+
+  # Refresh LaunchServices so Finder/Spotlight see the copied bundle.
+  LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+  [ -x "$LSREGISTER" ] && "$LSREGISTER" -f "$DEST" 2>/dev/null || true
+fi
+
+echo ""
+echo "[script/snapshot] done. Persistent build at:"
+echo "  $DEST"
+echo ""
+if $GUI; then
+  echo "GUI-ready: double-click it in Finder / launch from Spotlight or Dock."
+  echo "Baked env: WARP_DATA_PROFILE=$GUI_PROFILE, WARP_SERVER_ROOT_URL=$GUI_SERVER_URL"
+  echo ""
+  echo "To open from the terminal too:"
+  echo "  open \"$DEST\""
+else
+  echo "Launch it with an isolated data profile so dev builds can't corrupt its state:"
+  echo "  WARP_DATA_PROFILE=$GUI_PROFILE \\"
+  echo "    WARP_SERVER_ROOT_URL=$GUI_SERVER_URL \\"
+  echo "    WARP_WS_SERVER_URL=$GUI_WS_URL \\"
+  echo "    WARP_SESSION_SHARING_SERVER_URL=$GUI_SESSION_SHARING_URL \\"
+  echo "    \"$DEST/Contents/MacOS/$WARP_BIN_NAME\""
+  echo ""
+  echo "Or add a shell alias:"
+  echo "  alias bang='WARP_DATA_PROFILE=$GUI_PROFILE WARP_SERVER_ROOT_URL=$GUI_SERVER_URL WARP_WS_SERVER_URL=$GUI_WS_URL WARP_SESSION_SHARING_SERVER_URL=$GUI_SESSION_SHARING_URL \"$DEST/Contents/MacOS/$WARP_BIN_NAME\"'"
+fi

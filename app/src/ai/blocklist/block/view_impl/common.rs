@@ -2310,6 +2310,7 @@ fn render_visual_markdown_block<A: Action>(
             ctx.dispatch_typed_action(WorkspaceAction::OpenLightbox {
                 images: lightbox_trigger.images.as_ref().clone(),
                 initial_index: lightbox_trigger.initial_index,
+                auto_copy: false,
             });
             DispatchEventResult::StopPropagation
         });

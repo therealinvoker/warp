@@ -101,7 +101,10 @@ struct StateHandles {
 
 pub(super) static QUERY_RESULT_RENDERER_STYLES: LazyLock<QueryResultRendererStyles> =
     LazyLock::<QueryResultRendererStyles>::new(|| QueryResultRendererStyles {
-        result_item_height_fn: |appearance| appearance.monospace_font_size() + 8.,
+        // Row height tracks the (now +2) inline-menu row font so the taller glyphs
+        // don't clip; historically `monospace + 8`, bumped to `+ 10` in step with
+        // `inline_styles::font_size`.
+        result_item_height_fn: |appearance| appearance.monospace_font_size() + 10.,
         panel_border_fn: |appearance| {
             Border::all(1.0).with_border_fill(appearance.theme().outline())
         },

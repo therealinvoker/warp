@@ -27,6 +27,23 @@ fn main() -> Result<()> {
     println!("cargo:rerun-if-env-changed=CARGO_CFG_TARGET_OS");
     println!("cargo:rerun-if-env-changed=CARGO_CFG_TARGET_FAMILY");
 
+    // Identity baked into the OSS binary's embedded `__info_plist`
+    // (app/src/bin/oss.rs). macOS uses the *main executable's* embedded plist
+    // for microphone/privacy (TCC) attribution and the Control Center mic
+    // indicator — this takes precedence over the .app bundle's Info.plist. When
+    // the dev launcher (script/dev) rebrands the app via WARP_APP_BUNDLE_ID /
+    // WARP_APP_DISPLAY_NAME, the embedded plist must match, or the mic gets
+    // attributed to the stable snapshot's id and Control Center opens the wrong
+    // app. Defaults keep the stable identity when those vars are unset.
+    println!("cargo:rerun-if-env-changed=WARP_APP_BUNDLE_ID");
+    println!("cargo:rerun-if-env-changed=WARP_APP_DISPLAY_NAME");
+    let embed_bundle_id =
+        env::var("WARP_APP_BUNDLE_ID").unwrap_or_else(|_| "dev.warp.WarpOss".to_string());
+    let embed_bundle_name =
+        env::var("WARP_APP_DISPLAY_NAME").unwrap_or_else(|_| "WarpOss".to_string());
+    println!("cargo:rustc-env=BANG_EMBED_BUNDLE_ID={embed_bundle_id}");
+    println!("cargo:rustc-env=BANG_EMBED_BUNDLE_NAME={embed_bundle_name}");
+
     let target_os = env::var("CARGO_CFG_TARGET_OS")?;
     let target_family = env::var("CARGO_CFG_TARGET_FAMILY")?;
 
@@ -43,6 +60,14 @@ fn main() -> Result<()> {
         cc::Build::new()
             .file("src/platform/mac/objc/services.m")
             .compile("warp_objc");
+
+        // Voice + annotation overlay native puck. Compiled with ARC in its own
+        // unit so it doesn't affect the (manual-retain) services.m above.
+        println!("cargo:rerun-if-changed=src/overlay/native/overlay_puck.m");
+        cc::Build::new()
+            .file("src/overlay/native/overlay_puck.m")
+            .flag("-fobjc-arc")
+            .compile("bang_overlay_objc");
 
         // Build the dock tile plugin
         println!("cargo:rerun-if-changed=DockTilePlugin/WarpDockTilePlugin.m");
@@ -467,7 +492,7 @@ fn embed_resource_file(target_dir: &Path) {
     use std::io::Write;
 
     let version = env::var("GIT_RELEASE_TAG").unwrap_or("v0".to_owned());
-    let app_name = env::var("WARP_APP_NAME").unwrap_or("Warp".to_owned());
+    let app_name = env::var("WARP_APP_NAME").unwrap_or("Bang".to_owned());
     let bin_name = env::var("CARGO_BIN_NAME").unwrap_or("local".to_owned());
 
     let icon_path = Path::new("channels")

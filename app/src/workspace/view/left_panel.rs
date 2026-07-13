@@ -50,6 +50,7 @@ use crate::util::openable_file_type::FileTarget;
 use crate::util::openable_file_type::{
     is_markdown_file, resolve_file_target_with_editor_choice, EditorLayout,
 };
+use crate::workspace::view::browser_preview::BrowserPreviewView;
 use crate::workspace::view::code_review_panel::{CodeReviewPanelEvent, CodeReviewPanelView};
 use crate::workspace::view::conversation_list::view::{
     ConversationListView, Event as ConversationListViewEvent,
@@ -74,6 +75,7 @@ pub enum LeftPanelAction {
     WarpDrive,
     ConversationListView,
     CodeReview,
+    BrowserPreview,
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -103,6 +105,7 @@ pub enum ToolPanelView {
     WarpDrive,
     ConversationListView,
     CodeReview,
+    BrowserPreview,
 }
 
 /// Encapsulates the active view state to enforce that all mutations go through
@@ -172,6 +175,7 @@ pub struct LeftPanelView {
     warp_drive_view: ViewHandle<DrivePanel>,
     conversation_list_view: ViewHandle<ConversationListView>,
     code_review_panel: ViewHandle<CodeReviewPanelView>,
+    browser_preview_view: ViewHandle<BrowserPreviewView>,
     active_view: active_view_state::ActiveViewState,
     toolbelt_buttons: Vec<ToolbeltButtonConfig>,
     active_pane_group: Option<WeakViewHandle<PaneGroup>>,
@@ -226,6 +230,8 @@ impl LeftPanelView {
         ctx.subscribe_to_view(&code_review_panel, |_me, _, event, ctx| {
             ctx.emit(LeftPanelEvent::CodeReview(event.clone()));
         });
+
+        let browser_preview_view = ctx.add_typed_action_view(BrowserPreviewView::new);
 
         ctx.subscribe_to_view(&warp_drive_view, |_me, _, event, ctx| {
             ctx.emit(LeftPanelEvent::WarpDrive(event.clone()));
@@ -345,6 +351,7 @@ impl LeftPanelView {
             warp_drive_view,
             conversation_list_view,
             code_review_panel,
+            browser_preview_view,
             active_view: active_view_state::new(active_view),
             toolbelt_buttons,
             active_pane_group: None,
@@ -493,6 +500,19 @@ impl LeftPanelView {
                     tooltip_keybinding_names,
                 }
             }
+            ToolPanelView::BrowserPreview => {
+                let tooltip_keybinding_names = vec![];
+
+                ToolbeltButtonConfig {
+                    icon: Icon::Globe,
+                    active_icon: None,
+                    tooltip_text: "Preview".to_string(),
+                    action: LeftPanelAction::BrowserPreview,
+                    render_with_active_state: false,
+                    tooltip_keybinding: toolbelt_tooltip_keybinding(&tooltip_keybinding_names, ctx),
+                    tooltip_keybinding_names,
+                }
+            }
         }
     }
 
@@ -588,6 +608,10 @@ impl LeftPanelView {
 
     pub fn warp_drive_view(&self) -> &ViewHandle<DrivePanel> {
         &self.warp_drive_view
+    }
+
+    pub fn browser_preview_view(&self) -> &ViewHandle<BrowserPreviewView> {
+        &self.browser_preview_view
     }
 
     pub(crate) fn auto_expand_active_file_tree_to_most_recent_directory(
@@ -764,6 +788,9 @@ impl LeftPanelView {
                 self.code_review_panel.update(ctx, |view, ctx| {
                     view.focus_active_code_review_view(ctx);
                 });
+            }
+            ToolPanelView::BrowserPreview => {
+                ctx.focus(&self.browser_preview_view);
             }
         }
     }
@@ -991,6 +1018,9 @@ impl LeftPanelView {
                     self.active_view.get() == ToolPanelView::ConversationListView
                 }
                 LeftPanelAction::CodeReview => self.active_view.get() == ToolPanelView::CodeReview,
+                LeftPanelAction::BrowserPreview => {
+                    self.active_view.get() == ToolPanelView::BrowserPreview
+                }
             };
         }
     }
@@ -1135,6 +1165,16 @@ impl LeftPanelView {
             LeftPanelAction::CodeReview => {
                 active_view_state::set(self, ToolPanelView::CodeReview, ctx);
             }
+            LeftPanelAction::BrowserPreview => {
+                active_view_state::set(self, ToolPanelView::BrowserPreview, ctx);
+                // Focusing the view cascades to the URL editor (see
+                // `BrowserPreviewView::on_focus`) so a user opening the tab can
+                // type a URL immediately. Skip on force-open (agent-driven
+                // navigation) so we don't steal focus from the terminal.
+                if !force_open {
+                    ctx.focus(&self.browser_preview_view);
+                }
+            }
         }
     }
 
@@ -1270,6 +1310,7 @@ impl View for LeftPanelView {
                 ToolPanelView::WarpDrive => ctx.focus(&self.warp_drive_view),
                 ToolPanelView::ConversationListView => ctx.focus(&self.conversation_list_view),
                 ToolPanelView::CodeReview => ctx.focus(&self.code_review_panel),
+                ToolPanelView::BrowserPreview => ctx.focus(&self.browser_preview_view),
             }
         }
     }
@@ -1338,6 +1379,9 @@ impl View for LeftPanelView {
             }
             ToolPanelView::CodeReview => {
                 Shrinkable::new(1.0, ChildView::new(&self.code_review_panel).finish()).finish()
+            }
+            ToolPanelView::BrowserPreview => {
+                Shrinkable::new(1.0, ChildView::new(&self.browser_preview_view).finish()).finish()
             }
         };
 

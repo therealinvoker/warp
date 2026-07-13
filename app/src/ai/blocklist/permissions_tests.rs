@@ -1,9 +1,10 @@
 use std::path::PathBuf;
 
+use settings::Setting;
 use uuid::Uuid;
 use warp_core::execution_mode::ExecutionMode;
 use warp_util::path::EscapeChar;
-use warpui::{App, EntityId, ModelHandle};
+use warpui::{App, EntityId, ModelHandle, SingletonEntity};
 
 use super::{BlocklistAIHistoryModel, BlocklistAIPermissions};
 use crate::ai::active_agent_views_model::ActiveAgentViewsModel;
@@ -22,7 +23,7 @@ use crate::cloud_object::model::persistence::CloudModel;
 use crate::network::NetworkStatus;
 use crate::server::cloud_objects::update_manager::UpdateManager;
 use crate::server::sync_queue::SyncQueue;
-use crate::settings::{AgentModeCommandExecutionPredicate, PrivacySettings};
+use crate::settings::{AISettings, AgentModeCommandExecutionPredicate, PrivacySettings};
 use crate::terminal::cli_agent_sessions::CLIAgentSessionsModel;
 use crate::test_util::settings::initialize_settings_for_tests_with_mode;
 use crate::workspaces::team_tester::TeamTesterStatus;
@@ -940,6 +941,94 @@ fn test_can_autoexecute_command_run_to_completion_allows_non_denylisted() {
                 result,
                 CommandExecutionPermission::Allowed(
                     CommandExecutionPermissionAllowedReason::RunToCompletion
+                )
+            ));
+        });
+    })
+}
+
+#[test]
+fn test_can_autoexecute_command_global_auto_approve_allows_non_denylisted() {
+    App::test((), |mut app| async move {
+        let PermissionsTestState {
+            convo_id,
+            permissions,
+            terminal_view_id,
+            ..
+        } = initialize_permissions_test(&mut app);
+
+        // Enable the persistent, global "Auto-approve all actions" preference. With
+        // no per-conversation override set, it should still allow execution just like
+        // run-to-completion for every conversation.
+        AISettings::handle(&app).update(&mut app, |settings, ctx| {
+            let _ = settings
+                .agent_mode_auto_approve_all_actions
+                .set_value(true, ctx);
+        });
+
+        permissions.read(&app, |model, ctx| {
+            let result = model.can_autoexecute_command(
+                &convo_id,
+                "echo hello",
+                EscapeChar::Backslash,
+                true,
+                Some(false),
+                Some(terminal_view_id),
+                ctx,
+            );
+            assert!(result.is_allowed());
+            assert!(matches!(
+                result,
+                CommandExecutionPermission::Allowed(
+                    CommandExecutionPermissionAllowedReason::RunToCompletion
+                )
+            ));
+        });
+    })
+}
+
+#[test]
+fn test_can_autoexecute_command_denylist_beats_global_auto_approve() {
+    App::test((), |mut app| async move {
+        let PermissionsTestState {
+            convo_id,
+            permissions,
+            profile_model,
+            terminal_view_id,
+            ..
+        } = initialize_permissions_test(&mut app);
+
+        // Add a denylist rule that matches the test command.
+        profile_model.update(&mut app, |model, ctx| {
+            model.add_to_command_denylist(
+                *model.active_profile(Some(terminal_view_id), ctx).id(),
+                &AgentModeCommandExecutionPredicate::new_regex("rm .*").unwrap(),
+                ctx,
+            );
+        });
+
+        // Even with the global Auto-approve preference on, the denylist must win.
+        AISettings::handle(&app).update(&mut app, |settings, ctx| {
+            let _ = settings
+                .agent_mode_auto_approve_all_actions
+                .set_value(true, ctx);
+        });
+
+        permissions.read(&app, |model, ctx| {
+            let result = model.can_autoexecute_command(
+                &convo_id,
+                "rm important.txt",
+                EscapeChar::Backslash,
+                false,
+                None,
+                Some(terminal_view_id),
+                ctx,
+            );
+            assert!(!result.is_allowed());
+            assert!(matches!(
+                result,
+                CommandExecutionPermission::Denied(
+                    CommandExecutionPermissionDeniedReason::ExplicitlyDenylisted
                 )
             ));
         });

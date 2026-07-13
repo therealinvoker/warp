@@ -1,6 +1,6 @@
 [package]
 authors = ["Warp Team <dev@warp.dev>"]
-default-run = "warp-oss"
+default-run = "bang"
 description = "The cloud-backed terminal for individuals and teams"
 edition = "2021"
 autobins = false
@@ -18,7 +18,7 @@ path = "src/lib.rs"
 # flag overrides). Otherwise these binaries are exactly identical to our main binary.
 
 [[bin]]
-name = "warp-oss"
+name = "bang"
 path = "src/bin/oss.rs"
 test = false
 
@@ -640,6 +640,7 @@ default = [
     "active_conversation_requires_interaction",
     "figma_detection",
     "file_based_mcp",
+    "voice_overlay",
     "inline_repo_menu",
     "kitty_keyboard_protocol",
     "inline_menu_headers",
@@ -696,6 +697,7 @@ default = [
     "remote_code_review",
     "git_operations_in_code_review",
     "github_integration",
+    "screenshot_auto_attach",
 ]
 # Enable this feature to automatically perform heap profiling.  NOTE: This will
 # substantially slow down program execution.
@@ -760,6 +762,7 @@ inline_slash_commands = ["agent_view"]
 # Enabled on WarpDev by default.
 heap_usage_tracking = ["jemalloc_pprof", "crash_reporting"]
 image_as_context = []
+screenshot_auto_attach = []
 in_band_generators_ssh = []
 jemalloc = ["dep:tikv-jemallocator", "ai/jemalloc"]
 jemalloc_with_profiling = ["jemalloc", "tikv-jemallocator/profiling"]
@@ -981,6 +984,7 @@ open_warp_launch_modal = []
 orchestration_launch_modal = []
 new_tab_styling = []
 file_based_mcp = []
+voice_overlay = []
 cursor_mcp_import = []
 mcp_governance = []
 github_integration = ["dep:github_client"]
@@ -1032,7 +1036,7 @@ handoff_cloud_cloud = ["cloud_mode_setup_v2"]
 git_credential_refresh = []
 prompt_cache_expiry_warning = []
 
-[package.metadata.bundle.bin.warp-oss]
+[package.metadata.bundle.bin.bang]
 category = "public.app-category.developer-tools"
 copyright = "© 2025, Denver Technologies, Inc"
 identifier = "dev.warp.WarpOss"

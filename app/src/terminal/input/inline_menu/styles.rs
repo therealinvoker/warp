@@ -12,9 +12,24 @@ use warpui::{AppContext, SingletonEntity};
 use crate::ai::blocklist::agent_view::agent_view_bg_fill;
 use crate::search::result_renderer::ItemHighlightState;
 
-/// Font size used for inline menu items.
+/// Font size used for inline menu items (slash commands, models, profiles,
+/// prompts, skills, history, etc.).
+///
+/// The fork shrank the base monospace font by 2pts; render the menu rows at the
+/// full monospace size (2pts larger than the historical `monospace - 2`) so the
+/// command list and other menus stay readable. The row height
+/// (`result_item_height_fn` in `view.rs`) is bumped in step so the taller glyphs
+/// don't clip.
 pub fn font_size(appearance: &Appearance) -> f32 {
-    appearance.monospace_font_size() - 2.
+    appearance.monospace_font_size()
+}
+
+/// Font size used for the inline menu navigation/hint bar ("↑ ↓ to navigate",
+/// "esc to dismiss"). Kept 2pts above the row font so the hint line stays a touch
+/// larger than the list, matching the pre-fork proportions. Scoped to inline
+/// menus so the terminal/agent status message bars keep their own size.
+pub fn message_bar_font_size(appearance: &Appearance) -> f32 {
+    font_size(appearance) + 2.
 }
 
 pub const ICON_MARGIN: f32 = 8.0;

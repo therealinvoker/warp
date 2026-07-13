@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 
+use chrono::NaiveDateTime;
 use warpui::{Entity, SingletonEntity};
 
 use crate::ai::agent::conversation::{AIConversation, AIConversationId};
@@ -17,13 +18,19 @@ use crate::persistence::model::AgentConversation;
 pub struct RestoredAgentConversations {
     /// All conversations stored by their ID, available for restoration
     conversations: HashMap<AIConversationId, AIConversation>,
+    /// Persisted `last_modified_at` per conversation, used to pick the most
+    /// recent conversation as a session-restore fallback. Preserved here because
+    /// it is dropped when converting to `AIConversation`.
+    last_modified_at: HashMap<AIConversationId, NaiveDateTime>,
 }
 
 impl RestoredAgentConversations {
     pub fn new(conversations: Vec<AgentConversation>) -> Self {
         let mut conversations_by_id = HashMap::new();
+        let mut last_modified_at = HashMap::new();
         for conversation in conversations.into_iter() {
             let conversation_id = conversation.conversation.conversation_id.clone();
+            let last_modified = conversation.conversation.last_modified_at;
             let Some(conversation) =
                 convert_persisted_conversation_to_ai_conversation_with_metadata(conversation)
             else {
@@ -32,11 +39,13 @@ impl RestoredAgentConversations {
                 );
                 continue;
             };
+            last_modified_at.insert(conversation.id(), last_modified);
             conversations_by_id.insert(conversation.id(), conversation);
         }
 
         Self {
             conversations: conversations_by_id,
+            last_modified_at,
         }
     }
 
@@ -47,7 +56,29 @@ impl RestoredAgentConversations {
 
     /// Removes the restored conversation and returns it, if any.
     pub fn take_conversation(&mut self, id: &AIConversationId) -> Option<AIConversation> {
+        self.last_modified_at.remove(id);
         self.conversations.remove(id)
+    }
+
+    /// Removes and returns the most recently modified conversation that is worth
+    /// restoring (has at least one task and is not entirely passive).
+    ///
+    /// Used as a session-restore fallback when a terminal pane referenced
+    /// conversations that all turned out to be empty/unrestorable (e.g. it
+    /// landed on a fresh empty conversation while the real chat had been evicted
+    /// from memory when the snapshot was taken), so the user's last chat comes
+    /// back instead of a blank terminal. Removing on take keeps this dedup-safe
+    /// across multiple restoring panes.
+    pub fn take_most_recent_restorable_conversation(&mut self) -> Option<AIConversation> {
+        let id = self
+            .conversations
+            .iter()
+            .filter(|(_, conversation)| {
+                conversation.all_tasks().next().is_some() && !conversation.is_entirely_passive()
+            })
+            .max_by_key(|(id, _)| self.last_modified_at.get(id).copied())
+            .map(|(id, _)| *id)?;
+        self.take_conversation(&id)
     }
 
     /// Takes and returns AIConversations for the given IDs, sorted by first exchange start time.

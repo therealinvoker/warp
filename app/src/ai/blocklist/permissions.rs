@@ -467,16 +467,33 @@ impl BlocklistAIPermissions {
         self.get_write_to_pty_setting_for_profile(ctx, *active_profile.id())
     }
 
+    /// Whether the persistent global "Auto-approve all actions" preference is on.
+    ///
+    /// When enabled, the agent auto-executes every action in every conversation
+    /// without asking (subject to denylists), and this survives app restarts.
+    /// This is the persistent memory behind the Auto-approve dropdown option, as
+    /// opposed to the per-conversation `AIConversation.autoexecute_override`.
+    pub fn auto_approve_all_actions_enabled(ctx: &AppContext) -> bool {
+        *AISettings::as_ref(ctx).agent_mode_auto_approve_all_actions
+    }
+
+    /// Whether actions should run without a confirmation prompt for the given
+    /// conversation: either the persistent global Auto-approve preference is on,
+    /// or the conversation has a per-task RunToCompletion override.
+    fn run_to_completion_active(conversation_id: &AIConversationId, ctx: &AppContext) -> bool {
+        Self::auto_approve_all_actions_enabled(ctx)
+            || BlocklistAIHistoryModel::as_ref(ctx)
+                .conversation(conversation_id)
+                .is_some_and(|convo| convo.autoexecute_any_action())
+    }
+
     pub fn can_write_to_pty(
         &self,
         conversation_id: &AIConversationId,
         terminal_view_id: Option<EntityId>,
         ctx: &AppContext,
     ) -> WriteToPtyPermission {
-        if BlocklistAIHistoryModel::as_ref(ctx)
-            .conversation(conversation_id)
-            .is_some_and(|convo| convo.autoexecute_any_action())
-        {
+        if Self::run_to_completion_active(conversation_id, ctx) {
             return WriteToPtyPermission::AlwaysAllow;
         }
         self.get_write_to_pty_setting(ctx, terminal_view_id)
@@ -664,10 +681,7 @@ impl BlocklistAIPermissions {
         terminal_view_id: Option<EntityId>,
         ctx: &AppContext,
     ) -> FileReadPermission {
-        if BlocklistAIHistoryModel::as_ref(ctx)
-            .conversation(conversation_id)
-            .is_some_and(|convo| convo.autoexecute_any_action())
-        {
+        if Self::run_to_completion_active(conversation_id, ctx) {
             return FileReadPermission::Allowed(FileReadPermissionAllowedReason::RunToCompletion);
         }
 
@@ -741,10 +755,7 @@ impl BlocklistAIPermissions {
             return denied;
         }
 
-        if BlocklistAIHistoryModel::as_ref(ctx)
-            .conversation(conversation_id)
-            .is_some_and(|convo| convo.autoexecute_any_action())
-        {
+        if Self::run_to_completion_active(conversation_id, ctx) {
             return FileWritePermission::Allowed(FileWritePermissionAllowedReason::RunToCompletion);
         }
 
@@ -825,10 +836,7 @@ impl BlocklistAIPermissions {
         terminal_view_id: Option<EntityId>,
         ctx: &AppContext,
     ) -> bool {
-        if BlocklistAIHistoryModel::as_ref(ctx)
-            .conversation(conversation_id)
-            .is_some_and(|convo| convo.autoexecute_any_action())
-        {
+        if Self::run_to_completion_active(conversation_id, ctx) {
             return true;
         }
 
@@ -903,10 +911,7 @@ impl BlocklistAIPermissions {
             );
         }
 
-        if BlocklistAIHistoryModel::as_ref(ctx)
-            .conversation(conversation_id)
-            .is_some_and(|convo| convo.autoexecute_any_action())
-        {
+        if Self::run_to_completion_active(conversation_id, ctx) {
             return CommandExecutionPermission::Allowed(
                 CommandExecutionPermissionAllowedReason::RunToCompletion,
             );
@@ -1193,9 +1198,9 @@ impl BlocklistAIPermissions {
         match self.get_ask_user_question_setting(ctx, terminal_view_id) {
             AskUserQuestionPermission::Never => false,
             AskUserQuestionPermission::AskExceptInAutoApprove
-            | AskUserQuestionPermission::Unknown => !BlocklistAIHistoryModel::as_ref(ctx)
-                .conversation(conversation_id)
-                .is_some_and(|convo| convo.autoexecute_any_action()),
+            | AskUserQuestionPermission::Unknown => {
+                !Self::run_to_completion_active(conversation_id, ctx)
+            }
             AskUserQuestionPermission::AlwaysAsk => true,
         }
     }

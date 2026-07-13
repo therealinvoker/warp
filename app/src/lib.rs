@@ -55,6 +55,7 @@ mod modal;
 mod network;
 mod notebooks;
 mod notification;
+pub mod overlay;
 mod palette;
 mod persistence;
 mod platform;
@@ -74,6 +75,7 @@ mod remote_server;
 mod resource_limits;
 mod reward_view;
 mod safe_triangle;
+mod screenshot_watcher;
 mod search_bar;
 mod server;
 mod session_management;
@@ -1260,6 +1262,16 @@ pub(crate) fn initialize_app(
 
     ensure_warp_watch_roots_exist();
     ctx.add_singleton_model(WarpManagedPathsWatcher::new);
+    ctx.add_singleton_model(screenshot_watcher::ScreenshotWatcher::new);
+
+    // Floating voice + annotation overlay controller (Phase 0/1: stub collaborators).
+    ctx.add_singleton_model(overlay::OverlayController::new_singleton);
+    // Capture a main-thread app handle so native puck clicks can re-enter context.
+    #[cfg(target_os = "macos")]
+    overlay::install_overlay_app_bridge(ctx.weak_app());
+    // Hands-free Realtime voice session (streaming transcription + turn detection).
+    #[cfg(feature = "voice_input")]
+    ctx.add_singleton_model(overlay::realtime::RealtimeVoice::new_singleton);
 
     ctx.add_singleton_model(WarpConfig::new);
     ctx.add_singleton_model(|_ctx| SettingsManager::default());

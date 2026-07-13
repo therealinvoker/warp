@@ -270,6 +270,7 @@ pub mod text {
                     SuggestPromptResult::Cancelled => writeln!(w, "{CANCELLED_MESSAGE}"),
                 },
                 AIAgentActionResultType::OpenCodeReview => Ok(()),
+                AIAgentActionResultType::OpenBrowserPreview => Ok(()),
                 AIAgentActionResultType::InsertReviewComments(_) => Ok(()),
                 AIAgentActionResultType::InitProject => Ok(()),
                 // Document operations - not yet implemented for SDK
@@ -462,6 +463,7 @@ pub mod text {
                     AIAgentActionType::SuggestNewConversation { .. } => (),
                     AIAgentActionType::SuggestPrompt { .. } => (),
                     AIAgentActionType::OpenCodeReview => (),
+                    AIAgentActionType::OpenBrowserPreview { .. } => (),
                     AIAgentActionType::InsertCodeReviewComments { .. } => (),
                     AIAgentActionType::InitProject => (),
                     // Document operations - not yet implemented for SDK
@@ -1204,6 +1206,7 @@ pub mod json {
                     | AIAgentActionType::SuggestPrompt { .. }
                     | AIAgentActionType::InitProject
                     | AIAgentActionType::OpenCodeReview
+                    | AIAgentActionType::OpenBrowserPreview { .. }
                     | AIAgentActionType::InsertCodeReviewComments { .. }
                     | AIAgentActionType::ReadDocuments(_)
                     | AIAgentActionType::EditDocuments(_)

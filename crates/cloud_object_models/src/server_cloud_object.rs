@@ -89,9 +89,7 @@ impl ServerCloudObject {
                 scheduled_ambient_agent.id.uid()
             }
             ServerCloudObject::CloudAgentConfig(cloud_agent_config) => cloud_agent_config.id.uid(),
-            ServerCloudObject::MarketplacePlugin(marketplace_plugin) => {
-                marketplace_plugin.id.uid()
-            }
+            ServerCloudObject::MarketplacePlugin(marketplace_plugin) => marketplace_plugin.id.uid(),
         }
     }
 }

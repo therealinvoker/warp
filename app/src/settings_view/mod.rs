@@ -37,12 +37,14 @@ use warpify_page::{WarpifyPageAction, WarpifyPageView};
 use warpui::elements::{
     Align, Border, ChildAnchor, ChildView, Clipped, ClippedScrollStateHandle, ClippedScrollable,
     ConstrainedBox, Container, CornerRadius, CrossAxisAlignment, DispatchEventResult, Empty,
-    EventHandler, Expanded, Fill, Flex, MainAxisSize, OffsetPositioning, ParentAnchor,
-    ParentElement, ParentOffsetBounds, Radius, SavePosition, ScrollbarWidth, Shrinkable, Stack,
-    Text,
+    EventHandler, Expanded, Fill, Flex, MainAxisSize, MouseStateHandle, OffsetPositioning,
+    ParentAnchor, ParentElement, ParentOffsetBounds, Radius, SavePosition, ScrollbarWidth,
+    Shrinkable, Stack, Text,
 };
 use warpui::fonts::{Properties, Weight};
 use warpui::keymap::{ContextPredicate, EnabledPredicate, FixedBinding};
+use warpui::platform::Cursor;
+use warpui::text_layout::ClipConfig;
 use warpui::{
     id, Action, AppContext, Element, Entity, ModelHandle, SingletonEntity, TypedActionView,
     UpdateView as _, View, ViewContext, ViewHandle,
@@ -66,7 +68,9 @@ use crate::settings::{AISettings, BlockVisibilitySettings, SettingsFileError};
 use crate::settings_view::mcp_servers_page::{MCPServersSettingsPage, MCPServersSettingsPageEvent};
 use crate::terminal::model::blockgrid::BlockGrid;
 use crate::terminal::SizeInfo;
+use crate::ui_components::buttons::icon_button;
 use crate::ui_components::icons;
+use crate::ui_components::icons::Icon;
 use crate::util::bindings::{keybinding_name_to_display_string, BindingGroup, CustomAction};
 use crate::view_components::ToastFlavor;
 use crate::workspace::WorkspaceAction;
@@ -594,6 +598,8 @@ pub mod flags {
     pub const SHARED_BLOCK_TITLE_GENERATION_FLAG: &str = "Shared_Block_Title_Generation";
     pub const GIT_OPERATIONS_AUTOGEN_FLAG: &str = "Git_Operations_Autogen";
     pub const INCLUDE_AGENT_COMMANDS_IN_HISTORY_FLAG: &str = "Include_Agent_Commands_In_History";
+    pub const SCREENSHOT_AUTO_ATTACH_FLAG: &str = "Screenshot_Auto_Attach";
+    pub const AGENT_AUTO_APPROVE_ALL_ACTIONS_FLAG: &str = "Agent_Auto_Approve_All_Actions";
     pub const AI_RULES_FLAG: &str = "AI_Rules";
     pub const SUGGESTED_RULES_FLAG: &str = "Suggested_Rules";
     pub const WARP_DRIVE_CONTEXT_FLAG: &str = "Warp_Drive_Context";
@@ -1163,6 +1169,10 @@ pub struct SettingsView {
     /// per `SettingsView` per `WARP.md`'s guidance that inline
     /// `MouseStateHandle::default()` breaks hover/click tracking.
     footer_mouse_states: SettingsFooterMouseStates,
+    /// Mouse state for the always-visible header close button. Settings opens as
+    /// a full tab (not a split pane), so the framework's built-in close button
+    /// never shows; this drives our own X.
+    close_button_mouse_state: MouseStateHandle,
 }
 
 impl SettingsView {
@@ -1485,6 +1495,7 @@ impl SettingsView {
             settings_file_error: None,
             settings_error_banner_dismissed: false,
             footer_mouse_states: SettingsFooterMouseStates::default(),
+            close_button_mouse_state: MouseStateHandle::default(),
         }
     }
 
@@ -1715,6 +1726,29 @@ impl SettingsView {
                             false, /* allow_steal_focus */
                             ctx,
                         );
+                    }
+                }
+
+                // The subpage restore + auto-select steps above call
+                // `set_active_subpage`, which rebuilds the AI/Code page and resets
+                // its content filter to ALL widgets. Re-apply the query to the
+                // now-current subpage so the content pane actually narrows to the
+                // matching widget(s) — the same filtering non-subpage pages already
+                // get. Without this, search selects the right tab but shows the
+                // whole subpage from the top (e.g. searching "voice" lands at the
+                // top of the Agent page instead of on the Voice setting).
+                if is_search_active {
+                    let current = self.current_settings_page;
+                    if current.is_ai_subpage() && current != SettingsSection::AgentMCPServers {
+                        self.ai_page_handle.update(ctx, |view, ctx| {
+                            view.update_filter(&search_query, ctx);
+                            ctx.notify();
+                        });
+                    } else if current.is_code_subpage() {
+                        self.code_page_handle.update(ctx, |view, ctx| {
+                            view.update_filter(&search_query, ctx);
+                            ctx.notify();
+                        });
                     }
                 }
                 ctx.notify();
@@ -2902,9 +2936,45 @@ impl BackingView for SettingsView {
     fn render_header_content(
         &self,
         _ctx: &view::HeaderRenderContext<'_>,
-        _app: &AppContext,
+        app: &AppContext,
     ) -> view::HeaderContent {
-        view::HeaderContent::simple("Settings")
+        use warpui::ui_components::components::UiComponent;
+        let appearance = Appearance::as_ref(app);
+        // Settings opens as a full tab (not a split pane), so the framework's
+        // built-in close button never shows (it's gated on `is_in_split_pane`).
+        // Add an always-visible X. This button is composed into the pane-header
+        // view's layout, so dispatching the same `PaneHeaderAction::Close` that the
+        // framework's own close button uses routes to the header view, which emits
+        // `Event::Close` and drives `BackingView::close()` — the proven close path.
+        let close_button = icon_button(
+            appearance,
+            Icon::X,
+            false,
+            self.close_button_mouse_state.clone(),
+        )
+        .build()
+        .on_click(|ctx, _, _| {
+            ctx.dispatch_typed_action(
+                view::PaneHeaderAction::<
+                    <Self as BackingView>::PaneHeaderOverflowMenuAction,
+                    <Self as BackingView>::CustomAction,
+                >::Close,
+            );
+        })
+        .with_cursor(Cursor::PointingHand)
+        .finish();
+
+        view::HeaderContent::Standard(view::StandardHeader {
+            title: "Settings".to_string(),
+            title_secondary: None,
+            title_style: None,
+            title_clip_config: ClipConfig::start(),
+            title_max_width: None,
+            left_of_title: None,
+            right_of_title: None,
+            left_of_overflow: Some(close_button),
+            options: view::StandardHeaderOptions::default(),
+        })
     }
 
     fn set_focus_handle(&mut self, focus_handle: PaneFocusHandle, _ctx: &mut ViewContext<Self>) {

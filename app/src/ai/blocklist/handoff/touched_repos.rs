@@ -370,6 +370,7 @@ fn extract_action_paths(
         | AIAgentActionType::SuggestPrompt(_)
         | AIAgentActionType::InitProject
         | AIAgentActionType::OpenCodeReview
+        | AIAgentActionType::OpenBrowserPreview { .. }
         | AIAgentActionType::ReadDocuments(_)
         | AIAgentActionType::EditDocuments(_)
         | AIAgentActionType::CreateDocuments(_)

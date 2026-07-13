@@ -134,6 +134,7 @@ fn compile_objc_lib() {
     println!("cargo:rustc-link-lib=framework=UniformTypeIdentifiers");
     println!("cargo:rustc-link-lib=framework=AVFoundation");
     println!("cargo:rustc-link-lib=framework=ServiceManagement");
+    println!("cargo:rustc-link-lib=framework=WebKit");
     println!("cargo:rerun-if-changed=src/platform/mac/objc/app.h");
     println!("cargo:rerun-if-changed=src/platform/mac/objc/app.m");
     println!("cargo:rerun-if-changed=src/platform/mac/objc/keycode.m");
@@ -146,6 +147,8 @@ fn compile_objc_lib() {
     println!("cargo:rerun-if-changed=src/platform/mac/objc/notifications/notifications.h");
     println!("cargo:rerun-if-changed=src/platform/mac/objc/notifications/notifications.m");
     println!("cargo:rerun-if-changed=src/platform/mac/objc/window.m");
+    println!("cargo:rerun-if-changed=src/platform/mac/objc/web_view.m");
+    println!("cargo:rerun-if-changed=src/platform/mac/objc/web_view.h");
     println!("cargo:rerun-if-changed=src/platform/mac/objc/window_blur.m");
     println!("cargo:rerun-if-changed=src/platform/mac/objc/window_blur.h");
     // Referenced from https://github.com/tonymillion/Reachability
@@ -173,6 +176,7 @@ fn compile_objc_lib() {
         .file("src/platform/mac/objc/menus.m")
         .file("src/platform/mac/objc/notifications/notifications.m")
         .file("src/platform/mac/objc/window.m")
+        .file("src/platform/mac/objc/web_view.m")
         .file("src/platform/mac/objc/fullscreen_queue.m")
         .file("src/platform/mac/objc/window_blur.m")
         .compile("warp_objc");

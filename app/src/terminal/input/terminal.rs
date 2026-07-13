@@ -1,7 +1,6 @@
 use warp_core::settings::Setting;
 use warpui::elements::{
-    Clipped, ConstrainedBox, Container, CrossAxisAlignment, DropTarget, Element, Flex, Hoverable,
-    MainAxisSize, ParentElement, SavePosition, Stack,
+    Clipped, Container, DropTarget, Element, Flex, Hoverable, ParentElement, SavePosition, Stack,
 };
 use warpui::presenter::ChildView;
 use warpui::{AppContext, SingletonEntity};
@@ -11,18 +10,14 @@ use super::common::{
     add_workflow_info_overlay, floating_input_box, should_show_terminal_input_message_bar,
     wrap_input_with_terminal_padding_and_focus_handler,
 };
-use super::{
-    render_session_mode_segmented_control, Input, InputAction, InputDropTargetData,
-    SessionModeSegment,
-};
+use super::{Input, InputAction, InputDropTargetData};
 use crate::appearance::Appearance;
 use crate::context_chips::spacing;
 use crate::features::FeatureFlag;
-use crate::settings::{AISettings, AppEditorSettings, InputModeSettings};
+use crate::settings::{AppEditorSettings, InputModeSettings};
 use crate::terminal::block_list_viewport::InputMode;
 use crate::terminal::settings::TerminalSettings;
 use crate::terminal::view::TerminalAction;
-use crate::view_components::action_button::ButtonSize;
 
 impl Input {
     /// Renders the terminal mode input when `FeatureFlag::AgentView` is enabled and there is no
@@ -54,42 +49,19 @@ impl Input {
             }
         }
 
-        // Persistent session-mode segmented control ("Agent | Cloud Agent | Terminal").
-        // Only shown when agent modes are actually usable so the plain terminal input is
-        // left untouched when AI is disabled.
-        let show_session_mode_control =
-            FeatureFlag::AgentView.is_enabled() && AISettings::as_ref(app).is_any_ai_enabled(app);
         let show_message_bar = should_show_terminal_input_message_bar(&model, app);
 
-        // Once bootstrapped, the prompt row is just context chips (working directory, git
-        // branch, ...). When the session-mode footer is shown, move those chips into the
-        // footer below the editor so their placement matches the Agent footer; the
-        // pre-bootstrap "Starting…" status stays above the editor.
-        let move_chips_to_footer =
-            show_session_mode_control && model.block_list().is_bootstrapped();
-
-        // In the footer the chips are baseline-aligned with the segmented control, so
-        // skip the above-editor top padding that would otherwise offset their text.
+        // Prompt row (context chips: working directory, git branch, ...) renders
+        // above the editor.
         let prompt_elements = self
             .prompt_render_helper
-            .render_universal_developer_input_prompt(
-                &model,
-                appearance,
-                !move_chips_to_footer,
-                app,
-            );
-
-        let mut footer_prompt_chips = None;
-        if move_chips_to_footer {
-            footer_prompt_chips = Some(prompt_elements);
-        } else {
-            column.add_child(prompt_elements);
-        }
+            .render_universal_developer_input_prompt(&model, appearance, true, app);
+        column.add_child(prompt_elements);
 
         let terminal_spacing = TerminalSettings::as_ref(app)
             .terminal_input_spacing(appearance.line_height_ratio(), app);
         column.add_child(
-            Container::new(self.render_input_box(show_vim_status, appearance, app))
+            Container::new(self.render_input_box(show_vim_status, None, appearance, app))
                 .with_margin_top(
                     terminal_spacing.prompt_to_editor_padding
                         * spacing::UDI_PROMPT_BOTTOM_PADDING_FACTOR,
@@ -97,45 +69,7 @@ impl Input {
                 .finish(),
         );
 
-        if show_session_mode_control {
-            let include_cloud_agent = FeatureFlag::CloudMode.is_enabled();
-            let mut mode_row = Flex::row()
-                .with_main_axis_size(MainAxisSize::Min)
-                .with_cross_axis_alignment(CrossAxisAlignment::Center)
-                .with_child(render_session_mode_segmented_control(
-                    SessionModeSegment::Terminal,
-                    include_cloud_agent,
-                    &self.session_mode_mouse_states,
-                    appearance,
-                ));
-
-            // Context chips (working directory, git branch, ...) moved down from the prompt
-            // row, placed to the right of the segmented control to mirror the Agent footer.
-            if let Some(chips) = footer_prompt_chips.take() {
-                mode_row = mode_row.with_child(Container::new(chips).with_margin_left(8.).finish());
-            }
-
-            // Match the Agent footer's vertical spacing exactly: no top padding (the gap from the
-            // editor comes from the editor's own `margin_top`, shared with the agent render path)
-            // and an 8px bottom padding identical to the agent footer container
-            // (`Container::new(content).with_padding_bottom(8.0)` in agent_input_footer/mod.rs).
-            //
-            // The agent footer's row height is driven by its `AgentInputButton`-sized chips
-            // (model selector, send, etc.), which vertically center the segmented control. The
-            // terminal footer has no such chips, so reserve the same row height and center the
-            // control here — otherwise it collapses to the control's own height and sits lower
-            // (closer to the pane bottom) than in agent mode.
-            let footer_row_height = ButtonSize::AgentInputButton.button_height(appearance, app);
-            column.add_child(
-                Container::new(
-                    ConstrainedBox::new(mode_row.finish())
-                        .with_min_height(footer_row_height)
-                        .finish(),
-                )
-                .with_padding_bottom(8.0)
-                .finish(),
-            );
-        } else if !(matches!(input_mode, InputMode::PinnedToTop)
+        if !(matches!(input_mode, InputMode::PinnedToTop)
             && self
                 .suggestions_mode_model
                 .as_ref(app)
@@ -220,12 +154,10 @@ impl Input {
         )
         // The shared floating box fill (`surface_overlay_2`) is a translucent 10%-foreground
         // overlay, so over the dark terminal content it reads noticeably darker than the Agent
-        // input. The Agent input effectively composites the agent-view surface
-        // (`surface_overlay_1`, 5% fg) under its own box fill (`surface_overlay_2`, 10% fg), for
-        // ~15% foreground. Paint the opaque equivalent (`neutral_3` = 15% fg over the background)
-        // so the terminal box shows a stable fill that matches the Agent input regardless of
-        // what's behind it.
-        .with_background_color(crate::ui_components::blended_colors::neutral_3(
+        // input. Paint the opaque equivalent (`neutral_2` = 10% fg over the background) so the
+        // terminal box shows a stable fill that matches the Agent input regardless of what's
+        // behind it, kept a step darker than the border (`neutral_3`) so the outline stays visible.
+        .with_background_color(crate::ui_components::blended_colors::neutral_2(
             appearance.theme(),
         ))
         .with_padding_bottom(4.)
@@ -382,7 +314,8 @@ pub mod styles {
     use crate::ui_components::blended_colors;
 
     pub fn default_border_color(theme: &WarpTheme) -> ColorU {
-        // Match the Agent input box border (`agent::styles::default_border_color`).
-        blended_colors::neutral_2(theme)
+        // Match the Agent input box border (`agent::styles::default_border_color`):
+        // one step lighter than the box fill (`neutral_2`) so it reads as a subtle outline.
+        blended_colors::neutral_3(theme)
     }
 }

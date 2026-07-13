@@ -4377,6 +4377,7 @@ input UpdateUserSettingsInput {
   cloudConversationStorageEnabled: Boolean
   crashReportingEnabled: Boolean
   telemetryEnabled: Boolean
+  displayName: String
 }
 
 type UpdateUserSettingsOutput implements Response {

@@ -669,6 +669,11 @@ pub enum FeatureFlag {
     /// Enables file-based MCP server support via .mcp.json files in repo roots.
     FileBasedMcp,
 
+    /// Enables the floating voice + annotation overlay (macOS): a lightning
+    /// button + always-on-top puck that continuously transcribes speech into the
+    /// chat, plus a draw-to-annotate capture mode. See app/src/overlay/.
+    VoiceOverlay,
+
     /// Enables passing user query arguments to skill invocations ($ARGUMENTS, $N).
     SkillArguments,
 
@@ -938,6 +943,17 @@ pub enum FeatureFlag {
     /// zsh `!` history-expansion error) aborting the entire block, and the
     /// multi-line-buffer desync that follows a rejected resubmission.
     SequentialMultilinePaste,
+
+    /// Automatically attaches newly captured OS screenshots to the focused
+    /// terminal's agent input, gated at runtime by the
+    /// `screenshot_auto_attach_enabled` AI setting.
+    ScreenshotAutoAttach,
+
+    /// Enables the in-app browser Preview tab in the tools drawer (macOS only):
+    /// an embedded WKWebView the user can navigate, and a first-class agent tool
+    /// (`open_browser_preview`) that lets the agent point the preview at a
+    /// dev-server URL to show what is being built.
+    BrowserPreview,
 }
 
 static FLAG_STATES: [AtomicBool; cardinality::<FeatureFlag>()] =
@@ -1008,6 +1024,8 @@ pub const DOGFOOD_FLAGS: &[FeatureFlag] = &[
     FeatureFlag::ContextWindowUsageBreakdown,
     FeatureFlag::CloudRunners,
     FeatureFlag::SequentialMultilinePaste,
+    #[cfg(target_os = "macos")]
+    FeatureFlag::BrowserPreview,
 ];
 
 /// Features enabled for feature preview build users (e.g.: Friends of Warp).

@@ -37,12 +37,14 @@ else
     WARP_SCHEME_NAME="warposs"
 fi
 DONT_OPEN=false
-# Launches the binary with "open", meaning the Warp process is
-# launched by the MacOS application launcher instead of a shell session.
-# Note that since Warp isn't launched as a child process, using ctrl+c
-# won't kill the app (but will kill the tail process displaying output).
-# tl;dr better simulates running Warp Dev/Stable
-OPEN_WITH_LAUNCHD=false
+# Launch mode. When true (the DEFAULT), the app is launched via the macOS
+# application launcher ("open"/LaunchServices), which best simulates how a
+# shipped Warp/Bang starts (permission prompts, URL schemes, activation). The
+# process is NOT a child of this shell, so ctrl+c won't kill it (it kills the
+# tail process showing the log instead). Pass --no_open_with_launchd to instead
+# run the binary directly as a shell child (live stdout in this terminal, ctrl+c
+# quits, and it inherits this shell's environment).
+OPEN_WITH_LAUNCHD=true
 
 # Arguments to pass directly Warp (specified after --)
 # This is not supported when opening with launchd, as passing CLI arguments to
@@ -86,7 +88,12 @@ while (( "$#" )); do
       PARAMS="$PARAMS --profile $PROFILE"
       ;;
     --open_with_launchd)
+      # Now the default; kept for backward compatibility.
       OPEN_WITH_LAUNCHD=true
+      shift
+      ;;
+    --no_open_with_launchd)
+      OPEN_WITH_LAUNCHD=false
       shift
       ;;
     --generate-schema)
@@ -99,6 +106,13 @@ while (( "$#" )); do
       ;;
   esac
 done
+
+# `open` (launchd) can't forward CLI args to the app; if the caller passed
+# `-- <args>`, launch directly instead so the args aren't silently dropped.
+if [ "$OPEN_WITH_LAUNCHD" = true ] && [ ${#WARP_ARGS[@]} -gt 0 ]; then
+  echo "Note: '-- <args>' supplied; launching directly (not via launchd) so they reach the app."
+  OPEN_WITH_LAUNCHD=false
+fi
 
 rm -rf "$WARP_APP_PATH"
 
@@ -120,6 +134,24 @@ install_name_tool -add_rpath "@executable_path/../Frameworks" "$WARP_APP_PATH/Co
 export WARP_SCHEME_NAME
 export WARP_PLIST_PATH="$WARP_APP_PATH/Contents/Info.plist"
 ./script/update_plist
+
+# LaunchServices (`open`/launchd) does NOT inherit this shell's environment, so a
+# shell-exported WARP_SERVER_ROOT_URL (which points the OSS client at a local
+# harness) would be dropped — the client would fall back to its default backend,
+# which rejects the harness's non-Firebase JWT with a 401 "ID token has no 'kid'".
+# When launching via launchd, bake any set server overrides into the bundle's
+# LSEnvironment so the app talks to the same backend as a direct run. Must run
+# before codesign below so the signature covers the final plist.
+if [ "$OPEN_WITH_LAUNCHD" = true ]; then
+  LSENV_XML=""
+  [ -n "${WARP_SERVER_ROOT_URL:-}" ] && LSENV_XML="${LSENV_XML}<key>WARP_SERVER_ROOT_URL</key><string>${WARP_SERVER_ROOT_URL}</string>"
+  [ -n "${WARP_WS_SERVER_URL:-}" ] && LSENV_XML="${LSENV_XML}<key>WARP_WS_SERVER_URL</key><string>${WARP_WS_SERVER_URL}</string>"
+  [ -n "${WARP_SESSION_SHARING_SERVER_URL:-}" ] && LSENV_XML="${LSENV_XML}<key>WARP_SESSION_SHARING_SERVER_URL</key><string>${WARP_SESSION_SHARING_SERVER_URL}</string>"
+  if [ -n "$LSENV_XML" ]; then
+    echo "Baking server overrides into LSEnvironment for launchd launch"
+    plutil -insert LSEnvironment -xml "<dict>${LSENV_XML}</dict>" "$WARP_PLIST_PATH"
+  fi
+fi
 
 echo "Preparing bundled resources..."
 if [ "${GENERATE_SCHEMA:-false}" != "true" ]; then
@@ -143,9 +175,46 @@ if [[ ",$FEATURES," =~ ",warp_control_cli," ]]; then
     "../../MacOS/$WARP_BIN_NAME"
 fi
 
+# Optionally override the app's display name and bundle id so a dev build can be
+# told apart from a stable snapshot in Finder / the Dock / the app switcher, and
+# doesn't collide with it in LaunchServices (which keys apps by bundle id). Set
+# via WARP_APP_DISPLAY_NAME / WARP_APP_BUNDLE_ID (script/dev sets both). Must run
+# before codesign so the signature covers the final plist.
+DISPLAY_NAME_PLIST="$WARP_APP_PATH/Contents/Info.plist"
+if [ -n "${WARP_APP_DISPLAY_NAME:-}" ]; then
+  echo "Setting app display name to '$WARP_APP_DISPLAY_NAME'"
+  /usr/libexec/PlistBuddy -c "Set :CFBundleName $WARP_APP_DISPLAY_NAME" "$DISPLAY_NAME_PLIST" 2>/dev/null \
+    || /usr/libexec/PlistBuddy -c "Add :CFBundleName string $WARP_APP_DISPLAY_NAME" "$DISPLAY_NAME_PLIST"
+  /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName $WARP_APP_DISPLAY_NAME" "$DISPLAY_NAME_PLIST" 2>/dev/null \
+    || /usr/libexec/PlistBuddy -c "Add :CFBundleDisplayName string $WARP_APP_DISPLAY_NAME" "$DISPLAY_NAME_PLIST"
+fi
+if [ -n "${WARP_APP_BUNDLE_ID:-}" ]; then
+  echo "Setting bundle identifier to '$WARP_APP_BUNDLE_ID'"
+  /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $WARP_APP_BUNDLE_ID" "$DISPLAY_NAME_PLIST" 2>/dev/null \
+    || /usr/libexec/PlistBuddy -c "Add :CFBundleIdentifier string $WARP_APP_BUNDLE_ID" "$DISPLAY_NAME_PLIST"
+fi
+# Optionally override the app icon (e.g. script/dev points this at a black
+# bang-dev.icns so the dev build is visually distinct in the Dock / switcher).
+# Installed before codesign so the signature covers the new icon.
+if [ -n "${WARP_APP_ICON:-}" ] && [ -f "${WARP_APP_ICON}" ]; then
+  echo "Setting app icon to '$WARP_APP_ICON'"
+  cp "$WARP_APP_ICON" "$WARP_APP_PATH/Contents/Resources/AppIcon.icns"
+  plutil -replace CFBundleIconFile -string "AppIcon" "$DISPLAY_NAME_PLIST" 2>/dev/null \
+    || plutil -insert CFBundleIconFile -string "AppIcon" "$DISPLAY_NAME_PLIST"
+  # Drop any adaptive-icon reference so our .icns wins on macOS Sequoia.
+  plutil -remove CFBundleIconName "$DISPLAY_NAME_PLIST" 2>/dev/null || true
+fi
+
 echo "Codesigning app..."
 SIGNING_CERT="$(security find-identity -p codesigning -v | grep "Apple Development" | awk '{print $2}' | head -1)"
 codesign --force --deep --options runtime --sign "${SIGNING_CERT:--}" "$WARP_APP_PATH" --entitlements script/Debug-Entitlements.plist
+
+# When we overrode the name/bundle id, refresh LaunchServices so Finder / the
+# Dock / the app switcher (Cmd-Tab) pick up the new identity for this build.
+if [ -n "${WARP_APP_DISPLAY_NAME:-}" ] || [ -n "${WARP_APP_BUNDLE_ID:-}" ]; then
+  LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+  [ -x "$LSREGISTER" ] && "$LSREGISTER" -f "$WARP_APP_PATH" 2>/dev/null || true
+fi
 
 if [ "$DONT_OPEN" = false ] ; then
     if  [ "$OPEN_WITH_LAUNCHD" = true ]; then

@@ -349,6 +349,7 @@ impl NotebookView {
                     font_size_override: Some(styles::title_font_size(font_settings)),
                     font_properties_override: Some(styles::TITLE_FONT_PROPERTIES),
                     text_colors_override: Some(title_text_colors(appearance)),
+                    ..Default::default()
                 },
                 propagate_and_no_op_vertical_navigation_keys:
                     PropagateAndNoOpNavigationKeys::Always,

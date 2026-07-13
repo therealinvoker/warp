@@ -307,10 +307,12 @@ pub async fn make_authenticated_client(
             &redirect_uri,
         ))
     } else {
-        // Try dynamic client registration.
+        // Try dynamic client registration. The client name is what the OAuth
+        // provider shows on its consent screen ("<name> wants to access …"), so
+        // it reflects this fork's brand rather than upstream "Warp".
         let mut oauth_state = OAuthState::Unauthorized(auth_manager);
         oauth_state
-            .start_authorization(&[], &redirect_uri, Some("Warp"))
+            .start_authorization(&[], &redirect_uri, Some("Bang"))
             .await?;
         oauth_state
     };

@@ -274,6 +274,11 @@ fn get_supported_tools(params: &RequestParams) -> Vec<api::ToolType> {
         supported_tools.push(api::ToolType::AskUserQuestion);
     }
 
+    #[cfg(target_os = "macos")]
+    if FeatureFlag::BrowserPreview.is_enabled() {
+        supported_tools.push(api::ToolType::OpenBrowserPreview);
+    }
+
     #[cfg(feature = "github_integration")]
     if FeatureFlag::GithubIntegration.is_enabled() {
         supported_tools.extend(&[

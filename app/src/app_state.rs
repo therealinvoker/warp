@@ -323,6 +323,7 @@ pub enum LeftPanelDisplayedTab {
     WarpDrive,
     ConversationListView,
     CodeReview,
+    BrowserPreview,
 }
 
 impl From<ToolPanelView> for LeftPanelDisplayedTab {
@@ -333,6 +334,7 @@ impl From<ToolPanelView> for LeftPanelDisplayedTab {
             ToolPanelView::WarpDrive => LeftPanelDisplayedTab::WarpDrive,
             ToolPanelView::ConversationListView => LeftPanelDisplayedTab::ConversationListView,
             ToolPanelView::CodeReview => LeftPanelDisplayedTab::CodeReview,
+            ToolPanelView::BrowserPreview => LeftPanelDisplayedTab::BrowserPreview,
         }
     }
 }

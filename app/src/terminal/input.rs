@@ -16,7 +16,6 @@ pub mod profiles;
 pub mod prompts;
 pub mod repos;
 pub mod rewind;
-pub(crate) mod session_mode_control;
 pub mod skills;
 pub mod slash_command_model;
 pub mod slash_commands;
@@ -34,7 +33,7 @@ use std::fmt::Write;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -82,12 +81,12 @@ use warpui::clipboard::{ClipboardContent, ImageData};
 use warpui::clipboard_utils::CLIPBOARD_IMAGE_MIME_TYPES;
 use warpui::color::ColorU;
 use warpui::elements::{
-    resizable_state_handle, Align, AnchorPair, ChildAnchor, Clipped, ConstrainedBox, Container,
-    CornerRadius, CrossAxisAlignment, DispatchEventResult, DropTargetData, Element, EventHandler,
-    Flex, Image as WarpImage, MainAxisAlignment, MainAxisSize, MouseStateHandle, OffsetPositioning,
-    OffsetType, ParentAnchor, ParentElement, PositionedElementOffsetBounds, PositioningAxis,
-    Radius, ResizableStateHandle, SavePosition, SelectionHandle, Text, Wrap, XAxisAnchor,
-    YAxisAnchor,
+    resizable_state_handle, AcceptedByDropTarget, Align, AnchorPair, ChildAnchor, Clipped,
+    ConstrainedBox, Container, CornerRadius, CrossAxisAlignment, DispatchEventResult, Draggable,
+    DraggableState, DropTargetData, Element, EventHandler, Flex, Hoverable, Image as WarpImage,
+    MainAxisAlignment, MainAxisSize, MouseStateHandle, OffsetPositioning, OffsetType, ParentAnchor,
+    ParentElement, ParentOffsetBounds, PositionedElementOffsetBounds, PositioningAxis, Radius,
+    ResizableStateHandle, SavePosition, SelectionHandle, Text, Wrap, XAxisAnchor, YAxisAnchor,
 };
 pub use warpui::elements::{ParentElement as _, Stack};
 pub use warpui::geometry::vector::{vec2f, Vector2F};
@@ -98,7 +97,6 @@ use warpui::presenter::ChildView;
 #[cfg(all(feature = "local_fs", not(target_family = "wasm")))]
 use warpui::r#async::FutureExt as _;
 use warpui::r#async::SpawnedFutureHandle;
-use warpui::scene::Border;
 use warpui::text_layout::TextStyle;
 use warpui::ui_components::chip::Chip;
 use warpui::ui_components::components::{Coords, UiComponent, UiComponentStyles};
@@ -111,9 +109,6 @@ use warpui::{
 
 use self::decorations::InputBackgroundJobOptions;
 pub use self::handoff_compose::{HandoffComposeState, HandoffComposeStateEvent};
-pub(crate) use self::session_mode_control::{
-    render_session_mode_segmented_control, SessionModeSegment, SessionModeSegmentMouseStates,
-};
 use super::alias::is_expandable_alias;
 use super::block_list_viewport::InputMode;
 use super::event::{BlockCompletedEvent, BlockType, UserBlockCompleted};
@@ -163,6 +158,7 @@ use crate::ai::attachment_utils::MAX_ATTACHMENT_SIZE_BYTES;
 use crate::ai::block_context::BlockContext;
 #[cfg(all(feature = "local_fs", not(target_family = "wasm")))]
 use crate::ai::blocklist::agent_view::agent_input_footer::sort_environments_by_recency;
+use crate::ai::blocklist::agent_view::agent_input_footer::PlusButtonTheme;
 use crate::ai::blocklist::agent_view::shortcuts::AgentShortcutViewModel;
 use crate::ai::blocklist::agent_view::{
     is_in_cloud_context, AgentInputFooter, AgentInputFooterEvent, AgentViewController,
@@ -229,7 +225,7 @@ use crate::editor::{
     EditorSnapshot, EditorView, Event as EditorEvent, ImageContextOptions, InteractionState,
     PathTransformerFn, PlainTextEditorViewAction, Point as BufferPoint, PropagateAndNoOpEscapeKey,
     PropagateAndNoOpNavigationKeys, PropagateHorizontalNavigationKeys, ReplicaId, TextColors,
-    TextRun, MAX_IMAGES_PER_CONVERSATION,
+    TextOptions, TextRun, MAX_IMAGES_PER_CONVERSATION,
 };
 use crate::env_vars::EnvVarCollectionExt;
 use crate::features::FeatureFlag;
@@ -247,6 +243,7 @@ use crate::prompt::editor_modal::OpenSource as PromptEditorOpenSource;
 use crate::resource_center::{
     mark_feature_used_and_write_to_user_defaults, Tip, TipAction, TipHint, TipsCompleted,
 };
+use crate::screenshot_watcher::{ScreenshotWatcher, ScreenshotWatcherEvent};
 use crate::search::ai_context_menu::mixer::AIContextMenuSearchableAction;
 use crate::search::ai_context_menu::search::is_valid_search_query;
 use crate::search::ai_context_menu::view::AIContextMenuAction;
@@ -326,6 +323,7 @@ use crate::util::bindings::{self, keybinding_name_to_normalized_string, CustomAc
 use crate::util::file::external_editor;
 use crate::util::image::MAX_IMAGE_COUNT_FOR_QUERY;
 use crate::util::truncation::truncate_from_end;
+use crate::view_components::action_button::{ActionButton, ButtonSize, TooltipAlignment};
 use crate::view_components::{DismissibleToast, ToastFlavor};
 use crate::voltron::{
     Voltron, VoltronEvent, VoltronFeatureView, VoltronFeatureViewHandle, VoltronFeatureViewMeta,
@@ -344,8 +342,9 @@ use crate::workflows::workflow_enum::EnumVariants;
 use crate::workflows::{self, WorkflowSelectionSource, WorkflowSource, WorkflowType};
 use crate::workspace::sync_inputs::SyncedInputState;
 use crate::workspace::{
-    CommandSearchOptions, ForkFromExchange, ForkedConversationDestination, InitContent,
-    RestoreConversationLayout, ToastStack, WorkspaceAction,
+    CommandSearchOptions, ComposerImageDropTargetData, ForkFromExchange,
+    ForkedConversationDestination, InitContent, PaneViewLocator, RestoreConversationLayout,
+    ToastStack, Workspace, WorkspaceAction,
 };
 use crate::workspaces::user_workspaces::{UserWorkspaces, UserWorkspacesEvent};
 #[allow(unused_imports)]
@@ -1347,6 +1346,12 @@ pub enum InputAction {
 
     /// Activates `&` cloud handoff compose mode from the message bar hint.
     ActivateCloudHandoff,
+
+    /// Opens the file picker to attach an image/file to the composer. Owned by
+    /// `Input` (rather than the footer) so the composer "+" button can sit as a
+    /// real flex child to the left of the editor while still routing to
+    /// `Input::select_image`.
+    SelectImage,
 }
 
 #[derive(Copy, Clone, Debug, Default, PartialEq)]
@@ -1779,6 +1784,19 @@ pub struct Input {
     /// to suppress the editor's ctrl-enter newline insertion when a prompt suggestion
     /// banner is pending.
     has_prompt_suggestion_banner: Arc<AtomicBool>,
+    /// Whether the split-footer agent composer is currently rendering its controls
+    /// on a row *below* the editor (2+ lines) vs. inline to the right (single row).
+    /// Cached across frames so the layout decision is width-stable: the editor is
+    /// narrower when the controls sit inline and full-width when they drop below,
+    /// so reading the live soft-wrap count flip-flops for borderline-length text
+    /// (and any re-render, e.g. hover, exposes the flip). See `render_agent_input`.
+    composer_controls_below: Arc<AtomicBool>,
+    /// Last measured width (as `f32::to_bits`) of the composer editor while it was
+    /// rendering in the single-row layout. This is the authoritative "fits on one
+    /// line" width; we compare the text width against it (not the live editor
+    /// width, which grows to full width once the controls drop below) so the
+    /// single-vs-multi decision doesn't oscillate. See `render_agent_input`.
+    composer_single_row_editor_width_bits: Arc<AtomicU32>,
     /// Whether the most recent intelligent autosuggestion was accepted or not.
     /// Cleared once a command is run.
     was_intelligent_autosuggestion_accepted: bool,
@@ -1810,6 +1828,12 @@ pub struct Input {
     terminal_input_message_bar: ViewHandle<TerminalInputMessageBar>,
 
     agent_input_footer: ViewHandle<AgentInputFooter>,
+    /// The composer "+" (attach image/file) button. Owned by `Input` — rather than
+    /// the footer — so it can render as a real flex child at the left of the editor
+    /// in the single-row composer while its click still routes to
+    /// `InputAction::SelectImage` (`Input::select_image`). The footer owns only the
+    /// right-hand mic/lightning cluster.
+    composer_attach_button: ViewHandle<ActionButton>,
     prompt_suggestions_view: ViewHandle<PromptSuggestionsView>,
     handoff_compose_state: ModelHandle<HandoffComposeState>,
 
@@ -1881,10 +1905,6 @@ pub struct Input {
     /// we snapshot the current input contents here so we can restore them after the command
     /// completes and the buffer would normally be cleared.
     input_contents_before_prompt_chip_command: Option<String>,
-
-    /// Mouse state handles for the persistent session-mode segmented control
-    /// ("Agent | Cloud Agent | Terminal") rendered in the terminal input footer.
-    session_mode_mouse_states: SessionModeSegmentMouseStates,
 }
 
 struct AmbientAgentViewState {
@@ -1906,12 +1926,22 @@ impl AmbientAgentViewState {
 struct AttachmentChip {
     file_name: String,
     mouse_state_handle: MouseStateHandle,
+    /// Tracks hover over the whole image thumbnail so the remove button can be
+    /// revealed only while the pointer is over it.
+    thumbnail_hover_handle: MouseStateHandle,
     attachment_type: AttachmentType,
     /// Index into the unified pending_attachments list for deletion.
     index: usize,
     /// For image attachments, the asset-cache source of the decoded image so the
     /// chip can render an inline thumbnail. `None` for files or if decode failed.
     image_asset: Option<AssetSource>,
+    /// Aspect ratio (width / height) of the attached image, captured at staging
+    /// time so the thumbnail box can match the image exactly. `1.0` when unknown.
+    image_aspect: f32,
+    /// Persistent drag state so an image thumbnail can be dragged onto another
+    /// tab to move the attachment into that pane's composer. Persisted on the
+    /// chip so the drag survives the re-renders it triggers.
+    drag_state: DraggableState,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -2377,6 +2407,16 @@ impl Input {
             ctx.notify();
         });
 
+        // Auto-attach captured screenshots to the focused input. Gated behind the
+        // feature flag so tests (where the flag is off and the singleton is not
+        // registered) don't need the watcher.
+        if FeatureFlag::ScreenshotAutoAttach.is_enabled() {
+            ctx.subscribe_to_model(&ScreenshotWatcher::handle(ctx), |me, _, event, ctx| {
+                let ScreenshotWatcherEvent::ScreenshotCaptured(path) = event;
+                me.handle_screenshot_captured(path.clone(), ctx);
+            });
+        }
+
         if let Some(ambient_agent_view_model) = ambient_agent_view_model.as_ref() {
             ctx.subscribe_to_model(ambient_agent_view_model, |me, handle, event, ctx| {
                 let is_ambient = handle.as_ref(ctx).is_ambient_agent();
@@ -2462,6 +2502,22 @@ impl Input {
                 footer_display_chip_config.clone(),
                 ctx,
             )
+        });
+
+        // The composer "+" (attach) button lives on `Input` so it can flank the
+        // editor on the left in the single-row composer while its click routes to
+        // `InputAction::SelectImage`. Mirrors the footer's `PlusButtonTheme`
+        // circular treatment so both read as the same round button.
+        let composer_attach_button = ctx.add_typed_action_view(|_ctx| {
+            ActionButton::new("", PlusButtonTheme)
+                .with_icon(Icon::Plus)
+                .with_tooltip("Attach file")
+                .with_size(ButtonSize::AgentInputButton)
+                .with_corner_radius(CornerRadius::with_all(Radius::Percentage(50.)))
+                .with_tooltip_alignment(TooltipAlignment::Left)
+                .on_click(|ctx| {
+                    ctx.dispatch_typed_action(InputAction::SelectImage);
+                })
         });
 
         let mut ambient_agent_view_state =
@@ -2683,6 +2739,9 @@ impl Input {
                 AgentInputFooterEvent::SelectFile => {
                     me.select_image(ctx);
                 }
+                AgentInputFooterEvent::ToggleOverlay => {
+                    me.toggle_overlay(ctx);
+                }
                 AgentInputFooterEvent::StartRemoteControl
                 | AgentInputFooterEvent::StopRemoteControl => {
                     // Handled by UseAgentToolbar's subscription, not here.
@@ -2854,6 +2913,8 @@ impl Input {
 
         let ai_follow_up_icon_mouse_state = MouseStateHandle::default();
         let has_prompt_suggestion_banner = Arc::new(AtomicBool::new(false));
+        let composer_controls_below = Arc::new(AtomicBool::new(false));
+        let composer_single_row_editor_width_bits = Arc::new(AtomicU32::new(0));
         let editor = {
             // Clones used in render_decorator_elements closure below.
             let prompt_render_helper_clone = prompt_render_helper.clone();
@@ -2882,6 +2943,13 @@ impl Input {
 
             ctx.add_typed_action_view(|ctx| {
                 let options = EditorOptions {
+                    // Keep the composer/command input text at its original size after the fork
+                    // reduced the default terminal grid font by 2pts: render the editor 2pts larger
+                    // than the monospace setting so the input stays readable while the grid shrinks.
+                    text: TextOptions {
+                        font_size_delta: 2.0,
+                        ..Default::default()
+                    },
                     autogrow: true,
                     autocomplete_symbols: true,
                     propagate_and_no_op_vertical_navigation_keys:
@@ -3358,8 +3426,18 @@ impl Input {
                     return;
                 }
                 me.set_zero_state_hint_text(ctx);
+                // Stream agent status/text into the overlay result box + spotlight
+                // (no-op unless the overlay result box is showing).
+                me.overlay_sync_box(ctx);
                 ctx.notify();
             },
+        );
+        // Hands-free Realtime voice events (streaming transcript + turn detection)
+        // drive the overlay composer/puck/auto-submit.
+        #[cfg(feature = "voice_input")]
+        ctx.subscribe_to_model(
+            &crate::overlay::realtime::RealtimeVoice::handle(ctx),
+            |me, _, event, ctx| me.on_realtime_voice_event(event, ctx),
         );
         ctx.subscribe_to_model(&QueuedQueryModel::handle(ctx), |me, _, event, ctx| {
             let affects_hint = match event {
@@ -3446,14 +3524,21 @@ impl Input {
                         .into_iter()
                         .enumerate()
                         .map(|(i, (file_name, attachment_type, image_data))| {
-                            let image_asset = image_data
+                            let staged = image_data
                                 .and_then(|data| Self::stage_attachment_thumbnail(&data, ctx));
+                            let (image_asset, image_aspect) = match staged {
+                                Some((asset, aspect)) => (Some(asset), aspect),
+                                None => (None, 1.0),
+                            };
                             AttachmentChip {
                                 file_name,
                                 mouse_state_handle: Default::default(),
+                                thumbnail_hover_handle: Default::default(),
                                 attachment_type,
                                 index: i,
                                 image_asset,
+                                image_aspect,
+                                drag_state: Default::default(),
                             }
                         })
                         .collect_vec();
@@ -3859,6 +3944,8 @@ impl Input {
             shared_session_presence_manager: None,
             prompt_suggestions_banner_state: None,
             has_prompt_suggestion_banner,
+            composer_controls_below,
+            composer_single_row_editor_width_bits,
             was_intelligent_autosuggestion_accepted: false,
             last_intelligent_autosuggestion_result: None,
             next_command_model,
@@ -3896,13 +3983,13 @@ impl Input {
             queued_prompts_panel,
             agent_view_controller,
             agent_input_footer,
+            composer_attach_button,
             agent_shortcut_view_model,
             ambient_agent_view_state,
             slash_command_data_source,
             cloud_mode_composer_slash_command_data_source,
             ephemeral_message_model,
             input_contents_before_prompt_chip_command: None,
-            session_mode_mouse_states: Default::default(),
         };
 
         #[cfg(feature = "local_fs")]
@@ -6534,6 +6621,439 @@ impl Input {
             .update(ctx, |editor, ctx| editor.toggle_voice_input(from, ctx));
         if did_start_listening {
             self.focus_input_box(ctx);
+        }
+    }
+
+    /// Continuous-voice chunk length. The transcription backend has no streaming
+    /// API, so continuous mode records fixed windows, transcribes each, inserts
+    /// it, then starts the next window while the overlay stays open.
+    #[cfg(feature = "voice_input")]
+    const OVERLAY_VOICE_CHUNK: std::time::Duration = std::time::Duration::from_secs(6);
+
+    /// How often the overlay polls the live mic level to modulate the puck.
+    #[cfg(feature = "voice_input")]
+    const OVERLAY_LEVEL_POLL: std::time::Duration = std::time::Duration::from_millis(33);
+
+    /// Peak RMS mic level a recording window must reach to be transcribed.
+    /// Windows quieter than this are discarded, because Whisper hallucinates
+    /// filler phrases ("thanks for watching", "bye bye bye") on silence.
+    /// Tunable: lower if quiet speech is being dropped.
+    #[cfg(feature = "voice_input")]
+    const OVERLAY_SILENCE_THRESHOLD: f32 = 0.01;
+
+    /// Toggle the Bang voice + annotation overlay puck. Opening begins
+    /// continuous voice-to-composer; closing ends it.
+    fn toggle_overlay(&mut self, ctx: &mut ViewContext<Self>) {
+        let weak_self = self.weak_view_handle.clone();
+        let now_open =
+            crate::overlay::OverlayController::handle(ctx).update(ctx, move |controller, _| {
+                controller.toggle();
+                let open = controller.is_open();
+                if open {
+                    // Route puck clicks (pause/submit) back to this composer.
+                    controller.set_active_input(weak_self);
+                }
+                open
+            });
+        if now_open {
+            // Match the result box background to the main composer's background,
+            // and reflect the current auto-submit setting on the overlay toggle.
+            let bg: ColorU = Appearance::as_ref(ctx).theme().background().into();
+            let auto_submit = *crate::settings::AISettings::as_ref(ctx).voice_overlay_auto_submit;
+            crate::overlay::OverlayController::handle(ctx).update(ctx, |controller, _| {
+                controller.set_box_background(
+                    bg.r as f32 / 255.0,
+                    bg.g as f32 / 255.0,
+                    bg.b as f32 / 255.0,
+                    1.0,
+                );
+                controller.set_box_auto_submit(auto_submit);
+            });
+        }
+        #[cfg(feature = "voice_input")]
+        if now_open {
+            self.start_overlay_voice(ctx);
+        } else {
+            self.stop_overlay_voice(ctx);
+        }
+        #[cfg(not(feature = "voice_input"))]
+        let _ = now_open;
+    }
+
+    #[cfg(feature = "voice_input")]
+    fn start_overlay_voice(&mut self, ctx: &mut ViewContext<Self>) {
+        self.enter_ai_mode(Some(InputTypeAutoDetectionSource::VoiceInputToggle), ctx);
+        self.overlay_start_listening(ctx);
+        self.schedule_overlay_level_poll(ctx);
+    }
+
+    #[cfg(feature = "voice_input")]
+    fn stop_overlay_voice(&mut self, ctx: &mut ViewContext<Self>) {
+        // The controller is already closed here. Stop whichever pipeline is
+        // running. The level-poll loop self-terminates once the overlay closes.
+        self.overlay_stop_listening(ctx);
+    }
+
+    /// Begin listening using the preferred pipeline: OpenAI Realtime (hands-free
+    /// streaming + turn detection), or the chunked Whisper path when Realtime is
+    /// unavailable this session.
+    #[cfg(feature = "voice_input")]
+    fn overlay_start_listening(&mut self, ctx: &mut ViewContext<Self>) {
+        let fallback = crate::overlay::OverlayController::handle(ctx)
+            .as_ref(ctx)
+            .use_chunked_fallback();
+        if fallback {
+            self.begin_overlay_voice_chunk(ctx);
+        } else {
+            crate::overlay::realtime::RealtimeVoice::handle(ctx)
+                .update(ctx, |realtime, ctx| realtime.start(ctx));
+        }
+    }
+
+    /// Stop listening on whichever pipeline is active, without re-inserting an
+    /// in-flight chunk's transcript.
+    #[cfg(feature = "voice_input")]
+    fn overlay_stop_listening(&mut self, ctx: &mut ViewContext<Self>) {
+        if crate::overlay::realtime::RealtimeVoice::handle(ctx)
+            .as_ref(ctx)
+            .is_active()
+        {
+            crate::overlay::realtime::RealtimeVoice::handle(ctx)
+                .update(ctx, |realtime, ctx| realtime.stop(ctx));
+        } else {
+            self.editor
+                .update(ctx, |editor, ctx| editor.cancel_voice_input(ctx));
+        }
+    }
+
+    /// Handle a Realtime voice event: transcript -> composer, VAD -> puck,
+    /// turn-end -> auto-submit (when enabled), failure -> chunked fallback.
+    #[cfg(feature = "voice_input")]
+    fn on_realtime_voice_event(
+        &mut self,
+        event: &crate::overlay::realtime::RealtimeVoiceEvent,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        use crate::overlay::realtime::RealtimeVoiceEvent;
+        let overlay = crate::overlay::OverlayController::handle(ctx);
+        if !overlay.as_ref(ctx).is_open() {
+            return;
+        }
+        match event {
+            RealtimeVoiceEvent::Ready => {}
+            RealtimeVoiceEvent::SpeechStarted => {
+                overlay.update(ctx, |controller, _| controller.set_recording(true));
+            }
+            RealtimeVoiceEvent::SpeechStopped => {
+                overlay.update(ctx, |controller, _| controller.set_recording(false));
+            }
+            RealtimeVoiceEvent::TranscriptDelta(text) => {
+                if !text.is_empty() {
+                    self.editor
+                        .update(ctx, |editor, ctx| editor.user_insert(text, ctx));
+                }
+            }
+            RealtimeVoiceEvent::TranscriptDone(_) => {}
+            RealtimeVoiceEvent::TurnEnd => {
+                // Only auto-submit when enabled and not already awaiting a response.
+                let auto = *crate::settings::AISettings::as_ref(ctx).voice_overlay_auto_submit;
+                let awaiting = overlay.as_ref(ctx).is_restart_suppressed();
+                if auto && !awaiting {
+                    self.overlay_submit(ctx);
+                }
+            }
+            RealtimeVoiceEvent::Failed => {
+                // Realtime can't run this session -> chunked Whisper fallback.
+                overlay.update(ctx, |controller, _| {
+                    controller.set_use_chunked_fallback(true)
+                });
+                if !overlay.as_ref(ctx).is_restart_suppressed() {
+                    self.begin_overlay_voice_chunk(ctx);
+                }
+            }
+            RealtimeVoiceEvent::Closed => {}
+        }
+    }
+
+    /// Clicked the mic puck: pause (stop capturing, dim) or resume (start a new
+    /// window). Routed here from the native puck via the overlay controller.
+    pub(crate) fn overlay_toggle_pause(&mut self, ctx: &mut ViewContext<Self>) {
+        let overlay = crate::overlay::OverlayController::handle(ctx);
+        if !overlay.as_ref(ctx).is_open() {
+            return;
+        }
+        let now_paused = !overlay.as_ref(ctx).is_paused();
+        overlay.update(ctx, |controller, _| controller.set_paused(now_paused));
+        #[cfg(feature = "voice_input")]
+        if now_paused {
+            self.overlay_stop_listening(ctx);
+        } else {
+            self.overlay_start_listening(ctx);
+        }
+        #[cfg(not(feature = "voice_input"))]
+        let _ = now_paused;
+    }
+
+    /// Clicked the submit puck: send the current composer contents as an AI
+    /// query and clear the input, so the user can keep dictating. Shows the
+    /// streaming result box and starts the "thinking" spotlight.
+    pub(crate) fn overlay_submit(&mut self, ctx: &mut ViewContext<Self>) {
+        let prompt = self.buffer_text(ctx).trim().to_string();
+        if prompt.is_empty() {
+            return;
+        }
+        // Cancel any in-flight recording *and* pending transcription first, so it
+        // doesn't finish and re-insert the just-submitted text after we clear.
+        // Suppress the auto-restart across the cancel so the aborted session
+        // settling (an async result) doesn't fight a freshly started window;
+        // a deferred resume starts exactly one fresh window afterward.
+        #[cfg(feature = "voice_input")]
+        {
+            crate::overlay::OverlayController::handle(ctx).update(ctx, |controller, _| {
+                controller.set_restart_suppressed(true);
+                controller.set_recording(false);
+            });
+            self.overlay_stop_listening(ctx);
+        }
+        self.clear_buffer_and_reset_undo_stack(ctx);
+        self.submit_user_query_now(prompt, ctx);
+        crate::overlay::OverlayController::handle(ctx).update(ctx, |controller, _| {
+            // Switch the box to read-only result mode and start the spotlight.
+            // Listening stays suppressed until the agent finishes responding
+            // (resumed in overlay_sync_box), so we don't dictate over the answer.
+            controller.show_result_box();
+            controller.set_box_result_mode(true);
+            controller.set_box_editable(false);
+            controller.set_result_text("Thinking…");
+            controller.set_thinking(true);
+            controller.set_response_started(false);
+        });
+        // Fallback only: if the agent never signals completion (e.g. errors
+        // before starting), resume listening after a generous timeout so voice
+        // can't get stuck off. The normal resume is in overlay_sync_box.
+        #[cfg(feature = "voice_input")]
+        ctx.spawn(
+            async {
+                warpui::r#async::Timer::after(std::time::Duration::from_secs(45)).await;
+            },
+            Self::overlay_resume_after_submit,
+        );
+    }
+
+    /// Fallback post-submit voice resume: only fires if the agent never signaled
+    /// completion (still suppressed). Normal resume is in overlay_sync_box once
+    /// the response finishes.
+    #[cfg(feature = "voice_input")]
+    fn overlay_resume_after_submit(&mut self, _: (), ctx: &mut ViewContext<Self>) {
+        let overlay = crate::overlay::OverlayController::handle(ctx);
+        let (open, suppressed) = {
+            let controller = overlay.as_ref(ctx);
+            (controller.is_open(), controller.is_restart_suppressed())
+        };
+        if open && suppressed {
+            overlay.update(ctx, |controller, _| {
+                controller.set_restart_suppressed(false);
+                controller.set_response_started(false);
+            });
+            self.overlay_start_listening(ctx);
+        }
+    }
+
+    /// A user edit in the overlay box (dictation mode) — mirror it back into the
+    /// composer so submit sends the edited transcript.
+    pub(crate) fn overlay_box_edited(&mut self, text: &str, ctx: &mut ViewContext<Self>) {
+        let result_mode = crate::overlay::OverlayController::handle(ctx)
+            .as_ref(ctx)
+            .is_box_result_mode();
+        if result_mode {
+            return;
+        }
+        self.user_replace_editor_text(text, ctx);
+    }
+
+    /// Sync the overlay box: in result mode, stream the agent's thinking/answer
+    /// (read-only) and drive the spotlight; in dictation mode, mirror the live
+    /// transcript (editable). No-op unless the box is showing.
+    fn overlay_sync_box(&mut self, ctx: &mut ViewContext<Self>) {
+        let overlay = crate::overlay::OverlayController::handle(ctx);
+        let (open, visible, result_mode) = {
+            let controller = overlay.as_ref(ctx);
+            (
+                controller.is_open(),
+                controller.is_result_box_visible(),
+                controller.is_box_result_mode(),
+            )
+        };
+        if !open || !visible {
+            return;
+        }
+        if result_mode {
+            let (thinking, agent_text) = self.overlay_agent_snapshot(ctx);
+            let text = agent_text.unwrap_or_else(|| "Thinking…".to_string());
+            // While a submit is in flight we hold off on listening. Track that
+            // the response has begun (went in-progress), and once it finishes,
+            // resume continuous voice for the next prompt.
+            let should_resume = overlay.update(ctx, |controller, _| {
+                controller.set_thinking(thinking);
+                controller.set_box_editable(false);
+                controller.set_result_text(&text);
+                if !controller.is_restart_suppressed() {
+                    return false;
+                }
+                if thinking {
+                    controller.set_response_started(true);
+                    false
+                } else if controller.response_started() {
+                    controller.set_restart_suppressed(false);
+                    controller.set_response_started(false);
+                    true
+                } else {
+                    false
+                }
+            });
+            if should_resume {
+                #[cfg(feature = "voice_input")]
+                self.overlay_start_listening(ctx);
+            }
+        } else {
+            let composer = self.buffer_text(ctx);
+            overlay.update(ctx, |controller, _| {
+                controller.set_thinking(false);
+                controller.set_box_editable(true);
+                controller.set_result_text(&composer);
+            });
+        }
+    }
+
+    /// Snapshot of the selected conversation for the overlay box: whether it's
+    /// still generating, and the current thinking/answer text.
+    fn overlay_agent_snapshot(&self, ctx: &ViewContext<Self>) -> (bool, Option<String>) {
+        let context_model = self.ai_context_model.as_ref(ctx);
+        let Some(conversation) = context_model.selected_conversation(ctx) else {
+            return (false, None);
+        };
+        let thinking = conversation.status().is_in_progress();
+        let Some(exchange) = conversation.latest_exchange() else {
+            return (thinking, None);
+        };
+        let Some(output) = exchange.output_status.output() else {
+            return (thinking, None);
+        };
+        let output = output.get();
+        let answer: String = output
+            .text_from_agent_output()
+            .map(Self::agent_text_to_plain_string)
+            .collect();
+        let reasoning: String = output
+            .text_from_agent_reasoning()
+            .map(Self::agent_text_to_plain_string)
+            .collect();
+        let text = if !answer.trim().is_empty() {
+            answer
+        } else if !reasoning.trim().is_empty() {
+            format!("Thinking… {}", reasoning.trim())
+        } else {
+            "Thinking…".to_string()
+        };
+        (thinking, Some(text))
+    }
+
+    /// Flatten an agent text block (reasoning or answer) to plain text for the
+    /// compact overlay result box.
+    fn agent_text_to_plain_string(text: &crate::ai::agent::AIAgentText) -> String {
+        use crate::ai::agent::AIAgentTextSection;
+        let mut out = String::new();
+        for section in &text.sections {
+            match section {
+                AIAgentTextSection::PlainText { text } => out.push_str(text.text()),
+                AIAgentTextSection::Code { code, .. } => out.push_str(code),
+                AIAgentTextSection::Table { table } => out.push_str(&table.markdown_source),
+                AIAgentTextSection::Image { .. } | AIAgentTextSection::MermaidDiagram { .. } => {}
+            }
+        }
+        out
+    }
+
+    #[cfg(feature = "voice_input")]
+    fn begin_overlay_voice_chunk(&mut self, ctx: &mut ViewContext<Self>) {
+        let overlay = crate::overlay::OverlayController::handle(ctx);
+        let overlay = overlay.as_ref(ctx);
+        if !overlay.is_open() || overlay.is_paused() {
+            return;
+        }
+        let started = self.editor.update(ctx, |editor, ctx| {
+            editor.toggle_voice_input(&voice_input::VoiceInputToggledFrom::Button, ctx)
+        });
+        if started {
+            crate::overlay::OverlayController::handle(ctx)
+                .update(ctx, |controller, _| controller.reset_chunk_peak());
+            self.focus_input_box(ctx);
+            ctx.spawn(
+                async {
+                    warpui::r#async::Timer::after(Self::OVERLAY_VOICE_CHUNK).await;
+                },
+                Self::overlay_voice_chunk_elapsed,
+            );
+        }
+    }
+
+    /// Poll the live mic level ~30fps and feed it to the puck for gradient
+    /// modulation. Self-terminates once the overlay closes.
+    #[cfg(feature = "voice_input")]
+    fn schedule_overlay_level_poll(&mut self, ctx: &mut ViewContext<Self>) {
+        ctx.spawn(
+            async {
+                warpui::r#async::Timer::after(Self::OVERLAY_LEVEL_POLL).await;
+            },
+            Self::overlay_level_tick,
+        );
+    }
+
+    #[cfg(feature = "voice_input")]
+    fn overlay_level_tick(&mut self, _: (), ctx: &mut ViewContext<Self>) {
+        let overlay = crate::overlay::OverlayController::handle(ctx);
+        if !overlay.as_ref(ctx).is_open() {
+            return;
+        }
+        let level = voice_input::VoiceInput::handle(ctx)
+            .as_ref(ctx)
+            .input_level();
+        overlay.update(ctx, |controller, _| controller.set_level(level));
+        self.schedule_overlay_level_poll(ctx);
+    }
+
+    /// Fired when a recording window elapses: close it out (which transcribes +
+    /// inserts). The next window is started from the VoiceStateUpdated handler
+    /// once this one finishes, if the overlay is still open.
+    #[cfg(feature = "voice_input")]
+    fn overlay_voice_chunk_elapsed(&mut self, _: (), ctx: &mut ViewContext<Self>) {
+        self.end_overlay_voice_chunk_if_recording(ctx);
+    }
+
+    /// End the current voice chunk iff one is capturing (toggling from a stopped
+    /// state would erroneously *start* recording). Windows that never rose above
+    /// the silence threshold are aborted (discarded) rather than transcribed, to
+    /// avoid Whisper hallucinating filler text on silence.
+    #[cfg(feature = "voice_input")]
+    fn end_overlay_voice_chunk_if_recording(&mut self, ctx: &mut ViewContext<Self>) {
+        let (recording, peak) = {
+            let controller = crate::overlay::OverlayController::handle(ctx);
+            let controller = controller.as_ref(ctx);
+            (controller.is_recording(), controller.chunk_peak())
+        };
+        if !recording {
+            return;
+        }
+        if peak >= Self::OVERLAY_SILENCE_THRESHOLD {
+            // Had speech: stop -> transcribe -> insert.
+            self.editor.update(ctx, |editor, ctx| {
+                editor.toggle_voice_input(&voice_input::VoiceInputToggledFrom::Button, ctx);
+            });
+        } else {
+            // Silent window: abort so nothing is sent to transcription. The
+            // editor's session resolves as aborted, and the VoiceStateUpdated
+            // handler starts the next window.
+            voice_input::VoiceInput::handle(ctx).update(ctx, |voice, _| voice.abort_listening());
         }
     }
 
@@ -10040,6 +10560,26 @@ impl Input {
 
         match event {
             EditorEvent::Edited(edit_origin) => {
+                // Overlay dictation: a user/transcription edit means we're composing
+                // a new prompt, so flip the box to editable dictation and mirror the
+                // live transcript (no-op unless the overlay box is showing).
+                if matches!(
+                    edit_origin,
+                    EditOrigin::UserTyped | EditOrigin::UserInitiated
+                ) {
+                    let overlay = crate::overlay::OverlayController::handle(ctx);
+                    if overlay.as_ref(ctx).is_result_box_visible() {
+                        // Only a non-empty edit means new dictation; an empty
+                        // buffer (e.g. the submit clearing the input) must not
+                        // knock the box out of result mode.
+                        if !self.buffer_text(ctx).trim().is_empty() {
+                            overlay
+                                .update(ctx, |controller, _| controller.set_box_result_mode(false));
+                        }
+                        self.overlay_sync_box(ctx);
+                    }
+                }
+
                 // We should ideally be handling all `Edited` events, not just those that are
                 // marked EditOrigin. However, we receive the notification that the block has
                 // completed, in the same event we clear the input box per-command. Due to how
@@ -11053,6 +11593,35 @@ impl Input {
                 } else {
                     self.set_zero_state_hint_text(ctx);
                 }
+
+                // Drive continuous voice for the overlay: mirror capture state
+                // into the controller and, when a window finishes transcribing +
+                // inserting, start the next one while the overlay stays open.
+                #[cfg(feature = "voice_input")]
+                {
+                    let overlay = crate::overlay::OverlayController::handle(ctx);
+                    let (is_open, suppressed, fallback) = {
+                        let controller = overlay.as_ref(ctx);
+                        (
+                            controller.is_open(),
+                            controller.is_restart_suppressed(),
+                            controller.use_chunked_fallback(),
+                        )
+                    };
+                    // Only the chunked-Whisper fallback keys off editor voice
+                    // state; the Realtime pipeline drives recording/turns via its
+                    // own events.
+                    if is_open && fallback {
+                        let is_listening = *is_listening;
+                        let is_transcribing = *is_transcribing;
+                        overlay.update(ctx, |controller, _| {
+                            controller.set_recording(is_listening);
+                        });
+                        if !is_listening && !is_transcribing && !suppressed {
+                            self.begin_overlay_voice_chunk(ctx);
+                        }
+                    }
+                }
             }
             EditorEvent::SetAIContextMenuOpen(open) => {
                 self.set_ai_context_menu_open(*open, ctx);
@@ -11364,6 +11933,50 @@ impl Input {
         0
     }
 
+    /// Attach a newly captured screenshot to this input if it is the focused
+    /// one. Multiple `Input` views subscribe to the shared screenshot watcher,
+    /// so we gate on focus to route the screenshot to the input the user is in.
+    fn handle_screenshot_captured(&mut self, path: PathBuf, ctx: &mut ViewContext<Self>) {
+        // The screenshot watcher is a singleton, so every terminal's input across
+        // all windows receives this event. Route it to the one input the user is
+        // actually looking at. Per-pane focus handles report "focused" for every
+        // non-split tab, so they can't distinguish tabs — resolve the active
+        // window's focused terminal session instead.
+        if !self.is_focused_terminal_input_in_active_window(ctx) {
+            return;
+        }
+        let Some(path_str) = path.to_str().map(str::to_owned) else {
+            return;
+        };
+        self.handle_pasted_or_dragdropped_image_filepaths(vec![path_str], ctx);
+    }
+
+    /// True when this input backs the focused terminal session of the active tab
+    /// in the OS-active window — i.e. the single input the user is currently
+    /// looking at across every window and tab.
+    fn is_focused_terminal_input_in_active_window(&self, ctx: &ViewContext<Self>) -> bool {
+        let window_id = ctx.window_id();
+        if ctx.windows().state().active_window != Some(window_id) {
+            return false;
+        }
+
+        let focused_terminal_view_id = ctx
+            .views_of_type::<Workspace>(window_id)
+            .as_ref()
+            .and_then(|workspaces| workspaces.first())
+            .and_then(|workspace| {
+                workspace.read(ctx, |workspace, w_ctx| {
+                    workspace
+                        .active_tab_pane_group()
+                        .as_ref(w_ctx)
+                        .focused_session_view(w_ctx)
+                        .map(|terminal_view| terminal_view.id())
+                })
+            });
+
+        focused_terminal_view_id == Some(self.terminal_view_id)
+    }
+
     /// Handle pasted file paths that point to images for auto-attachment. Returns number of images attached.
     pub fn handle_pasted_or_dragdropped_image_filepaths(
         &mut self,
@@ -11403,6 +12016,26 @@ impl Input {
             editor.read_and_process_images_async(num_paths, paths_to_process, ctx);
         });
         num_paths
+    }
+
+    /// Appends an already-processed (base64) image directly to this composer's
+    /// pending attachments. Used when moving a staged image from another tab's
+    /// composer via drag-and-drop: the image is already decoded/resized, so it
+    /// bypasses the file-read/limit pipeline. Switches to agent view like the
+    /// paste path so the thumbnail is visible.
+    pub fn append_pending_image(&mut self, image: ImageContext, ctx: &mut ViewContext<Self>) {
+        self.maybe_enter_agent_view_for_image_add(ctx);
+
+        let is_buffer_empty = self.buffer_text(ctx).is_empty();
+        let in_active_agent_view = self.agent_view_controller.as_ref(ctx).is_active();
+        if is_buffer_empty || in_active_agent_view {
+            self.set_input_mode_agent(true, ctx);
+            self.update_image_context_options(ctx);
+        }
+
+        self.ai_context_model.update(ctx, |model, ctx| {
+            model.append_pending_attachments(vec![PendingAttachment::Image(image)], ctx);
+        });
     }
 
     /// Convert clipboard image data to AttachedImage and attach to editor in Agent Mode.
@@ -14236,7 +14869,6 @@ impl Input {
         true
     }
 
-    /// Submit the input buffer contents as an AI query.
     fn submit_ai_query(
         &mut self,
         zero_state_prompt_suggestion_type: Option<ZeroStatePromptSuggestionType>,
@@ -14271,6 +14903,31 @@ impl Input {
                 });
                 return;
             }
+        }
+
+        // Images can be staged in the composer even for models without vision
+        // support; surface that constraint here, at submit time, and keep the
+        // image attached so the user can switch to a vision-capable model and
+        // resend without re-attaching.
+        let has_pending_images = !self
+            .ai_context_model
+            .as_ref(ctx)
+            .pending_images()
+            .is_empty();
+        if has_pending_images
+            && !LLMPreferences::as_ref(ctx).vision_supported(ctx, Some(self.terminal_view_id))
+        {
+            let window_id = ctx.window_id();
+            ToastStack::handle(ctx).update(ctx, |toast_stack, ctx| {
+                toast_stack.add_ephemeral_toast(
+                    DismissibleToast::error(
+                        "The selected model does not support images as context".to_string(),
+                    ),
+                    window_id,
+                    ctx,
+                );
+            });
+            return;
         }
 
         // If the agent view is inactive but the current input is detected as AI, submitting
@@ -15567,18 +16224,30 @@ impl Input {
     fn stage_attachment_thumbnail(
         base64_data: &str,
         ctx: &mut ViewContext<Self>,
-    ) -> Option<AssetSource> {
+    ) -> Option<(AssetSource, f32)> {
+        use image::GenericImageView;
         use std::hash::{Hash, Hasher};
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(base64_data)
             .ok()?;
+        // Capture the image's aspect ratio up front so the thumbnail can size its
+        // box to the image exactly (see `render_attached_chip`). Relying on the
+        // asset cache's lazily-populated size makes the box fall back to its max
+        // width, which detaches the hover remove-button from the image corner.
+        let aspect = image::load_from_memory(&bytes)
+            .ok()
+            .map(|img| {
+                let (width, height) = img.dimensions();
+                width.max(1) as f32 / height.max(1) as f32
+            })
+            .unwrap_or(1.0);
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         bytes.hash(&mut hasher);
         let id = format!("pending-attachment-thumb-{:016x}", hasher.finish());
         AssetCache::handle(ctx).update(ctx, |asset_cache, ctx| {
             asset_cache.insert_raw_asset_bytes::<ImageType>(id.clone(), &bytes, ctx);
         });
-        Some(AssetSource::Raw { id })
+        Some((AssetSource::Raw { id }, aspect))
     }
 
     fn render_attachment_chips(&self, appearance: &Appearance) -> Option<Box<dyn Element>> {
@@ -15622,42 +16291,143 @@ impl Input {
             .finish();
 
         // Image attachments render an inline thumbnail (click to open the
-        // lightbox) rather than the generic icon + filename chip.
+        // lightbox) rather than the generic icon + filename chip. The thumbnail
+        // is shown bare (no surrounding card) and reveals its remove button only
+        // while hovered.
         if let (AttachmentType::Image, Some(asset_source)) =
             (chip.attachment_type, chip.image_asset.as_ref())
         {
-            const ATTACHMENT_THUMBNAIL_HEIGHT: f32 = 36.;
-            const ATTACHMENT_THUMBNAIL_MAX_WIDTH: f32 = 160.;
+            const ATTACHMENT_THUMBNAIL_HEIGHT: f32 = 72.;
+            const ATTACHMENT_THUMBNAIL_MAX_WIDTH: f32 = 320.;
             let preview_chip_index = chip.index;
+            // Size the thumbnail box to the image's exact aspect (captured at
+            // staging time) so `.contain()` fills it with no letterboxing. A box
+            // that matches the image bounds means the hover remove-button, which
+            // anchors to the box's top-right corner, sits flush in the image's
+            // corner regardless of when the asset cache reports its size.
+            let aspect = chip.image_aspect.max(0.01);
+            let (thumbnail_width, thumbnail_height) =
+                if aspect >= ATTACHMENT_THUMBNAIL_MAX_WIDTH / ATTACHMENT_THUMBNAIL_HEIGHT {
+                    (
+                        ATTACHMENT_THUMBNAIL_MAX_WIDTH,
+                        ATTACHMENT_THUMBNAIL_MAX_WIDTH / aspect,
+                    )
+                } else {
+                    (
+                        ATTACHMENT_THUMBNAIL_HEIGHT * aspect,
+                        ATTACHMENT_THUMBNAIL_HEIGHT,
+                    )
+                };
             let thumbnail = WarpImage::new(asset_source.clone(), CacheOption::BySize)
                 .contain()
                 .with_corner_radius(CornerRadius::with_all(Radius::Pixels(4.)));
-            let thumbnail = ConstrainedBox::new(Box::new(thumbnail.layout_using_paint_bounds()))
-                .with_max_height(ATTACHMENT_THUMBNAIL_HEIGHT)
-                .with_max_width(ATTACHMENT_THUMBNAIL_MAX_WIDTH)
+            let thumbnail = ConstrainedBox::new(Box::new(thumbnail))
+                .with_width(thumbnail_width)
+                .with_height(thumbnail_height)
                 .finish();
-            let row = Flex::row()
-                .with_cross_axis_alignment(CrossAxisAlignment::Center)
-                .with_main_axis_size(MainAxisSize::Min)
-                .with_child(thumbnail)
-                .with_child(Container::new(close_button).with_margin_left(6.).finish())
+            let hovered_content =
+                Hoverable::new(chip.thumbnail_hover_handle.clone(), move |hover_state| {
+                    let mut stack = Stack::new().with_child(thumbnail);
+                    // Reveal the remove button as a badge centered on the
+                    // thumbnail's top-right corner while hovered, straddling the
+                    // edge so it reads as a clear corner control for any image
+                    // aspect. Positioned (not overlaid) against the stack's
+                    // bounds — which equal the exact-aspect thumbnail box — so it
+                    // lands on the image's real corner and its hit region matches
+                    // where it paints. Consuming the mouse-down keeps a
+                    // remove-click from also opening the lightbox.
+                    if hover_state.is_hovered() {
+                        let remove_button = EventHandler::new(close_button)
+                            .on_left_mouse_down(|_, _, _| DispatchEventResult::StopPropagation)
+                            .finish();
+                        stack.add_positioned_child(
+                            remove_button,
+                            OffsetPositioning::offset_from_parent(
+                                vec2f(0., 0.),
+                                ParentOffsetBounds::ParentByPosition,
+                                ParentAnchor::TopRight,
+                                ChildAnchor::Center,
+                            ),
+                        );
+                    }
+                    stack.finish()
+                })
                 .finish();
-            let container = Container::new(row)
-                .with_horizontal_padding(4.)
-                .with_vertical_padding(2.)
-                .with_margin_right(6.)
-                .with_border(
-                    Border::all(1.)
-                        .with_border_fill(internal_colors::neutral_4(appearance.theme())),
-                )
-                .with_corner_radius(CornerRadius::with_all(Radius::Pixels(5.)))
-                .finish();
-            return EventHandler::new(container)
-                .on_left_mouse_down(move |ctx, _, _| {
-                    ctx.dispatch_typed_action(TerminalAction::OpenAttachmentLightbox {
-                        index: preview_chip_index,
+            let click_target = EventHandler::new(
+                Container::new(hovered_content)
+                    .with_margin_right(6.)
+                    .finish(),
+            )
+            // Open the lightbox on mouse *up* (a click) rather than down so that
+            // starting a drag from the thumbnail doesn't also pop the lightbox.
+            // A real drag suppresses child events, so the up never reaches here.
+            .on_left_mouse_up(move |ctx, _, _| {
+                ctx.dispatch_typed_action(TerminalAction::OpenAttachmentLightbox {
+                    index: preview_chip_index,
+                });
+                DispatchEventResult::StopPropagation
+            })
+            .finish();
+
+            // Make the thumbnail draggable onto a vertical tab to move this image
+            // into that pane's composer. Tab rows carry a
+            // `ComposerImageDropTargetData` with the destination pane; on drop we
+            // append the image there and remove it here (a move).
+            let source_context_model = self.ai_context_model.clone();
+            let drag_index = chip.index;
+            // Remembers the last tab we told the workspace to highlight so we only
+            // dispatch on change, not on every drag move.
+            let mut last_highlight: Option<PaneViewLocator> = None;
+            return Draggable::new(chip.drag_state.clone(), click_target)
+                .use_copy_cursor_when_dragging_over_drop_target()
+                .with_accepted_by_drop_target_fn(|data, _| {
+                    if data.as_any().is::<ComposerImageDropTargetData>() {
+                        AcceptedByDropTarget::Yes
+                    } else {
+                        AcceptedByDropTarget::No
+                    }
+                })
+                .on_drag(move |ctx, _, _rect, drop_data| {
+                    // Highlight the tab currently under the drag (or clear it) so
+                    // the target tab shows its hover state while dragging.
+                    let target = drop_data
+                        .and_then(|data| {
+                            data.as_any().downcast_ref::<ComposerImageDropTargetData>()
+                        })
+                        .map(|data| data.locator);
+                    if target != last_highlight {
+                        last_highlight = target;
+                        ctx.dispatch_typed_action(WorkspaceAction::SetComposerImageDragTarget(
+                            target,
+                        ));
+                    }
+                })
+                .on_drop(move |ctx, app, _rect, drop_data| {
+                    // Clear the drag highlight regardless of where we dropped.
+                    ctx.dispatch_typed_action(WorkspaceAction::SetComposerImageDragTarget(None));
+                    let Some(target) = drop_data.and_then(|data| {
+                        data.as_any().downcast_ref::<ComposerImageDropTargetData>()
+                    }) else {
+                        return;
+                    };
+                    let Some(PendingAttachment::Image(image)) = source_context_model
+                        .as_ref(app)
+                        .pending_attachments()
+                        .get(drag_index)
+                        .cloned()
+                    else {
+                        return;
+                    };
+                    // Remove the moved image from this (source) composer first,
+                    // while it is still the focused pane, then hand it to the
+                    // target pane (which takes focus as part of the attach).
+                    ctx.dispatch_typed_action(TerminalAction::DeleteAttachment {
+                        index: drag_index,
                     });
-                    DispatchEventResult::StopPropagation
+                    ctx.dispatch_typed_action(WorkspaceAction::AttachImageToPane {
+                        locator: target.locator,
+                        image,
+                    });
                 })
                 .finish();
         }
@@ -15712,6 +16482,7 @@ impl Input {
     fn render_input_box(
         &self,
         show_vim_status: bool,
+        bottom_padding_override: Option<f32>,
         appearance: &Appearance,
         app: &AppContext,
     ) -> Box<dyn Element> {
@@ -15748,6 +16519,13 @@ impl Input {
 
         if is_udi_style_spacing {
             bottom_padding = terminal_spacing.editor_bottom_padding - 4.;
+        }
+
+        // Callers that render the footer inline (split composer row) pass a small
+        // override so the editor isn't padded for a footer-below layout, keeping
+        // the composer box tight and its top/bottom padding balanced.
+        if let Some(override_padding) = bottom_padding_override {
+            bottom_padding = override_padding;
         }
 
         let input_box = Container::new(
@@ -16165,6 +16943,7 @@ impl TypedActionView for Input {
             InputAction::ActivateCloudHandoff => {
                 self.activate_cloud_handoff_compose(HandoffEntryPoint::Ampersand, ctx);
             }
+            InputAction::SelectImage => self.select_image(ctx),
         }
     }
 }

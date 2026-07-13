@@ -127,7 +127,7 @@ impl Input {
             }
         }
 
-        column.add_child(self.render_input_box(show_vim_status, appearance, app));
+        column.add_child(self.render_input_box(show_vim_status, None, appearance, app));
 
         if should_show_terminal_input_message_bar(&model, app) {
             column.add_child(

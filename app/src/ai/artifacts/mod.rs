@@ -312,6 +312,7 @@ pub fn open_screenshot_lightbox<V: warpui::View>(
     ctx.dispatch_typed_action(&WorkspaceAction::OpenLightbox {
         images: loading_images,
         initial_index: 0,
+        auto_copy: false,
     });
 
     // Fetch each signed URL independently and update the lightbox as each resolves.

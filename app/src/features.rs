@@ -171,6 +171,8 @@ fn enabled_features() -> HashSet<FeatureFlag> {
         FeatureFlag::EditableMarkdownMermaid,
         #[cfg(feature = "image_as_context")]
         FeatureFlag::ImageAsContext,
+        #[cfg(feature = "screenshot_auto_attach")]
+        FeatureFlag::ScreenshotAutoAttach,
         #[cfg(feature = "msys2_shells")]
         FeatureFlag::MSYS2Shells,
         #[cfg(feature = "file_retrieval_tools")]
@@ -287,6 +289,8 @@ fn enabled_features() -> HashSet<FeatureFlag> {
         FeatureFlag::McpOauth,
         #[cfg(feature = "file_based_mcp")]
         FeatureFlag::FileBasedMcp,
+        #[cfg(feature = "voice_overlay")]
+        FeatureFlag::VoiceOverlay,
         #[cfg(feature = "cursor_mcp_import")]
         FeatureFlag::CursorMcpImport,
         #[cfg(feature = "mcp_governance")]

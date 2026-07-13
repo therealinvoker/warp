@@ -282,6 +282,15 @@ impl AuthState {
         *self.user.write() = user;
     }
 
+    /// Updates the in-memory user's display name. Only mutates local state; the
+    /// caller (AuthManager) is responsible for persisting to secure storage and
+    /// syncing to the backend. No-op when there is no signed-in user.
+    pub fn set_display_name(&self, display_name: Option<String>) {
+        if let Some(user) = self.user.write().as_mut() {
+            user.metadata.display_name = display_name;
+        }
+    }
+
     /// Returns the current credentials.
     pub fn credentials(&self) -> Option<Credentials> {
         self.credentials.read().clone()

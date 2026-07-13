@@ -508,7 +508,7 @@ pub enum MCPProvider {
 impl MCPProvider {
     pub fn display_name(&self) -> &str {
         match self {
-            MCPProvider::Warp => "Warp",
+            MCPProvider::Warp => "Bang",
             MCPProvider::Claude => "Claude",
             MCPProvider::Codex => "Codex",
             MCPProvider::Agents => "Other Agents",
@@ -567,6 +567,15 @@ impl MCPProvider {
     /// (see [`MCPProvider::is_available`]).
     pub fn iter_available() -> impl Iterator<Item = MCPProvider> {
         Self::iter().filter(MCPProvider::is_available)
+    }
+
+    /// Iterates over the providers that can be pulled in via the on-demand
+    /// Settings → MCP → Import flow: every other tool (all providers except
+    /// Bang's own `Warp`). Unlike [`MCPProvider::iter_available`], this ignores
+    /// per-provider availability flags because the user explicitly initiated the
+    /// scan, so there is no passive/privacy concern to gate on.
+    pub fn iter_importable() -> impl Iterator<Item = MCPProvider> {
+        Self::iter().filter(|provider| !matches!(provider, MCPProvider::Warp))
     }
 }
 

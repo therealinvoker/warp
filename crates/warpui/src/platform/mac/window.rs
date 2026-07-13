@@ -476,6 +476,14 @@ extern "C" {
     );
     fn open_url(urlString: &NSString);
     fn set_titlebar_height(window: &NSWindow, height: f64);
+    fn warp_web_view_ensure(window: &NSWindow, viewId: &NSString);
+    fn warp_web_view_navigate(window: &NSWindow, viewId: &NSString, urlString: &NSString);
+    fn warp_web_view_set_frame(window: &NSWindow, viewId: &NSString, frame: NSRect);
+    fn warp_web_view_set_hidden(window: &NSWindow, viewId: &NSString, hidden: bool);
+    fn warp_web_view_reload(window: &NSWindow, viewId: &NSString);
+    fn warp_web_view_go_back(window: &NSWindow, viewId: &NSString);
+    fn warp_web_view_go_forward(window: &NSWindow, viewId: &NSString);
+    fn warp_web_view_destroy(window: &NSWindow, viewId: &NSString);
 }
 
 pub type FrameCaptureCallback = Box<dyn FnOnce(platform::CapturedFrame) + Send + 'static>;
@@ -1027,6 +1035,38 @@ impl platform::Window for Window {
     fn set_titlebar_height(&self, height: f64) {
         self.0.set_titlebar_height(height);
     }
+
+    fn ensure_web_view(&self, id: &str) {
+        self.0.ensure_web_view(id);
+    }
+
+    fn web_view_navigate(&self, id: &str, url: &str) {
+        self.0.web_view_navigate(id, url);
+    }
+
+    fn web_view_set_frame(&self, id: &str, rect: RectF) {
+        self.0.web_view_set_frame(id, rect);
+    }
+
+    fn web_view_set_hidden(&self, id: &str, hidden: bool) {
+        self.0.web_view_set_hidden(id, hidden);
+    }
+
+    fn web_view_reload(&self, id: &str) {
+        self.0.web_view_reload(id);
+    }
+
+    fn web_view_go_back(&self, id: &str) {
+        self.0.web_view_go_back(id);
+    }
+
+    fn web_view_go_forward(&self, id: &str) {
+        self.0.web_view_go_forward(id);
+    }
+
+    fn destroy_web_view(&self, id: &str) {
+        self.0.destroy_web_view(id);
+    }
 }
 
 impl platform::WindowContext for Window {
@@ -1162,6 +1202,74 @@ impl WindowState {
         // SAFETY: `set_titlebar_height` reads the window for the duration of the call.
         unsafe {
             set_titlebar_height(self.window(), height);
+        }
+    }
+
+    fn ensure_web_view(&self, id: &str) {
+        // SAFETY: `warp_web_view_ensure` only reads the window for the duration
+        // of the call and manages the web view via an associated object.
+        unsafe {
+            warp_web_view_ensure(self.window(), &NSString::from_str(id));
+        }
+    }
+
+    fn web_view_navigate(&self, id: &str, url: &str) {
+        // SAFETY: arguments are only read for the duration of the call.
+        unsafe {
+            warp_web_view_navigate(
+                self.window(),
+                &NSString::from_str(id),
+                &NSString::from_str(url),
+            );
+        }
+    }
+
+    fn web_view_set_frame(&self, id: &str, rect: RectF) {
+        // `rect` is in WarpUI window-space logical points (top-left origin).
+        // Convert to AppKit content-view coordinates (bottom-left origin).
+        let content_height = self.logical_size().y();
+        let ns_frame = NSRect::new(
+            NSPoint::new(rect.min_x() as f64, (content_height - rect.max_y()) as f64),
+            NSSize::new(rect.width() as f64, rect.height() as f64),
+        );
+        // SAFETY: arguments are only read for the duration of the call.
+        unsafe {
+            warp_web_view_set_frame(self.window(), &NSString::from_str(id), ns_frame);
+        }
+    }
+
+    fn web_view_set_hidden(&self, id: &str, hidden: bool) {
+        // SAFETY: arguments are only read for the duration of the call.
+        unsafe {
+            warp_web_view_set_hidden(self.window(), &NSString::from_str(id), hidden);
+        }
+    }
+
+    fn web_view_reload(&self, id: &str) {
+        // SAFETY: arguments are only read for the duration of the call.
+        unsafe {
+            warp_web_view_reload(self.window(), &NSString::from_str(id));
+        }
+    }
+
+    fn web_view_go_back(&self, id: &str) {
+        // SAFETY: arguments are only read for the duration of the call.
+        unsafe {
+            warp_web_view_go_back(self.window(), &NSString::from_str(id));
+        }
+    }
+
+    fn web_view_go_forward(&self, id: &str) {
+        // SAFETY: arguments are only read for the duration of the call.
+        unsafe {
+            warp_web_view_go_forward(self.window(), &NSString::from_str(id));
+        }
+    }
+
+    fn destroy_web_view(&self, id: &str) {
+        // SAFETY: arguments are only read for the duration of the call.
+        unsafe {
+            warp_web_view_destroy(self.window(), &NSString::from_str(id));
         }
     }
 }

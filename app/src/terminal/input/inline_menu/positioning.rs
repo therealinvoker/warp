@@ -11,10 +11,12 @@ use crate::appearance::Appearance;
 use crate::settings::{InputModeSettings, InputSettings};
 use crate::terminal::block_list_viewport::InputMode;
 use crate::terminal::input::inline_menu::message_bar::INLINE_MENU_BORDER_WIDTH;
-use crate::terminal::input::inline_menu::styles::{CONTENT_BORDER_WIDTH, CONTENT_VERTICAL_PADDING};
+use crate::terminal::input::inline_menu::styles::{
+    message_bar_font_size, CONTENT_BORDER_WIDTH, CONTENT_VERTICAL_PADDING,
+};
 use crate::terminal::input::inline_menu::view::QUERY_RESULT_RENDERER_STYLES;
 use crate::terminal::input::inline_menu::InlineMenuType;
-use crate::terminal::input::message_bar::common::standard_message_bar_height;
+use crate::terminal::input::message_bar::common::standard_message_bar_height_with_font;
 use crate::terminal::input::suggestions_mode_model::InputSuggestionsModeModel;
 use crate::terminal::{element_size_at_last_frame, SizeInfo};
 
@@ -222,7 +224,13 @@ impl InlineMenuPositioner {
         if self.agent_view_controller.as_ref(app).is_active() {
             header_height
         } else {
-            header_height + standard_message_bar_height(app) + INLINE_MENU_BORDER_WIDTH
+            // The inline-menu nav bar renders at `message_bar_font_size` (2pts above
+            // the terminal/agent status bars), so reserve its matching height.
+            let message_bar_height = standard_message_bar_height_with_font(
+                app,
+                message_bar_font_size(Appearance::as_ref(app)),
+            );
+            header_height + message_bar_height + INLINE_MENU_BORDER_WIDTH
         }
     }
 

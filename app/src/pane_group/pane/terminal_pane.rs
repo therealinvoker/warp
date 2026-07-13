@@ -556,10 +556,13 @@ impl PaneContent for TerminalPane {
                 .active_profile(Some(self.terminal_view(app).id()), app)
                 .sync_id();
 
-            // Collect all conversation IDs for this terminal view
+            // Collect all conversation IDs for this terminal view. Use the raw live
+            // IDs (not the hydrated-conversation view) so a prior conversation that
+            // was persisted to disk but evicted from memory is still saved for
+            // restore — otherwise relaunching lands on the empty new conversation
+            // and the last real chat appears lost.
             let conversation_ids_to_restore = BlocklistAIHistoryModel::as_ref(app)
-                .all_live_conversations_for_terminal_surface(self.terminal_view(app).id())
-                .map(|conversation| conversation.id())
+                .all_live_conversation_ids_for_terminal_surface(self.terminal_view(app).id())
                 .collect();
 
             // Capture agent view state: if fullscreen, store the active conversation ID
@@ -1362,6 +1365,9 @@ fn handle_terminal_view_event(
                     target_view: *target_view,
                     force_open: *force_open,
                 });
+            }
+            Event::OpenBrowserPreview { url } => {
+                ctx.emit(pane_group::Event::OpenBrowserPreview { url: url.clone() });
             }
             Event::ToggleAIDocumentPane {
                 document_id,

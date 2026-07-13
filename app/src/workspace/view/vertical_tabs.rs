@@ -1,12 +1,11 @@
+mod file_drop;
 pub mod telemetry;
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, LazyLock, Mutex};
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
 
-use instant::Instant;
 use languages::language_by_local_filename;
 use pathfinder_color::ColorU;
 use pathfinder_geometry::rect::RectF;
@@ -18,17 +17,15 @@ use warp_core::telemetry::TelemetryEvent as _;
 use warp_core::ui::color::blend::Blend;
 use warp_core::ui::color::coloru_with_opacity;
 use warp_core::ui::theme::color::internal_colors;
-use warp_core::ui::theme::{
-    AnsiColorIdentifier, Fill as WarpThemeFill, HorizontalGradient, WarpTheme,
-};
+use warp_core::ui::theme::{AnsiColorIdentifier, Fill as WarpThemeFill, WarpTheme};
 use warp_core::ui::Icon as WarpIcon;
 use warpui::elements::{
     resizable_state_handle, Border, ChildAnchor, Clipped, ClippedScrollStateHandle,
     ClippedScrollable, ConstrainedBox, Container, CornerRadius, CrossAxisAlignment,
     DispatchEventResult, DragAxis, DragBarSide, Draggable, DropShadow, DropTarget, Element, Empty,
-    EventHandler, Expanded, Fill as ElementFill, Flex, Hoverable, LiveElement, MainAxisAlignment,
-    MainAxisSize, MouseStateHandle, OffsetPositioning, Padding, ParentAnchor, ParentElement,
-    ParentOffsetBounds, PositionedElementAnchor, PositionedElementOffsetBounds, Radius, Resizable,
+    EventHandler, Expanded, Fill as ElementFill, Flex, Hoverable, MainAxisAlignment, MainAxisSize,
+    MouseStateHandle, OffsetPositioning, Padding, ParentAnchor, ParentElement, ParentOffsetBounds,
+    PositionedElementAnchor, PositionedElementOffsetBounds, Radius, Resizable,
     ResizableStateHandle, SavePosition, ScrollTarget, ScrollToPositionMode, ScrollbarWidth,
     Shrinkable, Stack, Text,
 };
@@ -39,6 +36,8 @@ use warpui::text_layout::ClipConfig;
 use warpui::ui_components::components::{UiComponent, UiComponentStyles};
 use warpui::ui_components::text_input::TextInput;
 use warpui::{AppContext, EntityId, SingletonEntity, ViewHandle, WindowId};
+
+use super::shimmering_bolt::ShimmeringBoltElement;
 
 use super::{render_group_member_icon_collage, select_unique_pane_kinds};
 use crate::ai::agent::conversation::{ConversationStatus, StatusColorStyle};
@@ -63,7 +62,6 @@ use crate::pane_group::{
     CodePane, NotebookPane, PaneGroup, PaneId, TabBarHoverIndex, TerminalPane, WorkflowPane,
 };
 use crate::safe_triangle::SafeTriangle;
-use crate::settings_view::SettingsSection;
 use crate::tab::{tab_position_id, SelectedTabColor, TabData};
 use crate::terminal::cli_agent_sessions::CLIAgentSessionsModel;
 use crate::terminal::session_settings::SessionSettings;
@@ -71,6 +69,7 @@ use crate::terminal::view::TerminalViewState;
 use crate::terminal::{CLIAgent, TerminalView};
 use crate::themes::theme::Fill as ThemeFill;
 use crate::ui_components::agent_icon::terminal_view_agent_icon_variant;
+use crate::ui_components::avatar::{Avatar, AvatarContent};
 use crate::ui_components::buttons::combo_inner_button;
 use crate::ui_components::icon_with_status::{render_icon_with_status, IconWithStatusVariant};
 use crate::ui_components::icons::Icon as UiIcon;
@@ -88,8 +87,8 @@ use crate::workspace::view::vertical_tabs::telemetry::{
     VerticalTabsChipEntrypoint, VerticalTabsTelemetryEvent,
 };
 use crate::workspace::{
-    PaneViewLocator, TabBarLocation, TabContextMenuAnchor, VerticalTabsPaneContextMenuTarget,
-    VerticalTabsPaneDropTargetData, Workspace,
+    ComposerImageDropTargetData, PaneViewLocator, TabBarLocation, TabContextMenuAnchor,
+    VerticalTabsPaneContextMenuTarget, VerticalTabsPaneDropTargetData, Workspace,
 };
 use crate::{send_telemetry_from_app_ctx, FeatureFlag};
 
@@ -120,6 +119,10 @@ const GROUP_ACTION_BUTTON_GAP: f32 = 2.;
 const ROW_CORNER_RADIUS: f32 = 4.;
 const TAB_GROUP_MEMBER_INDENT: f32 = 12.;
 const TAB_GROUP_ICON_SIZE: f32 = 16.;
+/// Directory folder glyphs read a touch smaller than the other nav section
+/// icons so the open/closed folder cue stays subtle rather than dominating the
+/// row.
+const FOLDER_HEADER_ICON_SIZE: f32 = 14.;
 const TAB_GROUP_CONTENT_INSET: f32 = 4.;
 const BADGE_ICON_SIZE: f32 = 12.;
 const DETAIL_SIDECAR_DEFAULT_WIDTH: f32 = 320.;
@@ -400,6 +403,11 @@ fn render_pane_row_element(
     padding: Padding,
     defer_events_to_children: bool,
     content: Box<dyn Element>,
+    // Optional action buttons (pin/archive/kebab) laid at the trailing edge
+    // *inside* the row's background container, so they share the row's single
+    // hover/active pill highlight and read as part of the same cell as the
+    // title — rather than floating in a separate chip beside it.
+    trailing: Option<Box<dyn Element>>,
     theme: &WarpTheme,
 ) -> Box<dyn Element> {
     let detail_target = supports_vertical_tabs_detail_sidecar(&props.typed).then(|| {
@@ -439,18 +447,42 @@ fn render_pane_row_element(
         pane_rename_editor: _,
         is_pinned,
         container_is_hovered,
+        file_drop_target,
     } = props;
     let is_selected = is_active_tab && is_focused;
+    // Whether a drag (an OS file drag, or an in-app composer image thumbnail)
+    // is currently hovering this row. Read from the shared handle written on
+    // drag events; makes the row render its hover state so the drop target is
+    // clear before release.
+    let is_file_drop_target = file_drop_target
+        .lock()
+        .is_ok_and(|target| *target == Some(pane_id));
     let show_pin = is_pinned && !container_is_hovered;
     let mut row = Hoverable::new(mouse_state, move |state| {
+        // Treat a drag hovering this row the same as a real mouse hover so the
+        // target tab lights up with its normal hover styling during the drag.
+        let is_hovered = state.is_hovered() || is_file_drop_target;
         // Hovered or selected rows always fully round; otherwise derive the
         // resting radius from the row's stack position.
-        let corner_radius = if state.is_hovered() || is_selected {
+        let corner_radius = if is_hovered || is_selected {
             CornerRadius::with_all(Radius::Pixels(ROW_CORNER_RADIUS))
         } else {
             stack_position.corner_radius()
         };
-        let mut container = Container::new(Clipped::new(content).finish())
+        // When action buttons are supplied, lay them at the trailing edge inside
+        // this same container: the title clips/shrinks to make room and the
+        // buttons share the row's background, so the whole thing reads as one
+        // cell. Otherwise just clip the content as before.
+        let inner: Box<dyn Element> = match trailing {
+            Some(trailing) => Flex::row()
+                .with_main_axis_size(MainAxisSize::Max)
+                .with_cross_axis_alignment(CrossAxisAlignment::Center)
+                .with_child(Expanded::new(1., Clipped::new(content).finish()).finish())
+                .with_child(trailing)
+                .finish(),
+            None => Clipped::new(content).finish(),
+        };
+        let mut container = Container::new(inner)
             .with_padding(padding)
             .with_corner_radius(corner_radius);
 
@@ -458,7 +490,7 @@ fn render_pane_row_element(
             pane_color,
             is_selected,
             is_in_multi_selection,
-            state.is_hovered(),
+            is_hovered,
             is_being_dragged,
             in_colored_group,
             theme,
@@ -607,7 +639,25 @@ fn render_pane_row_element(
     if defer_events_to_children {
         row = row.with_defer_events_to_children();
     }
-    SavePosition::new(row.finish(), &row_position_id).finish()
+    // The drop highlight is applied as the row's hover state inside the
+    // `Hoverable` above (driven by `is_file_drop_target`), so no extra overlay
+    // is needed here.
+    let saved = SavePosition::new(row.finish(), &row_position_id).finish();
+    // Route OS image-file drops onto this row into the pane's chat composer, and
+    // maintain the shared drop-target handle that drives the highlight above.
+    let locator = PaneViewLocator {
+        pane_group_id,
+        pane_id,
+    };
+    let file_drop_element = Box::new(file_drop::VerticalTabFileDropElement::new(
+        locator,
+        pane_id,
+        file_drop_target,
+        saved,
+    ));
+    // Also mark the row as an in-app drop target so a composer image thumbnail
+    // dragged from another tab can be moved into this pane's composer.
+    DropTarget::new(file_drop_element, ComposerImageDropTargetData { locator }).finish()
 }
 
 #[derive(Clone, Default)]
@@ -736,6 +786,7 @@ pub(super) struct VerticalTabsPanelState {
     new_tab_hover_state: MouseStateHandle,
     new_tab_button_state: MouseStateHandle,
     new_terminal_button_mouse_state: MouseStateHandle,
+    new_cloud_agent_button_mouse_state: MouseStateHandle,
     customize_button_mouse_state: MouseStateHandle,
     pub(super) search_query: String,
     settings_button_mouse_state: MouseStateHandle,
@@ -769,6 +820,10 @@ pub(super) struct VerticalTabsPanelState {
     show_details_on_hover_mouse_state: MouseStateHandle,
     panel_right_click_mouse_state: MouseStateHandle,
     pub(super) show_settings_popup: bool,
+    /// Which pane row (if any) is the current target of an in-progress OS file
+    /// drag, so the renderer can highlight it. Shared with every row's
+    /// [`file_drop::VerticalTabFileDropElement`].
+    file_drop_target: file_drop::FileDropTargetHandle,
 }
 
 impl Default for VerticalTabsPanelState {
@@ -789,6 +844,7 @@ impl Default for VerticalTabsPanelState {
             new_tab_hover_state: Default::default(),
             new_tab_button_state: Default::default(),
             new_terminal_button_mouse_state: Default::default(),
+            new_cloud_agent_button_mouse_state: Default::default(),
             customize_button_mouse_state: Default::default(),
             search_query: String::new(),
             settings_button_mouse_state: Default::default(),
@@ -816,11 +872,36 @@ impl Default for VerticalTabsPanelState {
             show_details_on_hover_mouse_state: Default::default(),
             panel_right_click_mouse_state: Default::default(),
             show_settings_popup: false,
+            file_drop_target: Default::default(),
         }
     }
 }
 
 impl VerticalTabsPanelState {
+    /// A clone of the shared OS-file-drop target handle. Each pane row's
+    /// file-drop element mutates it on drag, and the renderer reads it to
+    /// highlight the hovered row.
+    fn file_drop_target(&self) -> file_drop::FileDropTargetHandle {
+        self.file_drop_target.clone()
+    }
+
+    /// Sets (or clears) the pane row highlighted while an in-app composer image
+    /// thumbnail is dragged over the tabs. Reuses the same handle the OS
+    /// file-drop path uses — the two drags never overlap in time — so both show
+    /// the identical hover highlight. Returns whether the value changed, so the
+    /// caller can repaint only when the highlight needs to move.
+    pub(super) fn set_composer_image_drag_target(&self, pane_id: Option<PaneId>) -> bool {
+        let Ok(mut target) = self.file_drop_target.lock() else {
+            return false;
+        };
+        if *target != pane_id {
+            *target = pane_id;
+            true
+        } else {
+            false
+        }
+    }
+
     /// Returns a lightweight handle bundle for workspace-level visibility reconciliation while the
     /// detail sidecar is active.
     pub(super) fn detail_hover_state(&self, window_id: WindowId) -> VerticalTabsDetailHoverState {
@@ -917,6 +998,10 @@ struct PaneProps<'a> {
     /// True when the tab container containing this pane is hovered.
     /// The pin icon is hidden when a tab is hovered.
     container_is_hovered: bool,
+    /// Shared handle tracking the current OS-file-drop target row. Passed to the
+    /// row's file-drop element (which writes it on drag) and read by the row
+    /// renderer to paint a drop highlight.
+    file_drop_target: file_drop::FileDropTargetHandle,
 }
 
 struct PaneRowState {
@@ -924,6 +1009,8 @@ struct PaneRowState {
     title_mouse_state: Option<MouseStateHandle>,
     pane_color: Option<ThemeFill>,
     badge_mouse_states: PaneRowBadgeMouseStates,
+    /// Shared handle for OS file-drop highlighting; see `PaneProps::file_drop_target`.
+    file_drop_target: file_drop::FileDropTargetHandle,
 }
 
 enum TerminalPrimaryLineData {
@@ -1312,6 +1399,7 @@ impl VerticalTabsPanelState {
                                     title_mouse_state: None,
                                     pane_color: None,
                                     badge_mouse_states: PaneRowBadgeMouseStates::default(),
+                                    file_drop_target: self.file_drop_target(),
                                 },
                                 self.detail_hover_state(tab.pane_group.window_id(app)),
                                 display_granularity,
@@ -1593,26 +1681,41 @@ fn render_new_session_buttons(
     // Stacked, each on its own line and stretched to the panel width so the
     // control-bar geometry matches the folder rows below. Content is left-aligned
     // inside each full-width button (see `render_new_session_button`).
-    let row = Flex::column()
+    let mut row = Flex::column()
         .with_main_axis_size(MainAxisSize::Min)
         .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
         .with_spacing(CONTROL_BAR_SPACING)
         .with_child(render_new_session_button(
-            "New tab",
+            "New agent",
             WarpIcon::Plus,
             state.new_terminal_button_mouse_state.clone(),
             WorkspaceAction::AddAgentTab,
             appearance,
             theme,
-        ))
-        .with_child(render_new_session_button(
-            "Connectors",
-            WarpIcon::Link,
-            state.customize_button_mouse_state.clone(),
-            WorkspaceAction::OpenMarketplaceDirectory,
+        ));
+
+    // Cloud Agent creation lives here (instead of the removed in-composer
+    // session-mode segmented control). Gated by the same flags as the "Cloud
+    // Agent" entry in the new-tab menu.
+    if FeatureFlag::AgentView.is_enabled() && FeatureFlag::CloudMode.is_enabled() {
+        row = row.with_child(render_new_session_button(
+            "New cloud agent",
+            WarpIcon::Plus,
+            state.new_cloud_agent_button_mouse_state.clone(),
+            WorkspaceAction::AddAmbientAgentTab,
             appearance,
             theme,
         ));
+    }
+
+    let row = row.with_child(render_new_session_button(
+        "Connectors",
+        WarpIcon::Link,
+        state.customize_button_mouse_state.clone(),
+        WorkspaceAction::OpenMarketplaceDirectory,
+        appearance,
+        theme,
+    ));
 
     Container::new(row.finish())
         .with_padding(
@@ -1803,15 +1906,18 @@ fn render_settings_launcher_button(
     .finish()
 }
 
-/// Account quick-launch for the side-nav footer: shows the current user's
-/// display name (or "Sign in" when logged out) and opens the Account settings
-/// page on click. Styled like the other footer controls.
+/// Account quick-launch for the side-nav footer: shows a grey circular avatar
+/// with the user's initial (or a person glyph when logged out) alongside their
+/// display name, and opens the user menu on click. This is the sole home for
+/// the user avatar (previously shown in the top-right tab bar). Its saved
+/// position anchors the user-menu overlay, which opens upward from here.
 fn render_account_button(
     state: &VerticalTabsPanelState,
     appearance: &Appearance,
     app: &AppContext,
 ) -> Box<dyn Element> {
     const MAX_LABEL_CHARS: usize = 22;
+    const AVATAR_SIZE: f32 = 18.;
 
     let theme = appearance.theme();
     let sub_text = theme.sub_text_color(theme.background());
@@ -1819,21 +1925,48 @@ fn render_account_button(
     let font_family = appearance.ui_font_family();
 
     let auth_state = AuthStateProvider::as_ref(app).get();
-    let raw_label = if auth_state.is_anonymous_or_logged_out() {
+    let is_logged_out = auth_state.is_anonymous_or_logged_out();
+    let display_name = if is_logged_out {
         "Sign in".to_string()
     } else {
         auth_state.username_for_display().unwrap_or_default()
     };
     // Truncate long emails/names so the footer never pushes the options/settings
     // buttons off the right edge of the panel.
-    let label = if raw_label.chars().count() > MAX_LABEL_CHARS {
-        let truncated: String = raw_label.chars().take(MAX_LABEL_CHARS - 1).collect();
+    let label = if display_name.chars().count() > MAX_LABEL_CHARS {
+        let truncated: String = display_name.chars().take(MAX_LABEL_CHARS - 1).collect();
         format!("{truncated}…")
     } else {
-        raw_label
+        display_name.clone()
     };
 
-    Hoverable::new(
+    let avatar_content = if is_logged_out {
+        AvatarContent::Icon(WarpIcon::User)
+    } else {
+        auth_state
+            .user_photo_url()
+            .map(|url| AvatarContent::Image {
+                url,
+                display_name: display_name.clone(),
+            })
+            .unwrap_or(AvatarContent::DisplayName(display_name.clone()))
+    };
+    let avatar = Avatar::new(
+        avatar_content,
+        UiComponentStyles {
+            width: Some(AVATAR_SIZE),
+            height: Some(AVATAR_SIZE),
+            border_radius: Some(CornerRadius::with_all(Radius::Percentage(50.))),
+            font_family_id: Some(font_family),
+            font_weight: Some(Weight::Bold),
+            background: Some(theme.surface_3().into()),
+            font_size: Some(10.),
+            font_color: Some(theme.active_ui_text_color().into()),
+            ..Default::default()
+        },
+    );
+
+    let button = Hoverable::new(
         state.account_button_mouse_state.clone(),
         move |hover_state| {
             let is_hovered = hover_state.is_hovered();
@@ -1848,12 +1981,7 @@ fn render_account_button(
                 .with_main_axis_size(MainAxisSize::Min)
                 .with_cross_axis_alignment(CrossAxisAlignment::Center)
                 .with_spacing(6.)
-                .with_child(
-                    ConstrainedBox::new(WarpIcon::User.to_warpui_icon(content_color).finish())
-                        .with_width(14.)
-                        .with_height(14.)
-                        .finish(),
-                )
+                .with_child(avatar.build().finish())
                 .with_child(
                     Clipped::new(
                         Text::new_inline(label.clone(), font_family, 12.)
@@ -1873,10 +2001,12 @@ fn render_account_button(
         },
     )
     .on_click(|ctx, _, _| {
-        ctx.dispatch_typed_action(WorkspaceAction::ShowSettingsPage(SettingsSection::Account));
+        ctx.dispatch_typed_action(WorkspaceAction::ToggleUserMenu);
     })
     .with_cursor(Cursor::PointingHand)
-    .finish()
+    .finish();
+
+    SavePosition::new(button, super::USER_AVATAR_BUTTON_POSITION_ID).finish()
 }
 
 /// Small accent pill shown beside the username only when a downloaded update is
@@ -2160,14 +2290,14 @@ fn render_vertical_tabs_panel(
     };
     // Wrap the panel in a `Hoverable` so right-clicking the empty area of the
     // vertical tabs panel opens the tab configs dropdown.
-    // Grey gradient across the panel: more foreground overlay on the left
-    // fading to less on the right, so the panel is visibly lighter on the left.
-    // Foreground-over-background keeps it theme-aware (lightens in dark themes,
-    // darkens in light themes).
-    let panel_background = WarpThemeFill::HorizontalGradient(HorizontalGradient::new(
-        theme.foreground().with_opacity(12).into(),
-        theme.foreground().with_opacity(8).into(),
-    ));
+    // Solid dark-grey panel background: a subtle foreground overlay blended onto
+    // the backdrop so the panel reads slightly lighter than the terminal area
+    // while staying theme-aware (lightens in dark themes, darkens in light ones).
+    // A flat fill (no gradient) has no low-contrast ramp to quantize, so it can't
+    // band on any display.
+    let panel_backdrop: ColorU = theme.background().into();
+    let panel_background =
+        WarpThemeFill::Solid(panel_backdrop.blend(&theme.foreground().with_opacity(10).into()));
     let inner = Hoverable::new(state.panel_right_click_mouse_state.clone(), move |_| {
         Container::new(panel_with_popup)
             .with_background(panel_background)
@@ -2290,6 +2420,7 @@ fn render_groups(
                                         title_mouse_state: None,
                                         pane_color: None,
                                         badge_mouse_states: PaneRowBadgeMouseStates::default(),
+                                        file_drop_target: state.file_drop_target(),
                                     },
                                     state.detail_hover_state(workspace.window_id),
                                     display_granularity,
@@ -2321,6 +2452,7 @@ fn render_groups(
                                     title_mouse_state: None,
                                     pane_color: None,
                                     badge_mouse_states: PaneRowBadgeMouseStates::default(),
+                                    file_drop_target: state.file_drop_target(),
                                 },
                                 state.detail_hover_state(workspace.window_id),
                                 display_granularity,
@@ -2585,6 +2717,22 @@ fn render_workspace_folder_sections(
         ));
     }
 
+    // The Cloud ("other") bucket renders before Settings and Connectors so those
+    // singleton system rows appear *under* the Cloud folder in the side-nav.
+    if !other.is_empty() {
+        groups.add_child(render_workspace_folder_section(
+            state,
+            workspace,
+            visible_tabs,
+            &other,
+            OTHER_FOLDER_KEY,
+            "Cloud",
+            None,
+            is_any_pane_dragging,
+            app,
+        ));
+    }
+
     // Settings renders as a single top-level nav row (gear + "Settings") with an
     // inline close (X) and one nested "Open settings" child, rather than a
     // collapsible folder section with a redundant "Settings" child row.
@@ -2607,20 +2755,6 @@ fn render_workspace_folder_sections(
             workspace,
             visible_tabs,
             &marketplace,
-            app,
-        ));
-    }
-
-    if !other.is_empty() {
-        groups.add_child(render_workspace_folder_section(
-            state,
-            workspace,
-            visible_tabs,
-            &other,
-            OTHER_FOLDER_KEY,
-            "Cloud",
-            None,
-            is_any_pane_dragging,
             app,
         ));
     }
@@ -2765,11 +2899,17 @@ fn render_workspace_folder_header(
 
     // Sections with an explicit icon (e.g. Settings' gear) keep it in both
     // states; directory sections use the folder glyph as the open/closed cue.
+    let is_directory_folder = header_icon.is_none();
     let folder_glyph = header_icon.unwrap_or(if is_collapsed {
-        WarpIcon::FolderClosed
+        WarpIcon::FolderClosedOutline
     } else {
-        WarpIcon::Folder
+        WarpIcon::FolderOpen
     });
+    let folder_icon_size = if is_directory_folder {
+        FOLDER_HEADER_ICON_SIZE
+    } else {
+        TAB_GROUP_ICON_SIZE
+    };
 
     let label = label.to_string();
     let plus_mouse_state = mouse_states.plus.clone();
@@ -2777,12 +2917,15 @@ fn render_workspace_folder_header(
     // The row (and its hover-revealed + button) is rebuilt each time the header's
     // hover state changes, matching the tab-group header pattern.
     Hoverable::new(mouse_states.header.clone(), move |hover_state| {
+        // Render the folder glyph a touch smaller than the other nav section
+        // icons. Directory folders use the smaller size; sections with an
+        // explicit icon (Settings' gear) keep the standard slot size.
         let folder_icon = ConstrainedBox::new(folder_glyph.to_warpui_icon(sub_text_color).finish())
-            .with_width(TAB_GROUP_ICON_SIZE)
-            .with_height(TAB_GROUP_ICON_SIZE)
+            .with_width(folder_icon_size)
+            .with_height(folder_icon_size)
             .finish();
 
-        let title = Text::new_inline(label.clone(), font_family.clone(), 12.)
+        let title = Text::new_inline(label.clone(), font_family, 12.)
             .with_clip(ClipConfig::ellipsis())
             .with_color(main_text_color.into())
             .finish();
@@ -2878,7 +3021,7 @@ fn render_singleton_nav_row(
             .with_height(TAB_GROUP_ICON_SIZE)
             .finish();
 
-        let title = Text::new_inline(label.clone(), font_family.clone(), 12.)
+        let title = Text::new_inline(label.clone(), font_family, 12.)
             .with_clip(ClipConfig::ellipsis())
             .with_color(main_text_color.into())
             .finish();
@@ -3383,7 +3526,11 @@ fn render_tab_group_internal(
         } else {
             GROUP_ITEM_SPACING
         };
-        let build_rows = || {
+        // `trailing` holds the per-tab action buttons to lay inside the
+        // representative (first) row's pill; `None` when the caller isn't
+        // inlining buttons. Consumed once via `take()` so only the first row
+        // gets them.
+        let build_rows = |mut trailing: Option<Box<dyn Element>>| {
             let mut rows = Flex::column()
                 .with_main_axis_size(MainAxisSize::Min)
                 .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
@@ -3428,6 +3575,7 @@ fn render_tab_group_internal(
                         title_mouse_state: None,
                         pane_color,
                         badge_mouse_states,
+                        file_drop_target: state.file_drop_target(),
                     },
                     state.detail_hover_state(workspace.window_id),
                     display_granularity,
@@ -3499,6 +3647,7 @@ fn render_tab_group_internal(
                         title_mouse_state: title_mouse_states.get(pane_id).cloned(),
                         pane_color,
                         badge_mouse_states,
+                        file_drop_target: state.file_drop_target(),
                     },
                     state.detail_hover_state(workspace.window_id),
                     display_granularity,
@@ -3523,10 +3672,16 @@ fn render_tab_group_internal(
                     };
                 }
                 pane_props.in_colored_group = in_colored_group;
+                // Only the representative (first) row carries the action buttons.
+                let row_trailing = if row_idx == 0 { trailing.take() } else { None };
                 let view_mode = *TabSettings::as_ref(app).vertical_tabs_view_mode.value();
                 let row = match view_mode {
-                    VerticalTabsViewMode::Compact => render_compact_pane_row(pane_props, app),
-                    VerticalTabsViewMode::Expanded => render_pane_row(pane_props, app),
+                    VerticalTabsViewMode::Compact => {
+                        render_compact_pane_row(pane_props, row_trailing, app)
+                    }
+                    VerticalTabsViewMode::Expanded => {
+                        render_pane_row(pane_props, row_trailing, app)
+                    }
                 };
                 rows.add_child(row);
             }
@@ -3547,6 +3702,31 @@ fn render_tab_group_internal(
             }
             rows.finish()
         };
+
+        // Compute the per-tab action buttons (pin/archive/kebab) up front so
+        // single-row layouts can lay them inline *inside* the row's background
+        // container — sharing its hover/active highlight — instead of floating
+        // beside the row on the bare panel. Multi-row Panes groups can't do that
+        // (the buttons would center across the whole column), so they leave the
+        // buttons in `action_buttons` for the top-right overlay built later.
+        let should_show_action_buttons = !drag_state.is_any_pane_dragging
+            && (group_state.is_hovered() || action_buttons_mouse_over || is_menu_open_for_tab);
+        let mut action_buttons = should_show_action_buttons.then(|| {
+            render_group_action_buttons(
+                tab_index,
+                tab.pinned,
+                is_menu_open_for_tab,
+                GroupActionButtonMouseStates {
+                    action_buttons: action_buttons_mouse_state.clone(),
+                    pin: pin_mouse_state.clone(),
+                    archive: archive_mouse_state.clone(),
+                    kebab: kebab_mouse_state.clone(),
+                },
+                theme,
+            )
+        });
+        let inline_action_buttons =
+            !matches!(display_granularity, VerticalTabsDisplayGranularity::Panes);
 
         let group_content = if uses_outer_group_container {
             let mut group = Flex::column()
@@ -3574,7 +3754,7 @@ fn render_tab_group_internal(
                 body_padding = body_padding.with_top(GROUP_BODY_BOTTOM_PADDING);
             }
             group.add_child(
-                Container::new(build_rows())
+                Container::new(build_rows(None))
                     .with_padding(body_padding)
                     .finish(),
             );
@@ -3605,9 +3785,20 @@ fn render_tab_group_internal(
             // per-tab background here and let each row show its own
             // selected/hovered state.
             let allow_per_tab_highlight = !in_tab_group || FeatureFlag::GroupedTabs.is_enabled();
+            // Keep the row's hover fill painted whenever the action buttons are
+            // visible — including when the pointer is over a button (which can drop
+            // the row's own hover state) or the overflow menu is open. The buttons
+            // are transparent and sit inside this container, so they read the row's
+            // fill; without this the row background would vanish under a hovered
+            // button and it would appear on the bare panel instead of the row.
             let background = if is_drag_target {
                 internal_colors::fg_overlay_2(theme)
-            } else if allow_per_tab_highlight && (is_active || group_state.is_hovered()) {
+            } else if allow_per_tab_highlight
+                && (is_active
+                    || group_state.is_hovered()
+                    || action_buttons_mouse_over
+                    || is_menu_open_for_tab)
+            {
                 internal_colors::fg_overlay_1(theme)
             } else {
                 ThemeFill::Solid(ColorU::transparent_black())
@@ -3621,7 +3812,19 @@ fn render_tab_group_internal(
             } else {
                 GROUP_BODY_BOTTOM_PADDING
             };
-            let mut container = Container::new(build_rows()).with_background(background);
+            // Lay the action buttons inline at the trailing edge *inside* the
+            // representative row's pill (see `render_pane_row_element`'s
+            // `trailing`), so they live in the same cell as the title and share
+            // its single hover/active highlight — instead of floating in a
+            // separate chip beside the row. The title shrinks to make room. Only
+            // for single-row granularities — see `inline_action_buttons`.
+            let inline_buttons = if inline_action_buttons {
+                action_buttons.take()
+            } else {
+                None
+            };
+            let row_content = build_rows(inline_buttons);
+            let mut container = Container::new(row_content).with_background(background);
             if FeatureFlag::GroupedTabs.is_enabled() && stack_panes_flush {
                 container = container
                     .with_corner_radius(CornerRadius::with_all(Radius::Pixels(ROW_CORNER_RADIUS)));
@@ -3637,28 +3840,20 @@ fn render_tab_group_internal(
             container.finish()
         };
 
-        // Show the action buttons when the group OR the buttons themselves
-        // are hovered, following the pattern from AgentManagementView.
-        // This prevents flickering when the mouse moves from the group
-        // to the overlay buttons (which may sit outside the group bounds).
-        let should_show_action_buttons = !drag_state.is_any_pane_dragging
-            && (group_state.is_hovered() || action_buttons_mouse_over || is_menu_open_for_tab);
-
-        let action_buttons = if should_show_action_buttons {
-            render_group_action_buttons(
-                tab_index,
-                tab.pinned,
-                is_menu_open_for_tab,
-                action_buttons_mouse_state.clone(),
-                pin_mouse_state.clone(),
-                archive_mouse_state.clone(),
-                kebab_mouse_state.clone(),
-                theme,
-            )
-        } else {
-            Empty::new().finish()
-        };
         let mut stack = Stack::new().with_child(group_content);
+        // Multi-row Panes groups couldn't inline the buttons above, so overlay
+        // them at the group's top-right.
+        if let Some(buttons) = action_buttons {
+            stack.add_positioned_overlay_child(
+                buttons,
+                OffsetPositioning::offset_from_parent(
+                    vec2f(-4., GROUP_HEADER_VERTICAL_PADDING),
+                    ParentOffsetBounds::WindowByPosition,
+                    ParentAnchor::TopRight,
+                    ChildAnchor::TopRight,
+                ),
+            );
+        }
         if drag_state.is_any_pane_dragging {
             // This row only shows indicators for insertions joining its own group
             // (`tab.group_id`); the before-group indicator (group `None`) is
@@ -3692,42 +3887,6 @@ fn render_tab_group_internal(
                 }
             }
         }
-        let is_panes_view = matches!(display_granularity, VerticalTabsDisplayGranularity::Panes);
-        // Pane view inside a tab group: the group container adds
-        // `GROUP_HORIZONTAL_PADDING` of right padding and the member wrapper
-        // around this `Stack` adds another `TAB_GROUP_CONTENT_INSET`, so the
-        // `Stack`'s right edge sits that much further inside the panel than
-        // it does in regular pane view. Push the buttons back out by the
-        // same amount so they land at the same panel-relative offset.
-        let action_button_x_offset = if in_tab_group && is_panes_view {
-            GROUP_HORIZONTAL_PADDING + TAB_GROUP_CONTENT_INSET - 4.
-        } else {
-            -4.
-        };
-        // Panes view anchors the belt to the top of the (possibly multi-row) tab,
-        // where a reserved band holds it. Single-row tabs (Tabs / Workspace
-        // granularity) instead vertically center the belt within the row so it
-        // stays aligned and sits inside the row rather than poking above it.
-        let (button_parent_anchor, button_child_anchor, action_button_y_offset) = if is_panes_view {
-            // GroupedTabs: pull the action buttons up to match the band of padding.
-            let y_offset = if FeatureFlag::GroupedTabs.is_enabled() && in_tab_group {
-                0.
-            } else {
-                GROUP_HEADER_VERTICAL_PADDING
-            };
-            (ParentAnchor::TopRight, ChildAnchor::TopRight, y_offset)
-        } else {
-            (ParentAnchor::MiddleRight, ChildAnchor::MiddleRight, 0.)
-        };
-        stack.add_positioned_overlay_child(
-            action_buttons,
-            OffsetPositioning::offset_from_parent(
-                vec2f(action_button_x_offset, action_button_y_offset),
-                ParentOffsetBounds::WindowByPosition,
-                button_parent_anchor,
-                button_child_anchor,
-            ),
-        );
         stack.finish()
     })
     .on_right_click(move |ctx, _, position| {
@@ -3829,16 +3988,28 @@ fn render_tab_group_internal(
     }
 }
 
+/// Mouse-state handles for the per-tab group action buttons, grouped so the
+/// renderer stays under Clippy's argument-count limit.
+struct GroupActionButtonMouseStates {
+    action_buttons: MouseStateHandle,
+    pin: MouseStateHandle,
+    archive: MouseStateHandle,
+    kebab: MouseStateHandle,
+}
+
 fn render_group_action_buttons(
     tab_index: usize,
     is_pinned: bool,
     is_menu_open: bool,
-    action_buttons_mouse_state: MouseStateHandle,
-    pin_mouse_state: MouseStateHandle,
-    archive_mouse_state: MouseStateHandle,
-    kebab_mouse_state: MouseStateHandle,
+    mouse_states: GroupActionButtonMouseStates,
     theme: &WarpTheme,
 ) -> Box<dyn Element> {
+    let GroupActionButtonMouseStates {
+        action_buttons: action_buttons_mouse_state,
+        pin: pin_mouse_state,
+        archive: archive_mouse_state,
+        kebab: kebab_mouse_state,
+    } = mouse_states;
     let meta_color = theme.sub_text_color(theme.background());
 
     // Pin toggle: reflects the tab's pinned state (filled when pinned, outline
@@ -3848,19 +4019,21 @@ fn render_group_action_buttons(
     } else {
         WarpIcon::Pin
     };
-    let pin_button = Hoverable::new(pin_mouse_state, move |button_state| {
-        let mut container = Container::new(
+    // These action buttons only appear while their row is hovered, so the row
+    // already paints `fg_overlay_1` behind them. Painting another translucent
+    // overlay on the button would stack and read darker than the row; leaving the
+    // button transparent lets the row's own hover fill show through so the button
+    // is the *same* color as the row (per design).
+    let pin_button = Hoverable::new(pin_mouse_state, move |_| {
+        Container::new(
             ConstrainedBox::new(pin_icon.to_warpui_icon(meta_color).finish())
                 .with_width(GROUP_ACTION_BUTTON_ICON_SIZE)
                 .with_height(GROUP_ACTION_BUTTON_ICON_SIZE)
                 .finish(),
         )
         .with_padding(Padding::uniform(GROUP_ACTION_BUTTON_PADDING))
-        .with_corner_radius(CornerRadius::with_all(Radius::Pixels(4.)));
-        if button_state.is_hovered() {
-            container = container.with_background(internal_colors::fg_overlay_2(theme));
-        }
-        container.finish()
+        .with_corner_radius(CornerRadius::with_all(Radius::Pixels(4.)))
+        .finish()
     })
     .with_cursor(Cursor::PointingHand)
     .on_click(move |ctx, _, _| {
@@ -3876,19 +4049,16 @@ fn render_group_action_buttons(
     // Archive: dispatches `ArchiveTab`, which hides the tab by reusing the
     // canonical close/remove-tab path. Uses the inbox glyph as the closest
     // archive icon.
-    let archive_button = Hoverable::new(archive_mouse_state, move |button_state| {
-        let mut container = Container::new(
+    let archive_button = Hoverable::new(archive_mouse_state, move |_| {
+        Container::new(
             ConstrainedBox::new(WarpIcon::Inbox.to_warpui_icon(meta_color).finish())
                 .with_width(GROUP_ACTION_BUTTON_ICON_SIZE)
                 .with_height(GROUP_ACTION_BUTTON_ICON_SIZE)
                 .finish(),
         )
         .with_padding(Padding::uniform(GROUP_ACTION_BUTTON_PADDING))
-        .with_corner_radius(CornerRadius::with_all(Radius::Pixels(4.)));
-        if button_state.is_hovered() {
-            container = container.with_background(internal_colors::fg_overlay_2(theme));
-        }
-        container.finish()
+        .with_corner_radius(CornerRadius::with_all(Radius::Pixels(4.)))
+        .finish()
     })
     .with_cursor(Cursor::PointingHand)
     .on_click(move |ctx, _, _| {
@@ -3896,7 +4066,7 @@ fn render_group_action_buttons(
     })
     .finish();
 
-    let kebab_button = Hoverable::new(kebab_mouse_state, move |button_state| {
+    let kebab_button = Hoverable::new(kebab_mouse_state, move |_| {
         let mut container = Container::new(
             ConstrainedBox::new(WarpIcon::DotsVertical.to_warpui_icon(meta_color).finish())
                 .with_width(GROUP_ACTION_BUTTON_ICON_SIZE)
@@ -3905,8 +4075,11 @@ fn render_group_action_buttons(
         )
         .with_padding(Padding::uniform(GROUP_ACTION_BUTTON_PADDING))
         .with_corner_radius(CornerRadius::with_all(Radius::Pixels(4.)));
-        if is_menu_open || button_state.is_hovered() {
-            container = container.with_background(internal_colors::fg_overlay_2(theme));
+        // Only show a distinct fill while the overflow menu is open (a persistent
+        // active state). On plain hover stay transparent so the button matches the
+        // row's hover fill rather than stacking to a darker shade.
+        if is_menu_open {
+            container = container.with_background(internal_colors::fg_overlay_1(theme));
         }
         container.finish()
     })
@@ -3928,13 +4101,14 @@ fn render_group_action_buttons(
         .with_child(kebab_button)
         .finish();
 
-    let belt_border_color = internal_colors::neutral_4(theme);
+    // The buttons render inline at the trailing edge of the tab row (not a
+    // floating chip), so they stay bare — no belt background, border, or
+    // rounded box. A small left margin separates them from the (truncating)
+    // title. Still wrapped in `SavePosition` so the kebab context menu can
+    // anchor to them (see `vtab_action_buttons_position_id` in `view.rs`).
     let belt = Hoverable::new(action_buttons_mouse_state, move |_| {
         Container::new(button_row)
-            .with_background(ThemeFill::Solid(internal_colors::neutral_3(theme)))
-            .with_border(Border::all(1.).with_border_fill(ThemeFill::Solid(belt_border_color)))
-            .with_padding(Padding::uniform(GROUP_ACTION_BUTTON_PADDING))
-            .with_corner_radius(CornerRadius::with_all(Radius::Pixels(4.)))
+            .with_margin_left(GROUP_ACTION_BUTTON_GAP)
             .finish()
     })
     .with_defer_events_to_children()
@@ -4646,35 +4820,15 @@ fn render_title_indicator(theme: &WarpTheme) -> Box<dyn Element> {
 /// widget in vertical-tabs sidebar rows.
 const PANE_LEADING_DOT_SIZE: f32 = 6.;
 
+/// Size (px) of the lightning bolt shown in place of the leading dot while a row's agent
+/// is actively working. Matches the neutral icon glyph size (a 16px glyph in the 24px
+/// slot, per `icon_with_status`) so the bolt reads as "the size of the other icons".
+const WORKING_BOLT_ICON_SIZE: f32 = 16.;
+
 /// Height of the leading-dot slot in Compact/Workspace density. Shorter than the
 /// full `VERTICAL_TABS_ICON_SIZE` slot so compact rows pack tighter, while the
 /// slot width stays `VERTICAL_TABS_ICON_SIZE` to keep row titles left-aligned.
 const COMPACT_PANE_LEADING_DOT_SLOT_HEIGHT: f32 = 16.;
-
-/// Repaint cadence (~30fps) for the pulsing leading dot of actively-working rows.
-const PANE_LEADING_DOT_PULSE_REPAINT_INTERVAL: Duration = Duration::from_millis(33);
-
-/// Full duration of one pulse cycle (bright → dim → bright) for working rows.
-const PANE_LEADING_DOT_PULSE_PERIOD: Duration = Duration::from_millis(1200);
-
-/// Lowest opacity the pulse dims the dot to; it pulses between this and fully opaque.
-const PANE_LEADING_DOT_PULSE_MIN_OPACITY: f32 = 0.3;
-
-/// Monotonic epoch used to phase the leading-dot pulse. Shared across all rows so the
-/// pulses stay in sync. `instant::Instant` keeps this correct on the WASM target too.
-static PANE_LEADING_DOT_PULSE_EPOCH: LazyLock<Instant> = LazyLock::new(Instant::now);
-
-/// Current pulse opacity, a smooth sine between [`PANE_LEADING_DOT_PULSE_MIN_OPACITY`]
-/// and `1.0`. Derived from wall-clock elapsed time so every re-render (driven by the
-/// wrapping [`LiveElement`]) advances the animation.
-fn pane_leading_dot_pulse_opacity() -> f32 {
-    let period = PANE_LEADING_DOT_PULSE_PERIOD.as_secs_f32();
-    let elapsed = PANE_LEADING_DOT_PULSE_EPOCH.elapsed().as_secs_f32();
-    let progress = (elapsed / period).fract();
-    // cos goes 1 → -1 → 1 over the period; normalize to 1 → 0 → 1.
-    let normalized = ((progress * std::f32::consts::TAU).cos() + 1.0) * 0.5;
-    PANE_LEADING_DOT_PULSE_MIN_OPACITY + (1.0 - PANE_LEADING_DOT_PULSE_MIN_OPACITY) * normalized
-}
 
 /// Maps a row's run status to the fill used for its leading dot. The dot color now
 /// encodes STATUS (not tab type): red for errors, accent for actively running, amber for
@@ -4709,8 +4863,9 @@ fn status_is_working(status: &ConversationStatus) -> bool {
 /// Renders a small filled dot in place of the row's icon-with-status widget for every
 /// variant (plain terminals AND agents). The dot color encodes the row's RUN STATUS (see
 /// [`status_dot_fill`]); rows with no status (terminals, code, drive objects, ...) keep the
-/// variant's own neutral color. Actively-working rows (in progress / reconnecting) pulse
-/// their dot's opacity via a [`LiveElement`] so they read as "alive". The dot is centered
+/// variant's own neutral color. Actively-working rows (in progress / reconnecting) swap the
+/// dot for a bolt with a sweeping spotlight (see [`ShimmeringBoltElement`]) so they read as
+/// "alive". The dot is centered
 /// inside a `VERTICAL_TABS_ICON_SIZE`-wide slot so row titles stay left-aligned regardless
 /// of whether a dot or a full icon is drawn. `slot_height` sizes the slot's height:
 /// expanded rows pass `VERTICAL_TABS_ICON_SIZE`; compact rows pass a shorter value so the
@@ -4750,14 +4905,22 @@ fn render_pane_leading_dot(
         .finish()
     };
 
-    // Working rows pulse their opacity; the LiveElement re-renders on a timer so each
-    // frame recomputes `pane_leading_dot_pulse_opacity()`. Idle rows draw a static dot.
-    // Both keep the same footprint, so row height and title alignment are unchanged.
+    // Working rows swap the dot for a lightning bolt sized like the row's normal icon glyph,
+    // with a bright spotlight sweeping across a dim black-and-white bolt (see
+    // `ShimmeringBoltElement`). The animation is computed per-frame inside the element
+    // because repaints reuse the cached element tree rather than rebuilding via `render`.
+    // Idle rows draw a static dot.
     let dot: Box<dyn Element> = if is_working {
-        LiveElement::new(
-            dot_at_opacity(pane_leading_dot_pulse_opacity()),
-            PANE_LEADING_DOT_PULSE_REPAINT_INTERVAL,
-        )
+        let lightning_path: &'static str = WarpIcon::Lightning.into();
+        let base = theme.sub_text_color(theme.background()).into_solid();
+        let highlight = theme.main_text_color(theme.background()).into_solid();
+        ConstrainedBox::new(Box::new(ShimmeringBoltElement::new(
+            lightning_path,
+            base,
+            highlight,
+        )))
+        .with_width(WORKING_BOLT_ICON_SIZE)
+        .with_height(WORKING_BOLT_ICON_SIZE)
         .finish()
     } else {
         dot_at_opacity(1.0)
@@ -4777,7 +4940,11 @@ fn render_pane_leading_dot(
     .finish()
 }
 
-fn render_pane_row(props: PaneProps<'_>, app: &AppContext) -> Box<dyn Element> {
+fn render_pane_row(
+    props: PaneProps<'_>,
+    trailing: Option<Box<dyn Element>>,
+    app: &AppContext,
+) -> Box<dyn Element> {
     let effective_subtitle = props.subtitle.clone();
     let appearance = Appearance::as_ref(app);
     let theme = appearance.theme();
@@ -4872,7 +5039,7 @@ fn render_pane_row(props: PaneProps<'_>, app: &AppContext) -> Box<dyn Element> {
         .with_child(Shrinkable::new(1., text_content).finish())
         .finish();
 
-    render_pane_row_element(props, Padding::uniform(8.), true, content, theme)
+    render_pane_row_element(props, Padding::uniform(8.), true, content, trailing, theme)
 }
 
 enum TypedPane<'a> {
@@ -5227,6 +5394,7 @@ impl<'a> PaneProps<'a> {
             pane_color: pane_row_state.pane_color,
             in_colored_group: false,
             badge_mouse_states: pane_row_state.badge_mouse_states,
+            file_drop_target: pane_row_state.file_drop_target,
             detail_hover_state,
             display_granularity,
             renamable_tab_index,
@@ -6325,7 +6493,7 @@ fn render_summary_tab_item(
         .with_child(Shrinkable::new(1., text_col.finish()).finish())
         .finish();
 
-    render_pane_row_element(props, Padding::uniform(8.), true, content, theme)
+    render_pane_row_element(props, Padding::uniform(8.), true, content, None, theme)
 }
 
 fn render_summary_primary_label_line(
@@ -8222,6 +8390,7 @@ fn detail_pane_props<'a>(
             title_mouse_state: None,
             pane_color: None,
             badge_mouse_states,
+            file_drop_target: state.file_drop_target(),
         },
         state.detail_hover_state(workspace.window_id),
         *TabSettings::as_ref(app)
@@ -8692,7 +8861,11 @@ pub(super) fn render_detail_sidecar(
     })
 }
 
-fn render_compact_pane_row(props: PaneProps<'_>, app: &AppContext) -> Box<dyn Element> {
+fn render_compact_pane_row(
+    props: PaneProps<'_>,
+    trailing: Option<Box<dyn Element>>,
+    app: &AppContext,
+) -> Box<dyn Element> {
     let effective_subtitle = props.subtitle.clone();
     let appearance = Appearance::as_ref(app);
     let theme = appearance.theme();
@@ -8911,6 +9084,7 @@ fn render_compact_pane_row(props: PaneProps<'_>, app: &AppContext) -> Box<dyn El
         Padding::uniform(8.).with_vertical(3.),
         true,
         content,
+        trailing,
         theme,
     )
 }

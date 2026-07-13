@@ -1,9 +1,8 @@
+use crate::api::queries::search_marketplace::MarketplaceSourceKind;
 use crate::error::UserFacingError;
 use crate::request_context::RequestContext;
 use crate::response_context::ResponseContext;
 use crate::schema;
-
-use crate::api::queries::search_marketplace::MarketplaceSourceKind;
 
 // Records that the caller installed a marketplace entry, scoped to a team
 // workspace. Powers the per-team install-count popularity leaderboard. Served
@@ -24,7 +23,10 @@ pub struct ReportMarketplaceInstallInput {
 }
 
 #[derive(cynic::QueryFragment, Debug)]
-#[cynic(graphql_type = "RootMutation", variables = "ReportMarketplaceInstallVariables")]
+#[cynic(
+    graphql_type = "RootMutation",
+    variables = "ReportMarketplaceInstallVariables"
+)]
 pub struct ReportMarketplaceInstall {
     #[arguments(input: $input, requestContext: $request_context)]
     pub report_marketplace_install: ReportMarketplaceInstallResult,

@@ -4,6 +4,12 @@ use anyhow::{Result, anyhow};
 use rust_embed::RustEmbed;
 use warpui_core::AssetProvider;
 
+// NOTE: rust_embed snapshots the asset directory at compile time and does not
+// re-run when files are added OR their contents change under `app/assets`. Touch
+// this file (e.g. bump the comment below) whenever you add a new bundled asset or
+// edit an existing one so embed/release builds pick it up.
+// Last bundled-asset change: folder-open.svg / folder-closed-outline.svg stroke
+// recolored to white so the icon-tint shader (red channel = alpha) renders them.
 #[derive(Clone, Copy, RustEmbed)]
 #[folder = "../../app/assets"]
 #[include = "bundled/**"] // Should be kept in sync with BUNDLED_ASSETS_DIR.

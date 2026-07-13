@@ -54,7 +54,17 @@ impl ChannelState {
                 app_id,
                 logfile_name: "".into(),
                 server_config: WarpServerConfig {
-                    server_root_url: "https://api.trybang.ai".into(),
+                    // Dev (debug) builds default to the local harness so
+                    // `./script/run` works without exporting WARP_SERVER_ROOT_URL
+                    // (which the launchd launch path can't inherit); release
+                    // builds default to production. Either can still be pointed
+                    // elsewhere via WARP_SERVER_ROOT_URL on channels that allow
+                    // overrides (see Channel::allows_server_url_overrides).
+                    server_root_url: if cfg!(debug_assertions) {
+                        "http://localhost:8088".into()
+                    } else {
+                        "https://api.trybang.ai".into()
+                    },
                     ..WarpServerConfig::production()
                 },
                 oz_config: OzConfig::production(),

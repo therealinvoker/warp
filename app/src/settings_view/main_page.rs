@@ -12,9 +12,9 @@ use warp_core::ui::icons::Icon;
 use warp_server_client::iap::{IapCredentialsState, IapManager, IapManagerEvent};
 use warpui::assets::asset_cache::AssetSource;
 use warpui::elements::{
-    Align, Border, CacheOption, ConstrainedBox, Container, CornerRadius, CrossAxisAlignment,
-    Element, Empty, Flex, Image, MainAxisAlignment, MainAxisSize, MouseStateHandle, ParentElement,
-    Radius, Shrinkable, Text,
+    Align, Border, CacheOption, ChildView, ConstrainedBox, Container, CornerRadius,
+    CrossAxisAlignment, Dismiss, Element, Empty, Flex, Hoverable, Image, MainAxisAlignment,
+    MainAxisSize, MouseStateHandle, ParentElement, Radius, Shrinkable, Text,
 };
 use warpui::fonts::Weight;
 use warpui::keymap::ContextPredicate;
@@ -39,6 +39,10 @@ use crate::auth::auth_state::AuthState;
 use crate::auth::auth_view_modal::AuthViewVariant;
 use crate::auth::{AuthStateProvider, UserUid};
 use crate::autoupdate::{self, AutoupdateStage, AutoupdateState};
+use crate::editor::{
+    EditorView, Event as EditorEvent, PropagateAndNoOpNavigationKeys, SingleLineEditorOptions,
+    TextOptions,
+};
 use crate::server::ids::ServerId;
 use crate::settings::cloud_preferences::CloudPreferencesSettings;
 use crate::workspace::WorkspaceAction;
@@ -48,7 +52,10 @@ use crate::workspaces::workspace::CustomerType;
 use crate::{report_if_error, send_telemetry_from_ctx, TelemetryEvent};
 
 const PHOTO_SIZE: f32 = 40.;
-const REFERRAL_CTA: &str = "Earn rewards by sharing Warp with friends & colleagues";
+/// Fixed width for the inline display-name editor so the row doesn't reflow as
+/// the typed text grows/shrinks.
+const NAME_EDITOR_WIDTH: f32 = 240.;
+const REFERRAL_CTA: &str = "Earn rewards by sharing Bang with friends & colleagues";
 const REGULAR_TEXT_FONT_SIZE: f32 = 12.;
 const VERTICAL_MARGIN: f32 = 24.;
 const LOG_OUT_TEXT: &str = "Log out";
@@ -124,6 +131,11 @@ pub enum MainPageAction {
     },
     SignupAnonymousUser,
     OpenUrl(String),
+    /// Enter inline edit mode for the account display name.
+    BeginEditName,
+    /// Commit the in-progress display-name edit (fired when the user clicks
+    /// outside the inline editor).
+    CommitNameEdit,
     #[cfg(not(target_family = "wasm"))]
     RefreshIapCredentials,
 }
@@ -161,6 +173,11 @@ pub enum MainSettingsPageEvent {
 pub struct MainSettingsPageView {
     page: PageType<Self>,
     auth_state: Arc<AuthState>,
+    /// Inline editor for the account display name. Rendered in place of the name
+    /// text while `is_editing_name` is true; commits on Enter or blur.
+    name_editor: ViewHandle<EditorView>,
+    /// Whether the display-name field is currently in edit mode.
+    is_editing_name: bool,
 }
 
 impl Entity for MainSettingsPageView {
@@ -233,6 +250,12 @@ impl TypedActionView for MainSettingsPageView {
             MainPageAction::OpenUrl(url) => {
                 ctx.open_url(url);
             }
+            MainPageAction::BeginEditName => {
+                self.begin_editing_name(ctx);
+            }
+            MainPageAction::CommitNameEdit => {
+                self.commit_name_edit(ctx);
+            }
             #[cfg(not(target_family = "wasm"))]
             MainPageAction::RefreshIapCredentials => {
                 IapManager::handle(ctx).update(ctx, |manager, ctx| manager.start_refresh(ctx));
@@ -299,7 +322,89 @@ impl MainSettingsPageView {
 
         let page = PageType::new_uncategorized(widgets, Some("Account"));
 
-        MainSettingsPageView { page, auth_state }
+        let name_editor = ctx.add_typed_action_view(|ctx| {
+            let appearance = Appearance::as_ref(ctx);
+            let options = SingleLineEditorOptions {
+                // Match the display-name label sizing so the inline editor doesn't
+                // reflow the row when edit mode toggles.
+                text: TextOptions::ui_text(Some(16.), appearance),
+                // Mirror the proven tab-rename editor: select the current name on
+                // focus and drop the selection on blur.
+                select_all_on_focus: true,
+                clear_selections_on_blur: true,
+                // Up/down shouldn't page through settings while editing the name.
+                propagate_and_no_op_vertical_navigation_keys:
+                    PropagateAndNoOpNavigationKeys::Always,
+                ..Default::default()
+            };
+            let mut editor = EditorView::single_line(options, ctx);
+            editor.set_placeholder_text("Display name", ctx);
+            editor
+        });
+        ctx.subscribe_to_view(&name_editor, Self::handle_name_editor_event);
+
+        MainSettingsPageView {
+            page,
+            auth_state,
+            name_editor,
+            is_editing_name: false,
+        }
+    }
+
+    /// Enters display-name edit mode: pre-fills the editor with the current name,
+    /// selects it, and focuses it so the user can type immediately.
+    fn begin_editing_name(&mut self, ctx: &mut ViewContext<Self>) {
+        if self.is_editing_name {
+            return;
+        }
+        let current = self.auth_state.display_name().unwrap_or_default();
+        self.is_editing_name = true;
+        self.name_editor.update(ctx, |editor, ctx| {
+            editor.set_buffer_text(&current, ctx);
+            editor.select_all(ctx);
+        });
+        ctx.focus(&self.name_editor);
+        ctx.notify();
+    }
+
+    /// Commits the in-progress name edit (from Enter or blur), pushing the new
+    /// value through `AuthManager` (local state + backend sync) and leaving edit
+    /// mode. Ignores the commit if edit mode is already closed.
+    fn commit_name_edit(&mut self, ctx: &mut ViewContext<Self>) {
+        if !self.is_editing_name {
+            return;
+        }
+        self.is_editing_name = false;
+        let new_name = self
+            .name_editor
+            .as_ref(ctx)
+            .buffer_text(ctx)
+            .trim()
+            .to_owned();
+        if !new_name.is_empty() && Some(&new_name) != self.auth_state.display_name().as_ref() {
+            AuthManager::handle(ctx).update(ctx, |auth_manager, ctx| {
+                auth_manager.update_display_name(new_name, ctx);
+            });
+        }
+        ctx.notify();
+    }
+
+    fn handle_name_editor_event(
+        &mut self,
+        _: ViewHandle<EditorView>,
+        event: &EditorEvent,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        match event {
+            // Enter blurs the editor (below), so committing here and on Blurred is
+            // guarded by `is_editing_name` to avoid a double commit.
+            EditorEvent::Enter => {
+                self.commit_name_edit(ctx);
+                ctx.focus_self();
+            }
+            EditorEvent::Blurred => self.commit_name_edit(ctx),
+            _ => {}
+        }
     }
 
     fn handle_autoupdate_state_change(
@@ -317,6 +422,7 @@ struct AccountWidgetStateHandles {
     anonymous_user_sign_up_button: MouseStateHandle,
     enterprise_contact_us_link: MouseStateHandle,
     stripe_billing_portal_link: MouseStateHandle,
+    name_edit: MouseStateHandle,
 }
 
 #[derive(Default)]
@@ -412,8 +518,48 @@ impl AccountWidget {
             .finish()
     }
 
+    /// Renders the display-name line: an inline single-line editor while the view
+    /// is in name-edit mode, otherwise a click-to-edit text label. Clicking the
+    /// label enters edit mode (see `MainPageAction::BeginEditName`).
+    fn render_display_name_line(
+        &self,
+        view: &MainSettingsPageView,
+        screen_name: &str,
+        appearance: &Appearance,
+    ) -> Box<dyn Element> {
+        if view.is_editing_name {
+            // Clicking a non-focusable part of the settings page won't blur the
+            // editor, so `Dismiss` catches clicks outside the editor and commits —
+            // matching the click-outside-to-commit behavior of the other inline
+            // editors on the settings pages. (Enter/blur still commit via the
+            // editor event subscription.)
+            return Dismiss::new(
+                ConstrainedBox::new(ChildView::new(&view.name_editor).finish())
+                    .with_width(NAME_EDITOR_WIDTH)
+                    .finish(),
+            )
+            .on_dismiss(|ctx, _| {
+                ctx.dispatch_typed_action(MainPageAction::CommitNameEdit);
+            })
+            .finish();
+        }
+
+        let name = screen_name.to_owned();
+        Hoverable::new(self.ui_state_handles.name_edit.clone(), move |_| {
+            Text::new_inline(name.clone(), appearance.ui_font_family(), 16.)
+                .with_color(appearance.theme().active_ui_text_color().into())
+                .finish()
+        })
+        .with_cursor(Cursor::PointingHand)
+        .on_click(|ctx, _, _| {
+            ctx.dispatch_typed_action(MainPageAction::BeginEditName);
+        })
+        .finish()
+    }
+
     fn render_account_info(
         &self,
+        view: &MainSettingsPageView,
         profile_image_source: Option<&AssetSource>,
         auth_state: &AuthState,
         app: &AppContext,
@@ -449,11 +595,11 @@ impl AccountWidget {
                         Flex::column()
                             .with_main_axis_alignment(MainAxisAlignment::SpaceEvenly)
                             .with_cross_axis_alignment(CrossAxisAlignment::Start)
-                            .with_child(
-                                Text::new_inline(screen_name, appearance.ui_font_family(), 16.)
-                                    .with_color(appearance.theme().active_ui_text_color().into())
-                                    .finish(),
-                            )
+                            .with_child(self.render_display_name_line(
+                                view,
+                                &screen_name,
+                                appearance,
+                            ))
                             .with_child(
                                 appearance
                                     .ui_builder()
@@ -474,14 +620,10 @@ impl AccountWidget {
                             )
                             .finish()
                     } else {
-                        Text::new_inline(email, appearance.ui_font_family(), 16.)
-                            .with_color(appearance.theme().active_ui_text_color().into())
-                            .finish()
+                        self.render_display_name_line(view, &email, appearance)
                     }
                 }
-                _ => Text::new_inline(screen_name, appearance.ui_font_family(), 16.)
-                    .with_color(appearance.theme().active_ui_text_color().into())
-                    .finish(),
+                _ => self.render_display_name_line(view, &screen_name, appearance),
             }
         });
 
@@ -634,6 +776,7 @@ impl SettingsWidget for AccountWidget {
                 asset_cache::url_source_with_persistence(url, &warp_core::paths::cache_dir())
             });
             self.render_account_info(
+                view,
                 profile_image_source.as_ref(),
                 view.auth_state.as_ref(),
                 app,
@@ -875,7 +1018,7 @@ impl VersionInfoWidget {
                             color: ansi_red,
                         }),
                         Some(CallToActionContent {
-                            text: "Relaunch Warp",
+                            text: "Relaunch Bang",
                             action: MainPageAction::Relaunch,
                         }),
                     ),
@@ -892,28 +1035,28 @@ impl VersionInfoWidget {
                             color: faded_text_color,
                         }),
                         Some(CallToActionContent {
-                            text: "Relaunch Warp",
+                            text: "Relaunch Bang",
                             action: MainPageAction::Relaunch,
                         }),
                     ),
                     AutoupdateStage::UnableToUpdateToNewVersion { .. } => (
                         Some(StatusContent {
-                            text: "A new version of Warp is available but can't be installed",
+                            text: "A new version of Bang is available but can't be installed",
                             color: ansi_red,
                         }),
                         Some(CallToActionContent {
-                            text: "Update Warp manually",
+                            text: "Update Bang manually",
                             // note: the handler for this action is a no-op
                             action: MainPageAction::DownloadUpdate,
                         }),
                     ),
                     AutoupdateStage::UnableToLaunchNewVersion { .. } => (
                         Some(StatusContent {
-                            text: "A new version of Warp is installed but can't be launched.",
+                            text: "A new version of Bang is installed but can't be launched.",
                             color: ansi_red,
                         }),
                         Some(CallToActionContent {
-                            text: "Update Warp manually",
+                            text: "Update Bang manually",
                             // note: the handler for this action is a no-op
                             action: MainPageAction::DownloadUpdate,
                         }),

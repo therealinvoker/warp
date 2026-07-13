@@ -684,6 +684,7 @@ impl PrivacySettings {
                             crash_reporting_enabled: Some(snapshot.is_crash_reporting_enabled()),
                             cloud_conversation_storage_enabled: snapshot
                                 .cloud_conversation_storage_enabled(),
+                            display_name: None,
                         })
                         .await;
                     if let Err(err) = result {

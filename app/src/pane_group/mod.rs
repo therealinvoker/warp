@@ -704,6 +704,10 @@ pub enum Event {
         target_view: LeftPanelTargetView,
         force_open: bool,
     },
+    /// Open the browser preview tab in the left panel and navigate it to `url`.
+    OpenBrowserPreview {
+        url: String,
+    },
     #[cfg(feature = "local_fs")]
     OpenFileWithTarget {
         path: PathBuf,
@@ -1652,16 +1656,42 @@ impl PaneGroup {
                     .collect();
 
                 let conversation_restoration = {
-                    let conversations = RestoredAgentConversations::handle(ctx)
+                    let mut conversations = RestoredAgentConversations::handle(ctx)
                         .update(ctx, |store, _| {
                             store.take_conversations(&filtered_conversation_ids)
                         });
+                    let mut active_conversation_id = terminal_snapshot.active_conversation_id;
+                    // Recovery: the pane referenced conversations but none survived
+                    // filtering (all empty/unrestorable) — e.g. it landed on a fresh
+                    // empty conversation while the real chat had been evicted from
+                    // memory at save time. Fall back to the most recent restorable
+                    // conversation so the user's last chat comes back instead of a
+                    // blank terminal. Only when the pane HAD referenced conversations,
+                    // so brand-new terminals with no AI history stay empty.
+                    if conversations.is_empty()
+                        && !terminal_snapshot.conversation_ids_to_restore.is_empty()
+                    {
+                        if let Some(recovered) = RestoredAgentConversations::handle(ctx)
+                            .update(ctx, |store, _| {
+                                store.take_most_recent_restorable_conversation()
+                            })
+                        {
+                            // Preserve the original display mode: only retarget the
+                            // active conversation if the snapshot was in fullscreen
+                            // agent view (active_conversation_id was Some). Otherwise
+                            // leave it None so the chat restores as inline blocks.
+                            if active_conversation_id.is_some() {
+                                active_conversation_id = Some(recovered.id());
+                            }
+                            conversations.push(recovered);
+                        }
+                    }
                     vec1::Vec1::try_from_vec(conversations)
                         .ok()
                         .map(
                             |conversations| ConversationRestorationInNewPaneType::Startup {
                                 conversations,
-                                active_conversation_id: terminal_snapshot.active_conversation_id,
+                                active_conversation_id,
                             },
                         )
                 };
@@ -3043,7 +3073,7 @@ impl PaneGroup {
             Banner::<PaneGroupAction>::new_permanently_dismissible(
                 BannerTextContent::formatted_text(vec![
                     FormattedTextFragment::plain_text(
-                        "Warp doesn't currently support your default shell, falling back to zsh.  ",
+                        "Bang doesn't currently support your default shell, falling back to zsh.  ",
                     ),
                     FormattedTextFragment::hyperlink("Learn more", WARP_SHELL_COMPATIBILITY_DOCS),
                 ]),

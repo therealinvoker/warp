@@ -920,6 +920,18 @@ define_settings_group!(AISettings, settings: [
         toml_path: "agents.voice.voice_input_enabled",
         description: "Controls whether voice input is enabled for AI interactions.",
     },
+    // When the voice overlay is open, auto-submit the transcript once you stop
+    // speaking (hands-free). When off, the transcript stays in the composer until
+    // you submit manually (the up-arrow puck).
+    voice_overlay_auto_submit: VoiceOverlayAutoSubmit {
+        type: bool,
+        default: true,
+        supported_platforms: SupportedPlatforms::DESKTOP,
+        sync_to_cloud: SyncToCloud::Globally(RespectUserSyncSetting::Yes),
+        private: false,
+        toml_path: "agents.voice.voice_overlay_auto_submit",
+        description: "When the voice overlay is open, auto-submit the transcript when you stop speaking (hands-free). When off, submit manually.",
+    },
     // The number of times the user has entered Agent Mode.
     // Not a user-visible setting. We model it so we can show the voice input new feature popup
     // the correct number of times.
@@ -992,6 +1004,24 @@ define_settings_group!(AISettings, settings: [
         private: false,
         toml_path: "agents.profiles.agent_mode_execute_readonly_commands",
         description: "Whether the agent can auto-execute read-only commands without asking.",
+    },
+    // Persistent "memory" behind the Auto-approve dropdown option. When enabled,
+    // the agent auto-approves and executes ALL actions (commands, file edits, MCP
+    // tools, etc.) without asking, across every conversation, and this survives
+    // app restarts until the user turns it off. This differs from the per-
+    // conversation RunToCompletion override (`AIConversation.autoexecute_override`),
+    // which only applies to a single conversation.
+    //
+    // Prefer [`BlocklistAIPermissions::auto_approve_all_actions_enabled`] to
+    // interpret this setting.
+    agent_mode_auto_approve_all_actions: AgentModeAutoApproveAllActions {
+        type: bool,
+        default: false,
+        supported_platforms: SupportedPlatforms::ALL,
+        sync_to_cloud: SyncToCloud::Globally(RespectUserSyncSetting::Yes),
+        private: false,
+        toml_path: "agents.profiles.agent_mode_auto_approve_all_actions",
+        description: "Whether the agent auto-approves and executes all actions without asking, across all conversations.",
     },
     // Determines coding permissions that Agent Mode has.
     // Note that if Agent Mode has permissions to execute readonly commands,
@@ -1089,7 +1119,7 @@ define_settings_group!(AISettings, settings: [
         sync_to_cloud: SyncToCloud::Globally(RespectUserSyncSetting::Yes),
         private: false,
         toml_path: "cloud_platform.third_party_api_keys.aws_bedrock_credentials_enabled",
-        description: "Whether Warp should use your local AWS credentials for Bedrock-enabled requests.",
+        description: "Whether Bang should use your local AWS credentials for Bedrock-enabled requests.",
     }
     // Whether to automatically run the AWS login command when Bedrock credentials are expired.
     //
@@ -1146,7 +1176,7 @@ define_settings_group!(AISettings, settings: [
         sync_to_cloud: SyncToCloud::Globally(RespectUserSyncSetting::Yes),
         private: false,
         toml_path: "cloud_platform.third_party_api_keys.gemini_enterprise_credentials_enabled",
-        description: "Whether Warp should route eligible requests through your workspace's Gemini Enterprise Google Cloud project.",
+        description: "Whether Bang should route eligible requests through your workspace's Gemini Enterprise Google Cloud project.",
     }
     // Whether or not the user wants agent mode requests to use their saved rules.
     memory_enabled: MemoryEnabled {
@@ -1166,7 +1196,7 @@ define_settings_group!(AISettings, settings: [
         sync_to_cloud: SyncToCloud::Globally(RespectUserSyncSetting::Yes),
         private: false,
         toml_path: "agents.knowledge.warp_drive_context_enabled",
-        description: "Whether Warp Drive context is included in AI requests.",
+        description: "Whether Bang Drive context is included in AI requests.",
     }
 
     // Whether the codebase speedbump banner has been permanently dismissed for a given repo path.
@@ -1315,7 +1345,7 @@ define_settings_group!(AISettings, settings: [
         private: false,
         storage_key: "CanUseWarpCreditsWithByok",
         toml_path: "cloud_platform.third_party_api_keys.can_use_warp_credits_with_byok",
-        description: "Whether Warp credits can be used as a fallback for user-provided models.",
+        description: "Whether Bang credits can be used as a fallback for user-provided models.",
     }
 
     should_render_use_agent_footer_for_user_commands: ShouldRenderUseAgentToolbarForUserCommands {
@@ -1558,7 +1588,21 @@ define_settings_group!(AISettings, settings: [
         sync_to_cloud: SyncToCloud::Globally(RespectUserSyncSetting::No),
         private: false,
         toml_path: "agents.warp_agent.other.agent_attribution_enabled",
-        description: "Whether the Warp Agent adds an attribution co-author line to commit messages and pull requests it creates.",
+        description: "Whether the Bang Agent adds an attribution co-author line to commit messages and pull requests it creates.",
+    }
+
+    // Whether newly captured OS screenshots are automatically attached to the
+    // focused terminal's agent input. Gated by the `ScreenshotAutoAttach`
+    // feature flag; interpret via `is_screenshot_auto_attach_enabled`.
+    screenshot_auto_attach_enabled: ScreenshotAutoAttachEnabled {
+        type: bool,
+        default: true,
+        supported_platforms: SupportedPlatforms::DESKTOP,
+        sync_to_cloud: SyncToCloud::Globally(RespectUserSyncSetting::Yes),
+        private: false,
+        toml_path: "agents.warp_agent.input.screenshot_auto_attach_enabled",
+        description: "Whether new screenshots are automatically attached to the focused agent input.",
+        feature_flag: FeatureFlag::ScreenshotAutoAttach,
     }
 
     should_force_disable_cloud_handoff: ShouldForceDisableCloudHandoff {
@@ -1588,7 +1632,7 @@ define_settings_group!(AISettings, settings: [
         sync_to_cloud: SyncToCloud::Globally(RespectUserSyncSetting::Yes),
         private: false,
         toml_path: "agents.warp_agent.other.auto_handoff_on_sleep_enabled",
-        description: "Whether Warp automatically hands off local agent conversations to cloud when the computer is about to sleep.",
+        description: "Whether Bang automatically hands off local agent conversations to cloud when the computer is about to sleep.",
     }
 
     // This is not a user-visible setting - it's merely a one-time flag to track if the
@@ -1781,6 +1825,14 @@ impl AISettings {
 
     pub fn is_orchestration_enabled(&self, app: &warpui::AppContext) -> bool {
         self.is_any_ai_enabled(app)
+    }
+
+    /// Whether newly captured screenshots should be auto-attached to the focused
+    /// agent input. Requires the feature flag, AI to be enabled, and the setting on.
+    pub fn is_screenshot_auto_attach_enabled(&self, app: &warpui::AppContext) -> bool {
+        FeatureFlag::ScreenshotAutoAttach.is_enabled()
+            && self.is_any_ai_enabled(app)
+            && *self.screenshot_auto_attach_enabled
     }
 
     /// Returns true when local-to-cloud handoff is effectively enabled.

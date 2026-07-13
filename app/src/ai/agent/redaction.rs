@@ -210,6 +210,7 @@ pub(crate) fn redact_inputs(inputs: &mut [AIAgentInput]) {
                     // These are effectively flow control and don't contain secrets
                     AIAgentActionResultType::SuggestNewConversation { .. }
                     | AIAgentActionResultType::OpenCodeReview
+                    | AIAgentActionResultType::OpenBrowserPreview
                     | AIAgentActionResultType::InitProject => {}
 
                     // Contains only file path/line number information

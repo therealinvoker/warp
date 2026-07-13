@@ -722,6 +722,11 @@ pub struct BlockListElement {
     rich_content_elements: HashMap<EntityId, Box<dyn Element>>,
     rich_content_metadata: HashMap<EntityId, RichContentMetadata>,
 
+    /// See [`PinnedAiQuery`]. Rebuilt every layout for the top-most visible AI block (and the one
+    /// directly below it) so the user's question stays pinned to the top of the agent stream while
+    /// its answer scrolls, and the next question pushes it off as it scrolls up.
+    pinned_ai_queries: Vec<PinnedAiQuery>,
+
     shared_session_banner_state: SharedSessionBanners,
     presence_manager: Option<ModelHandle<PresenceManager>>,
     presence_avatars: HashMap<ParticipantId, Box<dyn Element>>,
@@ -746,6 +751,21 @@ pub struct BlockListElement {
     voice_input_toggle_key_code: Option<KeyCode>,
 
     inline_menu_positioner: ModelHandle<InlineMenuPositioner>,
+}
+
+/// A pre-built, laid-out copy of the top-most visible AI block's user question, painted pinned to
+/// the top of the viewport so the question stays visible while the answer scrolls beneath it.
+///
+/// Built during `layout` (after the terminal model lock is released, because rendering an
+/// [`AIBlock`] re-locks it) and only painted during `paint`, so painting never triggers a
+/// re-render and therefore can't deadlock on the model lock.
+struct PinnedAiQuery {
+    /// The rich-content view id of the AI block this question belongs to.
+    view_id: EntityId,
+    /// The laid-out, display-only question header element.
+    element: Box<dyn Element>,
+    /// The laid-out height of the header, used to compute the sticky rect.
+    height: f32,
 }
 
 #[derive(Debug)]
@@ -963,6 +983,7 @@ impl BlockListElement {
             filtered_blocks: None,
             rich_content_elements: HashMap::new(),
             rich_content_metadata: HashMap::new(),
+            pinned_ai_queries: Vec::new(),
             shared_session_banner_state: shared_session_banners,
             presence_manager: None,
             presence_avatars: HashMap::new(),
@@ -2459,6 +2480,68 @@ impl BlockListElement {
         rect.with_background(block_grid_params.grid_render_params.warp_theme.outline());
     }
 
+    /// Paints the pinned "sticky" AI question header for the top-most visible AI block, keeping the
+    /// user's question visible at the top of the viewport while its answer scrolls beneath it.
+    ///
+    /// `block_origin` is the top-left of the AI block being drawn and `origin` is the top-left of
+    /// the block list. Takes the pinned query by `&mut` (rather than through `&mut self`) so it can
+    /// be called from the paint loop, which holds an immutable borrow of `self.visible_items`.
+    fn paint_pinned_ai_query(
+        pinned: &mut PinnedAiQuery,
+        view_id: EntityId,
+        block_origin: Vector2F,
+        block_height_px: f32,
+        origin: Vector2F,
+        ctx: &mut PaintContext,
+        app: &AppContext,
+    ) {
+        if pinned.view_id != view_id {
+            return;
+        }
+        let viewport_top = origin.y();
+        // Only pin once the block's top has scrolled above the top of the viewport. Use a strict
+        // comparison (no epsilon slack) so there's no dead-zone at the hand-off from the incoming
+        // header: the outgoing path takes over the instant `block_top` crosses the viewport top,
+        // exactly where the incoming path stops, avoiding a one-pixel flicker between the two.
+        if block_origin.y() >= viewport_top {
+            return;
+        }
+        let block_bottom = block_origin.y() + block_height_px;
+        // Pin to the viewport top, but once only the header's worth of the block remains on screen,
+        // let the header ride the bottom of the block off-screen (matching the snackbar header).
+        let header_y = if block_bottom - pinned.height > viewport_top {
+            viewport_top
+        } else {
+            block_bottom - pinned.height
+        };
+        pinned.element.paint(vec2f(origin.x(), header_y), ctx, app);
+    }
+
+    /// Paints the "incoming" sticky question for the block directly below the top one. It's drawn at
+    /// the block's natural top edge, but only while that edge is inside the top header band — i.e.
+    /// while it's rising up to push the outgoing (top) header off. Once it reaches the viewport top,
+    /// the block becomes the top-most visible item and is painted by [`Self::paint_pinned_ai_query`]
+    /// instead, so the hand-off is seamless.
+    ///
+    /// `block_top` is the y of the incoming block's top edge and `outgoing_height` is the height of
+    /// the outgoing header it's pushing off.
+    fn paint_incoming_pinned_query(
+        pinned: &mut PinnedAiQuery,
+        block_top: f32,
+        outgoing_height: f32,
+        origin: Vector2F,
+        ctx: &mut PaintContext,
+        app: &AppContext,
+    ) {
+        let viewport_top = origin.y();
+        // Below the header band: still far enough down that its natural rendering handles it.
+        // At or above the viewport top: it's now the top-most block, handled by the outgoing path.
+        if block_top <= viewport_top || block_top > viewport_top + outgoing_height {
+            return;
+        }
+        pinned.element.paint(vec2f(origin.x(), block_top), ctx, app);
+    }
+
     // TODO(alokedesai): Clean this up even more by pulling out parameters into various structs.
     #[allow(clippy::too_many_arguments)]
     fn draw_block(
@@ -3601,6 +3684,51 @@ impl Element for BlockListElement {
         // threads
         drop(model);
 
+        // Build the "sticky" pinned question header for the top-most visible AI block. This is done
+        // here (rather than in `paint`) and only *after* releasing the terminal model lock, because
+        // rendering an `AIBlock` re-locks the model; painting a pre-built element never re-renders,
+        // so it can't deadlock. Only active in the fullscreen agent view for now.
+        self.pinned_ai_queries.clear();
+        if FeatureFlag::AgentView.is_enabled() {
+            // Consider the top-most visible item and the one directly below it: the first is pinned
+            // to the top, and the second's question rides up from below to push the first off.
+            let candidate_view_ids: Vec<EntityId> = self
+                .visible_items
+                .as_ref()
+                .map(|items| {
+                    items
+                        .iter()
+                        .take(2)
+                        .filter_map(|item| match item {
+                            VisibleItem::RichContent { view_id, .. } => Some(*view_id),
+                            _ => None,
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            for view_id in candidate_view_ids {
+                if let Some(RichContentMetadata::AIBlock(meta)) =
+                    self.rich_content_metadata.get(&view_id)
+                {
+                    let handle = meta.ai_block_handle.clone();
+                    if let Some(mut element) =
+                        handle.read(app, |block, app| block.render_pinned_query(app))
+                    {
+                        let size = element.layout(
+                            SizeConstraint::tight_on_cross_axis(Axis::Vertical, constraint),
+                            ctx,
+                            app,
+                        );
+                        self.pinned_ai_queries.push(PinnedAiQuery {
+                            view_id,
+                            element,
+                            height: size.y(),
+                        });
+                    }
+                }
+            }
+        }
+
         for (idx, element) in block_indices_with_label_elements.iter().zip(elements) {
             self.label_elements.insert(*idx, element);
         }
@@ -3685,6 +3813,14 @@ impl Element for BlockListElement {
             .filter(|e| e.size().is_some())
         {
             cli_subagent_view.after_layout(ctx, app);
+        }
+
+        for pinned in self
+            .pinned_ai_queries
+            .iter_mut()
+            .filter(|p| p.element.size().is_some())
+        {
+            pinned.element.after_layout(ctx, app);
         }
 
         let model = self.model.lock();
@@ -3788,6 +3924,14 @@ impl Element for BlockListElement {
 
         let mut cli_subagent_views_to_paint = vec![];
         let agent_view_state = model.block_list().agent_view_state();
+
+        // Take the pinned AI question out of `self` so it can be painted inside the loop below,
+        // which borrows `self.visible_items` immutably (preventing `&mut self` method calls). It's
+        // rebuilt every layout, so there's no need to restore it afterwards.
+        let mut pinned_ai_queries = std::mem::take(&mut self.pinned_ai_queries);
+        // Geometry (view id, block origin, block height) for the top two visible items, captured
+        // during the paint loop and used afterwards to paint the sticky question headers.
+        let mut pinned_ai_query_geom: [Option<(EntityId, Vector2F, f32)>; 2] = [None, None];
 
         let items = self
             .visible_items
@@ -4328,6 +4472,14 @@ impl Element for BlockListElement {
                         rich_content.paint(grid_origin, ctx, app);
                     }
 
+                    // Capture the top two visible items' geometry so their questions can be pinned
+                    // to the top of the viewport. The actual paint happens after the block loop (in
+                    // its own top layer) so it sits above the scrolling agent response.
+                    if visible_idx < 2 {
+                        pinned_ai_query_geom[visible_idx] =
+                            Some((*view_id, block_origin, *height_px));
+                    }
+
                     if !FeatureFlag::AgentView.is_enabled() {
                         let ai_render_context = self.ai_render_context.borrow();
                         if let Some(ai_context_color) = self
@@ -4353,6 +4505,55 @@ impl Element for BlockListElement {
                     grid_origin += vec2f(0., *height_px);
                 }
             }
+        }
+
+        // Paint the pinned AI question(s) above the scrolling agent response, in their own top layer
+        // so they always sit in front of the block content they're occluding. The top block's
+        // question sticks to the viewport top; the next block's question rides up from below and
+        // pushes it off, so the sticky header hands over to the next question as the user scrolls.
+        if let Some((out_view_id, out_block_origin, out_block_height)) = pinned_ai_query_geom[0] {
+            ctx.scene.start_layer(ClipBounds::ActiveLayer);
+
+            // Incoming header (drawn first, beneath the outgoing one as they cross).
+            if let Some((in_view_id, in_block_origin, _)) = pinned_ai_query_geom[1] {
+                let outgoing_height = pinned_ai_queries
+                    .iter()
+                    .find(|p| p.view_id == out_view_id)
+                    .map(|p| p.height);
+                if let Some(outgoing_height) = outgoing_height {
+                    if let Some(incoming) = pinned_ai_queries
+                        .iter_mut()
+                        .find(|p| p.view_id == in_view_id)
+                    {
+                        Self::paint_incoming_pinned_query(
+                            incoming,
+                            in_block_origin.y(),
+                            outgoing_height,
+                            origin,
+                            ctx,
+                            app,
+                        );
+                    }
+                }
+            }
+
+            // Outgoing (top) header, drawn last so it stays above the incoming one as it rides up.
+            if let Some(outgoing) = pinned_ai_queries
+                .iter_mut()
+                .find(|p| p.view_id == out_view_id)
+            {
+                Self::paint_pinned_ai_query(
+                    outgoing,
+                    out_view_id,
+                    out_block_origin,
+                    out_block_height,
+                    origin,
+                    ctx,
+                    app,
+                );
+            }
+
+            ctx.scene.stop_layer();
         }
 
         let block_list = model.block_list();

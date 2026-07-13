@@ -757,6 +757,7 @@ impl RunnableCommandModel for NotebookCommand {
                                                 description: None,
                                             }],
                                             initial_index: 0,
+                                            auto_copy: false,
                                         });
                                     }
                                 }

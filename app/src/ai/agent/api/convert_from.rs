@@ -747,6 +747,11 @@ impl ConvertAPIToolCallToAIAgentAction for api::message::ToolCall {
             api::message::tool_call::Tool::OpenCodeReview(_) => {
                 create_standard_action(AIAgentActionType::OpenCodeReview)
             }
+            api::message::tool_call::Tool::OpenBrowserPreview(open_browser_preview) => {
+                create_standard_action(AIAgentActionType::OpenBrowserPreview {
+                    url: open_browser_preview.url,
+                })
+            }
             api::message::tool_call::Tool::InitProject(_) => {
                 create_standard_action(AIAgentActionType::InitProject)
             }

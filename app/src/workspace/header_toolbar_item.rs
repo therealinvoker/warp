@@ -47,7 +47,7 @@ impl HeaderToolbarItemKind {
     pub fn icon(&self) -> Icon {
         match self {
             Self::TabsPanel => Icon::Menu,
-            Self::ToolsPanel => Icon::Tool2,
+            Self::ToolsPanel => Icon::RightSidebarOpen,
             Self::AgentManagement => Icon::Grid,
             Self::CodeReview => Icon::Diff,
             Self::NotificationsMailbox => Icon::Inbox,

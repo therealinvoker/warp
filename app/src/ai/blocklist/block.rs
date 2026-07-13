@@ -49,7 +49,7 @@ use warp_editor::content::edit::resolve_asset_source_relative_to_directory;
 use warp_editor::render::element::VerticalExpansionBehavior;
 use warp_util::local_or_remote_path::LocalOrRemotePath;
 use warp_util::path::ShellFamily;
-use warpui::assets::asset_cache::AssetCache;
+use warpui::assets::asset_cache::{AssetCache, AssetSource};
 use warpui::clipboard::ClipboardContent;
 use warpui::elements::{
     get_rich_content_position_id, ClippedScrollStateHandle, MainAxisAlignment, MainAxisSize,
@@ -91,13 +91,13 @@ use crate::ai::agent::redaction::redact_secrets;
 use crate::ai::agent::telemetry::ForTelemetry as _;
 use crate::ai::agent::{
     AIAgentAction, AIAgentActionId, AIAgentActionResultType, AIAgentActionType, AIAgentAttachment,
-    AIAgentCitation, AIAgentContext, AIAgentInput, AIAgentOutput, AIAgentOutputMessage,
-    AIAgentOutputMessageType, AIAgentTextSection, AIIdentifiers, CancellationReason,
-    CreateDocumentsRequest, CreateDocumentsResult, DocumentToCreate, EditDocumentsResult,
-    MessageId, PassiveSuggestionTrigger, ProgrammingLanguage, RenderableAIError,
-    RequestCommandOutputResult, RequestFileEditsResult, SearchCodebaseResult, ServerOutputId,
-    SubagentCall, SubagentType, SuggestPromptRequest, SuggestPromptResult, SuggestedLoggingId,
-    SummarizationType, TodoOperation,
+    AIAgentCitation, AIAgentContext, AIAgentExchangeId, AIAgentInput, AIAgentOutput,
+    AIAgentOutputMessage, AIAgentOutputMessageType, AIAgentTextSection, AIIdentifiers,
+    CancellationReason, CreateDocumentsRequest, CreateDocumentsResult, DocumentToCreate,
+    EditDocumentsResult, MessageId, PassiveSuggestionTrigger, ProgrammingLanguage,
+    RenderableAIError, RequestCommandOutputResult, RequestFileEditsResult, SearchCodebaseResult,
+    ServerOutputId, SubagentCall, SubagentType, SuggestPromptRequest, SuggestPromptResult,
+    SuggestedLoggingId, SummarizationType, TodoOperation,
 };
 use crate::ai::agent_conversations_model::{AgentConversationsModel, AgentConversationsModelEvent};
 use crate::ai::ai_document_view::DEFAULT_PLANNING_DOCUMENT_TITLE;
@@ -578,6 +578,23 @@ impl Default for TodoListElementState {
     }
 }
 
+/// State for a collapsible tool-usage summary row (one per agent action).
+/// Collapsed by default; clicking the header toggles `is_expanded` to reveal
+/// the action's detail UI.
+struct ActionSummaryState {
+    header_toggle_mouse_state: MouseStateHandle,
+    is_expanded: bool,
+}
+
+impl Default for ActionSummaryState {
+    fn default() -> Self {
+        Self {
+            header_toggle_mouse_state: MouseStateHandle::new(Default::default()),
+            is_expanded: false,
+        }
+    }
+}
+
 pub(super) struct ImportedCommentElementState {
     pub(super) open_in_github_button: Option<ViewHandle<ActionButton>>,
     pub(super) open_in_code_review_button: ViewHandle<ActionButton>,
@@ -954,6 +971,9 @@ pub struct AIBlock {
     /// Map from collapsible block message IDs (reasoning or summarization) to their states.
     collapsible_block_states: HashMap<MessageId, CollapsibleElementState>,
 
+    /// Map from agent action IDs to their collapsible tool-usage summary state.
+    action_summary_states: HashMap<AIAgentActionId, ActionSummaryState>,
+
     /// Map from suggested prompt action ID to its view handle and status.
     unit_tests_suggestions: HashMap<AIAgentActionId, ViewHandle<SuggestedUnitTestsView>>,
 
@@ -1070,6 +1090,12 @@ pub struct AIBlock {
     terminal_view_handle: WeakViewHandle<TerminalView>,
 
     ask_user_question_view: Option<ViewHandle<AskUserQuestionView>>,
+
+    /// Staged inline thumbnails for the submitted image attachments, in the same
+    /// order as the image entries in `attachment_names`. Populated at
+    /// construction so the user query renders the actual image instead of a
+    /// filename chip. Each entry is `(asset source, aspect ratio = width/height)`.
+    submitted_image_thumbnails: Vec<(AssetSource, f32)>,
 }
 
 struct EmbeddedCodeEditorView {
@@ -1444,6 +1470,28 @@ impl AIBlock {
             comment_states.insert(id, state);
         }
 
+        // Stage inline thumbnails for any submitted image attachments so the user
+        // query can render the actual image rather than a filename chip. Collect
+        // the encoded bytes first (immutable borrow of `ctx`), then stage into the
+        // asset cache (mutable borrow).
+        let submitted_image_thumbnails = if FeatureFlag::ImageAsContext.is_enabled() {
+            let submitted_images: Vec<Vec<u8>> = model
+                .inputs_to_render(ctx)
+                .iter()
+                .filter_map(|input| input.context())
+                .flat_map(|contexts| contexts.iter())
+                .filter_map(|context| match context {
+                    AIAgentContext::Image(image) => base64::engine::general_purpose::STANDARD
+                        .decode(&image.data)
+                        .ok(),
+                    _ => None,
+                })
+                .collect();
+            stage_submitted_image_thumbnails(submitted_images, client_ids.client_exchange_id, ctx)
+        } else {
+            Vec::new()
+        };
+
         let mut me = Self {
             model,
             terminal_model,
@@ -1475,6 +1523,7 @@ impl AIBlock {
             todo_list_states: Default::default(),
             comment_states,
             collapsible_block_states: Default::default(),
+            action_summary_states: Default::default(),
             unit_tests_suggestions: Default::default(),
             secret_redaction_state,
             find_state: FindState::default(),
@@ -1515,6 +1564,7 @@ impl AIBlock {
             resolved_blocklist_image_sources: Default::default(),
             terminal_view_handle,
             ask_user_question_view: None,
+            submitted_image_thumbnails,
         };
         me.run_secret_redaction_on_user_query(me.client_ids.conversation_id, ctx);
         me.spawn_link_detection(ctx);
@@ -2216,7 +2266,12 @@ impl AIBlock {
             let orchestration_message_display_mode =
                 AISettings::as_ref(ctx).orchestration_message_display_mode;
             match &message.message {
-                AIAgentOutputMessageType::Action(AIAgentAction { action, .. }) => {
+                AIAgentOutputMessageType::Action(AIAgentAction { action, id, .. }) => {
+                    // Register collapsible tool-usage summary state (collapsed by
+                    // default) so the toggle mouse state is created once, not while
+                    // rendering.
+                    self.action_summary_states.entry(id.clone()).or_default();
+
                     if let Some(state) = default_collapsible_state_for_orchestration_action(
                         action,
                         orchestration_message_display_mode,
@@ -3064,6 +3119,13 @@ impl AIBlock {
                 );
             });
         }
+        // Persist the choice globally so that picking "Auto-approve" is remembered
+        // across conversations and app restarts, until the user turns it off.
+        AISettings::handle(ctx).update(ctx, |settings, ctx| {
+            report_if_error!(settings
+                .agent_mode_auto_approve_all_actions
+                .set_value(true, ctx));
+        });
     }
 
     fn mark_ask_user_question_speedbump_as_shown(ctx: &mut ViewContext<Self>) {
@@ -4719,7 +4781,8 @@ impl AIBlock {
                 }
 
                 BlocklistAIActionEvent::InitProject(_)
-                | BlocklistAIActionEvent::ToggleCodeReview(_) => {}
+                | BlocklistAIActionEvent::ToggleCodeReview(_)
+                | BlocklistAIActionEvent::OpenBrowserPreview { .. } => {}
             }
         });
     }
@@ -5968,6 +6031,36 @@ pub(super) fn attachment_names(inputs: &[AIAgentInput]) -> Vec<(AttachmentType, 
     names
 }
 
+/// Stages the decoded bytes of each submitted image attachment into the asset
+/// cache (keyed deterministically by exchange + index) and returns a raw asset
+/// source plus aspect ratio (width / height) per image, in submission order. The
+/// user query view uses these to render inline thumbnails.
+fn stage_submitted_image_thumbnails(
+    images: Vec<Vec<u8>>,
+    exchange_id: AIAgentExchangeId,
+    ctx: &mut ViewContext<AIBlock>,
+) -> Vec<(AssetSource, f32)> {
+    use image::GenericImageView;
+    images
+        .into_iter()
+        .enumerate()
+        .map(|(index, bytes)| {
+            let aspect = image::load_from_memory(&bytes)
+                .ok()
+                .map(|img| {
+                    let (width, height) = img.dimensions();
+                    width.max(1) as f32 / height.max(1) as f32
+                })
+                .unwrap_or(1.0);
+            let id = format!("submitted-attachment-thumb-{exchange_id}-{index}");
+            AssetCache::handle(ctx).update(ctx, |asset_cache, ctx| {
+                asset_cache.insert_raw_asset_bytes::<ImageType>(id.clone(), &bytes, ctx);
+            });
+            (AssetSource::Raw { id }, aspect)
+        })
+        .collect()
+}
+
 #[derive(Clone, Debug)]
 pub enum AIBlockEvent {
     /// Emitted when the AI block is "finished", meaning it will no longer receive any more output
@@ -6204,6 +6297,8 @@ pub enum AIBlockAction {
     },
     ToggleTodoListExpanded(MessageId),
     ToggleCollapsibleBlockExpanded(MessageId),
+    /// Toggle the collapsed/expanded state of a tool-usage summary row.
+    ToggleActionSummaryExpanded(AIAgentActionId),
     SetCollapsibleBlockPinnedToBottom {
         message_id: MessageId,
         pinned_to_bottom: bool,
@@ -6754,6 +6849,11 @@ impl TypedActionView for AIBlock {
                     state.toggle_expansion();
                 }
             }
+            AIBlockAction::ToggleActionSummaryExpanded(id) => {
+                if let Some(state) = self.action_summary_states.get_mut(id) {
+                    state.is_expanded = !state.is_expanded;
+                }
+            }
             AIBlockAction::ToggleCodeReviewPane => {
                 ctx.emit(AIBlockEvent::ToggleCodeReviewPane {
                     entrypoint: CodeReviewPaneEntrypoint::AgentModeRunning,
@@ -6890,6 +6990,7 @@ impl TypedActionView for AIBlock {
                 ctx.dispatch_typed_action(&WorkspaceAction::OpenLightbox {
                     images,
                     initial_index,
+                    auto_copy: false,
                 });
             }
             AIBlockAction::OpenSubmittedAttachmentLightbox { image_index } => {
@@ -6957,6 +7058,7 @@ impl TypedActionView for AIBlock {
                 ctx.dispatch_typed_action(&WorkspaceAction::OpenLightbox {
                     images,
                     initial_index,
+                    auto_copy: false,
                 });
             }
         }

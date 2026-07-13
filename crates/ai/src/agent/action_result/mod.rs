@@ -60,6 +60,8 @@ pub enum AIAgentActionResultType {
 
     OpenCodeReview,
 
+    OpenBrowserPreview,
+
     InitProject,
 
     /// The output of a read documents action.
@@ -320,9 +322,9 @@ impl Display for AIAgentActionResultType {
             AIAgentActionResultType::ReadGithubIssue(result) => result.fmt(f),
             AIAgentActionResultType::ListGithubIssues(result) => result.fmt(f),
             AIAgentActionResultType::ReplyToPrComment(result) => result.fmt(f),
-            AIAgentActionResultType::OpenCodeReview | AIAgentActionResultType::InitProject => {
-                Ok(())
-            }
+            AIAgentActionResultType::OpenCodeReview
+            | AIAgentActionResultType::OpenBrowserPreview
+            | AIAgentActionResultType::InitProject => Ok(()),
         }
     }
 }
@@ -901,6 +903,7 @@ impl AIAgentActionResultType {
             }
             AIAgentActionResultType::SuggestPrompt(_) => "The suggested prompt",
             AIAgentActionResultType::OpenCodeReview => "Open code review",
+            AIAgentActionResultType::OpenBrowserPreview => "Open browser preview",
             AIAgentActionResultType::InsertReviewComments(_) => "Insert code review comments",
             AIAgentActionResultType::InitProject => "Initialize project",
             AIAgentActionResultType::ReadDocuments(_) => "The requested document content",
@@ -958,6 +961,7 @@ impl AIAgentActionResultType {
             | Self::InsertReviewComments(InsertReviewCommentsResult::Success { .. })
             | Self::RequestComputerUse(RequestComputerUseResult::Approved { .. })
             | Self::OpenCodeReview
+            | Self::OpenBrowserPreview
             | Self::ReadSkill(ReadSkillResult::Success { .. })
             | Self::FetchConversation(FetchConversationResult::Success { .. })
             | Self::StartAgent(StartAgentResult::Success { .. })

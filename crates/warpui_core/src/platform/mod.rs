@@ -460,6 +460,51 @@ pub trait Window: 'static + WindowContext + std::any::Any {
     fn callbacks(&self) -> &WindowCallbacks;
 
     fn as_any(&self) -> &dyn std::any::Any;
+
+    /// Creates (if not already present) a native embedded web view attached to
+    /// this window's content view, keyed by `id`. Defaults to a no-op on
+    /// platforms without embedded web view support.
+    fn ensure_web_view(&self, id: &str) {
+        let _ = id;
+    }
+
+    /// Navigates the web view identified by `id` to `url`. No-op if the web
+    /// view does not exist or the platform is unsupported.
+    fn web_view_navigate(&self, id: &str, url: &str) {
+        let _ = (id, url);
+    }
+
+    /// Positions and sizes the web view identified by `id`. `rect` is expressed
+    /// in window logical points with a top-left origin (WarpUI layout space);
+    /// platform implementations are responsible for any coordinate conversion.
+    fn web_view_set_frame(&self, id: &str, rect: RectF) {
+        let _ = (id, rect);
+    }
+
+    /// Shows or hides the web view identified by `id`.
+    fn web_view_set_hidden(&self, id: &str, hidden: bool) {
+        let _ = (id, hidden);
+    }
+
+    /// Reloads the current page in the web view identified by `id`.
+    fn web_view_reload(&self, id: &str) {
+        let _ = id;
+    }
+
+    /// Navigates back in the web view identified by `id`.
+    fn web_view_go_back(&self, id: &str) {
+        let _ = id;
+    }
+
+    /// Navigates forward in the web view identified by `id`.
+    fn web_view_go_forward(&self, id: &str) {
+        let _ = id;
+    }
+
+    /// Removes the web view identified by `id`, if present.
+    fn destroy_web_view(&self, id: &str) {
+        let _ = id;
+    }
 }
 
 pub trait WindowContext {

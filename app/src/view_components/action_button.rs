@@ -90,6 +90,10 @@ pub struct ActionButton {
 
     /// If true, renders the keybinding before the label (but after the icon).
     keybinding_before_label: bool,
+
+    /// Overrides the default corner radius. Useful for making an icon-only button
+    /// fully circular (e.g. `CornerRadius::with_all(Radius::Percentage(50.))`).
+    corner_radius_override: Option<CornerRadius>,
 }
 
 pub type ClickHandler = Box<dyn Fn(&mut EventContext) + 'static>;
@@ -242,6 +246,7 @@ impl ActionButton {
             adjoined_side: None,
             compact_keybinding: false,
             keybinding_before_label: false,
+            corner_radius_override: None,
         }
     }
 
@@ -252,6 +257,14 @@ impl ActionButton {
     /// Set the icon shown to the left of this button.
     pub fn with_icon(mut self, icon: Icon) -> Self {
         self.icon = Some(icon);
+        self
+    }
+
+    /// Override the button's corner radius. Pass
+    /// `CornerRadius::with_all(Radius::Percentage(50.))` on an icon-only button to
+    /// render it as a circle.
+    pub fn with_corner_radius(mut self, corner_radius: CornerRadius) -> Self {
+        self.corner_radius_override = Some(corner_radius);
         self
     }
 
@@ -840,11 +853,13 @@ impl View for ActionButton {
                 )
             }
 
-            let corner_radius = match self.adjoined_side {
-                Some(AdjoinedSide::Left) => CornerRadius::with_right(Radius::Pixels(4.)),
-                Some(AdjoinedSide::Right) => CornerRadius::with_left(Radius::Pixels(4.)),
-                None => CornerRadius::with_all(Radius::Pixels(4.)),
-            };
+            let corner_radius =
+                self.corner_radius_override
+                    .unwrap_or_else(|| match self.adjoined_side {
+                        Some(AdjoinedSide::Left) => CornerRadius::with_right(Radius::Pixels(4.)),
+                        Some(AdjoinedSide::Right) => CornerRadius::with_left(Radius::Pixels(4.)),
+                        None => CornerRadius::with_all(Radius::Pixels(4.)),
+                    });
 
             let border = if let Some(adjoined_side_border) = theme.adjoined_side_border(appearance)
             {
@@ -1318,12 +1333,17 @@ impl ButtonSize {
             ButtonSize::XSmall => 14.,
             ButtonSize::InlineActionHeader => appearance.monospace_font_size(),
             ButtonSize::InputPrompt => appearance.monospace_font_size(),
-            ButtonSize::UDIButton => appearance.monospace_font_size() - 1.0,
-            ButtonSize::UDIPromptChip => appearance.monospace_font_size() - 1.0,
-            ButtonSize::AgentInputButton => app.font_cache().line_height(
-                appearance.monospace_font_size(),
-                DEFAULT_UI_LINE_HEIGHT_RATIO / 1.4,
-            ),
+            // Composer chip icons: base is the reduced fork grid font; render the
+            // UDI/agent-input icons 3pts larger so they read clearly in the input row.
+            ButtonSize::UDIButton => appearance.monospace_font_size() + 3.0,
+            ButtonSize::UDIPromptChip => appearance.monospace_font_size() + 3.0,
+            // Icon-only agent-input buttons (`+`, mic, lightning) are square boxes of
+            // `button_height`; the glyph is centered inside. Sizing the icon off
+            // `line_height` left it at only ~60% of the box (and the +/-2pt tweaks
+            // were imperceptible). Render it as a fixed fraction of the button square
+            // so the glyph is clearly visible; a high fraction keeps the glyph large
+            // even though the square is kept short to tighten the composer row.
+            ButtonSize::AgentInputButton => self.button_height(appearance, app) * 0.9,
         }
     }
 
@@ -1334,9 +1354,11 @@ impl ButtonSize {
             ButtonSize::XSmall => 12.,
             ButtonSize::InlineActionHeader => appearance.monospace_font_size() - 2.,
             ButtonSize::InputPrompt => appearance.monospace_font_size(),
-            ButtonSize::UDIButton => appearance.monospace_font_size() - 1.0,
-            ButtonSize::UDIPromptChip => appearance.monospace_font_size() - 1.0,
-            ButtonSize::AgentInputButton => appearance.monospace_font_size() - 1.0,
+            // Composer chip labels: base is the reduced fork grid font; render the
+            // UDI/agent-input labels 2pts larger so they read clearly in the input row.
+            ButtonSize::UDIButton => appearance.monospace_font_size() + 2.0,
+            ButtonSize::UDIPromptChip => appearance.monospace_font_size() + 2.0,
+            ButtonSize::AgentInputButton => appearance.monospace_font_size() + 2.0,
         }
     }
 
@@ -1464,9 +1486,12 @@ impl ButtonSize {
                 2. * vertical_padding + self.font_size(appearance)
             }
             ButtonSize::AgentInputButton => {
-                // Add 1 to the vertical padding to account for the border.
-                let vertical_padding =
-                    1. + crate::context_chips::spacing::UDI_CHIP_VERTICAL_PADDING;
+                // Keep the icon-only footer buttons (`+`, mic, lightning) a tight
+                // square so the composer row/box stays short vertically; the glyph is
+                // sized as a high fraction of this height (see `icon_size`) so it still
+                // reads large. `+1` keeps a little breathing room for any bordered
+                // variants (e.g. remote-control).
+                let vertical_padding = 1.;
                 let line_height = app
                     .font_cache()
                     .line_height(self.font_size(appearance), appearance.line_height_ratio());

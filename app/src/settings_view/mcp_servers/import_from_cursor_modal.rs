@@ -46,9 +46,9 @@ use crate::view_components::action_button::{
 /// Mask shown in place of templatized env/header variable values.
 const MASKED_VALUE: &str = "••••••••";
 const SECRETS_WARNING: &str =
-    "Environment and header values (including secrets) will be stored in Warp's MCP storage.";
-const EMPTY_SCAN_TEXT: &str = "No MCP servers were found in your Cursor configuration.";
-const SCANNING_TEXT: &str = "Scanning Cursor configuration files…";
+    "Environment and header values (including secrets) will be stored in Bang's MCP storage.";
+const EMPTY_SCAN_TEXT: &str = "No MCP servers were found in your other tools' configurations.";
+const SCANNING_TEXT: &str = "Scanning for MCP servers…";
 
 pub enum ImportFromCursorModalBodyEvent {
     Cancel,
@@ -213,10 +213,15 @@ impl ImportFromCursorModalBody {
         }
     }
 
-    /// Clears any previous scan results and scans the given Cursor config
-    /// paths asynchronously, using the same parse path as the file-based MCP
-    /// watcher.
-    pub fn begin_scan(&mut self, config_paths: Vec<PathBuf>, ctx: &mut ViewContext<Self>) {
+    /// Clears any previous scan results and scans the given `(provider, path)`
+    /// config targets asynchronously, using the same parse path as the
+    /// file-based MCP watcher. Each target is parsed with its own provider so a
+    /// single scan can span multiple tools (Claude, Codex, Agents, Cursor, …).
+    pub fn begin_scan(
+        &mut self,
+        scan_targets: Vec<(MCPProvider, PathBuf)>,
+        ctx: &mut ViewContext<Self>,
+    ) {
         self.candidates.clear();
         cfg_if::cfg_if! {
             if #[cfg(feature = "local_fs")] {
@@ -224,8 +229,8 @@ impl ImportFromCursorModalBody {
                 ctx.spawn(
                     async move {
                         let mut results = Vec::new();
-                        for path in config_paths {
-                            let servers = parse_mcp_config_file(&path, MCPProvider::Cursor).await;
+                        for (provider, path) in scan_targets {
+                            let servers = parse_mcp_config_file(&path, provider).await;
                             results.push((path, servers));
                         }
                         results
@@ -235,7 +240,7 @@ impl ImportFromCursorModalBody {
                     },
                 );
             } else {
-                let _ = (config_paths, ctx);
+                let _ = (scan_targets, ctx);
                 self.scanning = false;
             }
         }
@@ -322,7 +327,7 @@ impl ImportFromCursorModalBody {
         let theme = appearance.theme();
 
         let cursor_icon = ConstrainedBox::new(
-            Icon::CursorLogo
+            Icon::Import
                 .to_warpui_icon(theme.active_ui_text_color())
                 .finish(),
         )
@@ -331,7 +336,7 @@ impl ImportFromCursorModalBody {
         .finish();
 
         let title = Text::new(
-            "Import MCP servers from Cursor".to_string(),
+            "Import MCP servers".to_string(),
             appearance.ui_font_family(),
             appearance.header_font_size(),
         )

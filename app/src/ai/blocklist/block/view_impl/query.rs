@@ -5,11 +5,13 @@
 use pathfinder_color::ColorU;
 use warp_core::features::FeatureFlag;
 use warp_core::ui::theme::color::internal_colors;
+use warpui::assets::asset_cache::AssetSource;
 use warpui::elements::{
-    Container, CornerRadius, DispatchEventResult, EventHandler, Flex, MainAxisAlignment,
-    MainAxisSize, ParentElement, Radius, Shrinkable, Wrap,
+    ConstrainedBox, Container, CornerRadius, DispatchEventResult, EventHandler, Flex,
+    Image as WarpImage, MainAxisAlignment, MainAxisSize, ParentElement, Radius, Shrinkable, Wrap,
 };
 use warpui::fonts::{Properties, Style, Weight};
+use warpui::image_cache::CacheOption;
 use warpui::ui_components::chip::Chip;
 use warpui::ui_components::components::{Coords, UiComponent, UiComponentStyles};
 use warpui::{AppContext, Element, SingletonEntity};
@@ -35,6 +37,9 @@ pub(super) struct Props<'a> {
     pub(super) is_selecting_text: bool,
     pub(super) is_ai_input_enabled: bool,
     pub(super) attachments: &'a [(AttachmentType, String)],
+    /// Staged inline thumbnails for the image attachments, in the same order as
+    /// the `AttachmentType::Image` entries in `attachments`.
+    pub(super) image_thumbnails: &'a [(AssetSource, f32)],
     pub(super) find_context: Option<FindContext<'a>>,
 }
 
@@ -52,6 +57,7 @@ pub(super) fn maybe_render(props: Props, app: &AppContext) -> Option<Box<dyn Ele
             props.is_selecting_text,
             props.is_ai_input_enabled,
             props.attachments,
+            props.image_thumbnails,
             props.find_context,
             app,
         )
@@ -71,6 +77,7 @@ pub(crate) fn render_query(
     is_selecting: bool,
     is_ai_input_enabled: bool,
     attachments: &[(AttachmentType, String)],
+    image_thumbnails: &[(AssetSource, f32)],
     find_context: Option<FindContext>,
     app: &AppContext,
 ) -> Box<dyn Element> {
@@ -107,7 +114,11 @@ pub(crate) fn render_query(
     let mut query = Flex::column().with_child(text_element.finish());
 
     if FeatureFlag::ImageAsContext.is_enabled() {
-        query = query.with_child(render_attachments(attachments, appearance));
+        query = query.with_child(render_attachments(
+            attachments,
+            image_thumbnails,
+            appearance,
+        ));
     }
 
     Flex::row()
@@ -119,55 +130,32 @@ pub(crate) fn render_query(
 
 fn render_attachments(
     attachments: &[(AttachmentType, String)],
+    image_thumbnails: &[(AssetSource, f32)],
     appearance: &Appearance,
 ) -> Box<dyn Element> {
     let mut image_index = 0;
     let chips = attachments.iter().map(|(attachment_type, file_name)| {
-        let icon = match attachment_type {
-            AttachmentType::Image => Icon::Image,
-            AttachmentType::File => Icon::File,
-        };
-        let chip = Chip::new(
-            file_name.clone(),
-            UiComponentStyles {
-                margin: Some(Coords {
-                    top: 0.,
-                    bottom: 0.,
-                    left: 0.,
-                    right: 6.,
-                }),
-                font_family_id: Some(appearance.ui_font_family()),
-                font_size: Some(appearance.monospace_font_size()),
-                font_color: Some(blended_colors::text_sub(
-                    appearance.theme(),
-                    appearance.theme().background(),
-                )),
-                border_width: Some(1.),
-                border_color: Some(internal_colors::neutral_4(appearance.theme()).into()),
-                border_radius: Some(CornerRadius::with_all(Radius::Pixels(5.))),
-                ..Default::default()
-            },
-        )
-        .with_icon(icon.to_warpui_icon(
-            blended_colors::text_sub(appearance.theme(), appearance.theme().background()).into(),
-        ))
-        .build()
-        .finish();
-
         if matches!(attachment_type, AttachmentType::Image) {
             let clicked_image_index = image_index;
+            let thumbnail = image_thumbnails.get(image_index).cloned();
             image_index += 1;
-            EventHandler::new(chip)
+            // Prefer an inline thumbnail of the actual image; fall back to the
+            // icon + filename chip only if the thumbnail couldn't be staged.
+            let content = match thumbnail {
+                Some((asset_source, aspect)) => render_image_thumbnail(asset_source, aspect),
+                None => render_filename_chip(AttachmentType::Image, file_name, appearance),
+            };
+            return EventHandler::new(content)
                 .on_left_mouse_down(move |ctx, _, _| {
                     ctx.dispatch_typed_action(AIBlockAction::OpenSubmittedAttachmentLightbox {
                         image_index: clicked_image_index,
                     });
                     DispatchEventResult::StopPropagation
                 })
-                .finish()
-        } else {
-            chip
+                .finish();
         }
+
+        render_filename_chip(*attachment_type, file_name, appearance)
     });
 
     if attachments.is_empty() {
@@ -183,4 +171,73 @@ fn render_attachments(
             .with_padding_top(7.)
             .finish()
     }
+}
+
+/// Renders an inline thumbnail of a submitted image attachment. The box is sized
+/// to the image's exact aspect (captured at staging time) so `.contain()` fills
+/// it with no letterboxing.
+fn render_image_thumbnail(asset_source: AssetSource, aspect: f32) -> Box<dyn Element> {
+    const ATTACHMENT_THUMBNAIL_HEIGHT: f32 = 36.;
+    const ATTACHMENT_THUMBNAIL_MAX_WIDTH: f32 = 160.;
+    let aspect = aspect.max(0.01);
+    let (width, height) = if aspect >= ATTACHMENT_THUMBNAIL_MAX_WIDTH / ATTACHMENT_THUMBNAIL_HEIGHT
+    {
+        (
+            ATTACHMENT_THUMBNAIL_MAX_WIDTH,
+            ATTACHMENT_THUMBNAIL_MAX_WIDTH / aspect,
+        )
+    } else {
+        (
+            ATTACHMENT_THUMBNAIL_HEIGHT * aspect,
+            ATTACHMENT_THUMBNAIL_HEIGHT,
+        )
+    };
+    let image = WarpImage::new(asset_source, CacheOption::BySize)
+        .contain()
+        .with_corner_radius(CornerRadius::with_all(Radius::Pixels(4.)));
+    Container::new(
+        ConstrainedBox::new(Box::new(image))
+            .with_width(width)
+            .with_height(height)
+            .finish(),
+    )
+    .with_margin_right(6.)
+    .finish()
+}
+
+fn render_filename_chip(
+    attachment_type: AttachmentType,
+    file_name: &str,
+    appearance: &Appearance,
+) -> Box<dyn Element> {
+    let icon = match attachment_type {
+        AttachmentType::Image => Icon::Image,
+        AttachmentType::File => Icon::File,
+    };
+    Chip::new(
+        file_name.to_owned(),
+        UiComponentStyles {
+            margin: Some(Coords {
+                top: 0.,
+                bottom: 0.,
+                left: 0.,
+                right: 6.,
+            }),
+            font_family_id: Some(appearance.ui_font_family()),
+            font_size: Some(appearance.monospace_font_size()),
+            font_color: Some(blended_colors::text_sub(
+                appearance.theme(),
+                appearance.theme().background(),
+            )),
+            border_width: Some(1.),
+            border_color: Some(internal_colors::neutral_4(appearance.theme()).into()),
+            border_radius: Some(CornerRadius::with_all(Radius::Pixels(5.))),
+            ..Default::default()
+        },
+    )
+    .with_icon(icon.to_warpui_icon(
+        blended_colors::text_sub(appearance.theme(), appearance.theme().background()).into(),
+    ))
+    .build()
+    .finish()
 }

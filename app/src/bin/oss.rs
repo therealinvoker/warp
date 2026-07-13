@@ -24,6 +24,12 @@ fn main() -> Result<()> {
     if cfg!(debug_assertions) {
         state = state.with_additional_features(warp_core::features::DEBUG_FLAGS);
     }
+    // Personal-fork: surface the embedded browser preview tab (and its toolbelt
+    // launcher) in the OSS build, since it otherwise only ships in dogfood.
+    #[cfg(target_os = "macos")]
+    {
+        state = state.with_additional_features(&[warp_core::features::FeatureFlag::BrowserPreview]);
+    }
     ChannelState::set(state);
 
     warp::run()
@@ -31,7 +37,14 @@ fn main() -> Result<()> {
 
 // If we're not using an external plist, embed the following as the Info.plist.
 #[cfg(all(not(feature = "extern_plist"), target_os = "macos"))]
-embed_plist::embed_info_plist_bytes!(r#"
+// NOTE: `CFBundleIdentifier` / `CFBundleName` / `CFBundleDisplayName` are
+// injected at build time from `BANG_EMBED_BUNDLE_ID` / `BANG_EMBED_BUNDLE_NAME`
+// (set by app/build.rs from WARP_APP_BUNDLE_ID / WARP_APP_DISPLAY_NAME, with the
+// stable identity as the default). This must stay in sync with the .app bundle's
+// Info.plist because macOS uses THIS embedded plist for microphone/privacy (TCC)
+// attribution and the Control Center mic indicator. See app/build.rs.
+embed_plist::embed_info_plist_bytes!(concat!(
+    r#"
     <?xml version="1.0" encoding="UTF-8"?>
     <!DOCTYPE plist PUBLIC "-//Apple Computer//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
     <plist version="1.0">
@@ -39,15 +52,21 @@ embed_plist::embed_info_plist_bytes!(r#"
     <key>CFBundleDevelopmentRegion</key>
     <string>English</string>
     <key>CFBundleDisplayName</key>
-    <string>WarpOss</string>
+    <string>"#,
+    env!("BANG_EMBED_BUNDLE_NAME"),
+    r#"</string>
     <key>CFBundleExecutable</key>
-    <string>warp-oss</string>
+    <string>bang</string>
     <key>CFBundleIdentifier</key>
-    <string>dev.warp.WarpOss</string>
+    <string>"#,
+    env!("BANG_EMBED_BUNDLE_ID"),
+    r#"</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
-    <string>WarpOss</string>
+    <string>"#,
+    env!("BANG_EMBED_BUNDLE_NAME"),
+    r#"</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
@@ -64,4 +83,5 @@ embed_plist::embed_info_plist_bytes!(r#"
     <string>© 2026, Denver Technologies, Inc</string>
     </dict>
     </plist>
-"#.as_bytes());
+"#
+).as_bytes());

@@ -20,6 +20,9 @@ pub mod pane_manager;
 #[path = "mod_test.rs"]
 mod tests;
 
+use std::collections::HashSet;
+
+use ai::skills::{home_skills_path, SkillProvider};
 use warpui::elements::{
     Border, ChildView, Clipped, ClippedScrollStateHandle, ClippedScrollable, ConstrainedBox,
     Container, CornerRadius, CrossAxisAlignment, Expanded, Fill, Flex, Hoverable, MainAxisSize,
@@ -33,10 +36,6 @@ use warpui::{
     AppContext, Element, Entity, EventContext, ModelHandle, SingletonEntity, TypedActionView, View,
     ViewContext, ViewHandle,
 };
-
-use std::collections::HashSet;
-
-use ai::skills::{home_skills_path, SkillProvider};
 
 use crate::ai::execution_profiles::AIExecutionProfile;
 use crate::ai::facts::{AIFact, AIMemory};
@@ -1459,8 +1458,11 @@ impl BackingView for MarketplaceDirectoryView {
     ) -> HeaderContent {
         let appearance = Appearance::as_ref(app);
         // Connectors opens as a full tab (not a split pane), so the framework's
-        // built-in close button never shows. Add an always-visible X that closes
-        // the pane.
+        // built-in close button never shows (it's gated on `is_in_split_pane`).
+        // Add an always-visible X. This button is composed into the pane-header
+        // view's layout, so dispatching the same `PaneHeaderAction::Close` that the
+        // framework's own close button uses routes to the header view, which emits
+        // `Event::Close` and drives `BackingView::close()` — the proven close path.
         let close_button = icon_button(
             appearance,
             Icon::X,
@@ -1469,7 +1471,12 @@ impl BackingView for MarketplaceDirectoryView {
         )
         .build()
         .on_click(|ctx, _, _| {
-            ctx.dispatch_typed_action(MarketplaceDirectoryAction::Close);
+            ctx.dispatch_typed_action(
+                view::PaneHeaderAction::<
+                    <Self as BackingView>::PaneHeaderOverflowMenuAction,
+                    <Self as BackingView>::CustomAction,
+                >::Close,
+            );
         })
         .with_cursor(Cursor::PointingHand)
         .finish();

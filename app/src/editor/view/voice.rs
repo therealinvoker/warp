@@ -178,6 +178,13 @@ impl EditorView {
         ctx.notify();
     }
 
+    /// Cancel any in-flight voice recording *and* pending transcription without
+    /// inserting anything. Used by the voice overlay on submit so an in-flight
+    /// window doesn't re-insert the just-submitted text.
+    pub fn cancel_voice_input(&mut self, ctx: &mut ViewContext<Self>) {
+        self.stop_voice_input(true, ctx);
+    }
+
     pub(super) fn stop_transcribing_voice_input(&mut self, ctx: &mut ViewContext<Self>) {
         VoiceInput::handle(ctx).update(ctx, |voice, _| voice.set_transcribing_active(false));
         if let VoiceInputState::Transcribing { handle, .. } = &self.voice_input_state {
@@ -498,6 +505,14 @@ impl EditorView {
             Err(e) => match e {
                 TranscribeError::QuotaLimit => {
                     self.voice_error_toast(super::VOICE_LIMIT_HIT_TOAST_TEXT, ctx)
+                }
+                // The transcription service couldn't be reached — the backend
+                // doesn't have voice set up, or is overloaded/unreachable. Show a
+                // friendlier "temporarily offline" message rather than implying
+                // the user's audio was bad.
+                TranscribeError::Transport | TranscribeError::ServerOverloaded => {
+                    log::warn!("Voice transcription unavailable: {e:?}");
+                    self.voice_error_toast(super::VOICE_OFFLINE_TOAST_TEXT, ctx)
                 }
                 _ => {
                     log::error!("Failed to transcribe voice input: {e:?}");

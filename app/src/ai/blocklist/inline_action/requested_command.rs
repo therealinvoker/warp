@@ -1023,7 +1023,7 @@ impl RequestedCommandView {
             .as_ref(app)
             .get_action_status(&self.action_id);
 
-        let mut title: Cow<'static, str>;
+        let title: Cow<'static, str>;
         let mut font_override = None;
         let mut font_color_override = None;
 
@@ -1034,6 +1034,8 @@ impl RequestedCommandView {
                 .block_for_ai_action_id(&self.action_id),
             RequestedActionViewType::McpTool | RequestedActionViewType::GithubAction => None,
         };
+
+        let is_finished_command = matches!(action_status, Some(AIActionStatus::Finished(..)));
 
         match action_status {
             Some(AIActionStatus::Preprocessing) => {
@@ -1119,9 +1121,9 @@ impl RequestedCommandView {
                     }
                 } else if requested_command_block.is_some_and(|block| block.finished()) {
                     // If a finished command block exists but there's no action status,
-                    // treat the same as a finished command (normal text styling).
-                    title = self.get_header_title_text().into();
-                    font_override = Some(appearance.monospace_font_family());
+                    // treat the same as a finished command: show the abstract summary
+                    // label (the raw command is revealed on expand).
+                    title = self.collapsed_summary_label(true).into();
                 } else {
                     // If there is no action status and response is not streaming, it was cancelled
                     // mid-flight.
@@ -1141,19 +1143,20 @@ impl RequestedCommandView {
                 }
             }
             _ => {
-                title = self.get_header_title_text().into();
-
-                // Show cancelled command loading message when the command was cancelled during generation,
-                // and then restored with an empty title as a result.
-                if title.is_empty() {
+                // Collapsed tool-usage summary for a running/finished command: show an
+                // abstract Cursor-style label ("Ran command" / "Called <tool>" /
+                // "GitHub: <verb>") instead of the raw command. The command and its
+                // output are revealed when the header is expanded.
+                if self.command_text().trim().is_empty() {
+                    // Command was cancelled during generation and restored with an
+                    // empty command.
                     title = LOADING_MESSAGE.into();
                     font_color_override = Some(blended_colors::text_disabled(
                         appearance.theme(),
                         appearance.theme().surface_2(),
                     ));
                 } else {
-                    // Only use monospace font for actual command text
-                    font_override = Some(appearance.monospace_font_family());
+                    title = self.collapsed_summary_label(is_finished_command).into();
                 }
             }
         };
@@ -1319,6 +1322,36 @@ impl RequestedCommandView {
             // GitHub action command text is already a short human-readable
             // description.
             RequestedActionViewType::GithubAction => self.command_text().to_string(),
+        }
+    }
+
+    /// Abstract, Cursor-style label shown when a command's header is collapsed
+    /// into a tool-usage summary (present tense while running, past tense once
+    /// finished). The raw command and its output are revealed on expand.
+    fn collapsed_summary_label(&self, is_finished: bool) -> String {
+        match &self.action_type {
+            RequestedActionViewType::Command => if is_finished {
+                "Ran command"
+            } else {
+                "Running command"
+            }
+            .to_string(),
+            RequestedActionViewType::McpTool => {
+                let tool = self.extract_mcp_tool_name(self.command_text());
+                if tool.trim().is_empty() {
+                    "Called MCP tool".to_string()
+                } else {
+                    format!("Called {tool}")
+                }
+            }
+            RequestedActionViewType::GithubAction => {
+                let description = self.command_text();
+                if description.trim().is_empty() {
+                    "GitHub action".to_string()
+                } else {
+                    format!("GitHub: {description}")
+                }
+            }
         }
     }
 

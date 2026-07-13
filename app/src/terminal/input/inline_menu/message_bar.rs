@@ -6,10 +6,11 @@ use warpui::{AppContext, Entity, ModelHandle, SingletonEntity, View, ViewContext
 
 use crate::ai::blocklist::agent_view::{AgentViewController, AgentViewControllerEvent};
 use crate::terminal::input::inline_menu::model::InlineMenuModel;
+use crate::terminal::input::inline_menu::styles as inline_styles;
 use crate::terminal::input::inline_menu::{
     InlineMenuAction, InlineMenuMessageProvider, InlineMenuPositioner,
 };
-use crate::terminal::input::message_bar::common::render_standard_message_bar;
+use crate::terminal::input::message_bar::common::render_standard_message_bar_with_font;
 use crate::terminal::input::message_bar::{EmptyMessageProducer, MessageProvider};
 
 pub struct InlineMenuMessageBarArgs<A: InlineMenuAction, T: 'static + Send + Sync = ()> {
@@ -79,7 +80,17 @@ impl<A: InlineMenuAction, T: 'static + Send + Sync> View for InlineMenuMessageBa
             })
             .expect("Empty message producer always returns Some().");
 
-        let message_bar = render_standard_message_bar(message, None, app);
+        // Render the inline-menu nav/hint bar ("↑ ↓ to navigate", "esc to dismiss")
+        // a couple points larger than the terminal/agent status bars, matching the
+        // (also enlarged) menu rows.
+        let message_bar = render_standard_message_bar_with_font(
+            message,
+            None,
+            Some(inline_styles::message_bar_font_size(Appearance::as_ref(
+                app,
+            ))),
+            app,
+        );
         if !self.agent_view_controller.as_ref(app).is_active() {
             let is_rendering_below_input = self
                 .positioner

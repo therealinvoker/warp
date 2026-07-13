@@ -1101,6 +1101,14 @@ pub(crate) fn convert_tool_call_result_to_input(
             },
             context,
         }),
+        Some(ToolCallResultType::OpenBrowserPreview(_)) => Some(AIAgentInput::ActionResult {
+            result: AIAgentActionResult {
+                id: tool_call_id.into(),
+                task_id: task_id.clone(),
+                result: AIAgentActionResultType::OpenBrowserPreview,
+            },
+            context,
+        }),
         Some(ToolCallResultType::InitProject(_)) => Some(AIAgentInput::ActionResult {
             result: AIAgentActionResult {
                 id: tool_call_id.into(),
@@ -1860,6 +1868,7 @@ fn create_cancelled_result_for_tool_call(
             AIAgentActionResultType::SuggestPrompt(SuggestPromptResult::Cancelled)
         }
         ToolType::OpenCodeReview(_) => AIAgentActionResultType::OpenCodeReview,
+        ToolType::OpenBrowserPreview(_) => AIAgentActionResultType::OpenBrowserPreview,
         ToolType::InsertReviewComments(_) => {
             AIAgentActionResultType::InsertReviewComments(InsertReviewCommentsResult::Cancelled)
         }
