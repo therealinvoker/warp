@@ -110,6 +110,10 @@ pub struct RequestParams {
     pub context_window_limit: Option<u32>,
     pub mcp_context: Option<MCPContext>,
     pub planning_enabled: bool,
+    /// How verbose the agent's responses should be, 0 (most terse) to 10 (most
+    /// thorough). Forwarded to the backend in request metadata, where it becomes
+    /// a system-prompt directive.
+    pub response_verbosity: u8,
     should_redact_secrets: bool,
 
     /// User-provided API keys for AI providers (BYO API Key).
@@ -178,6 +182,7 @@ impl RequestParams {
             context_window_limit: None,
             mcp_context: None,
             planning_enabled: false,
+            response_verbosity: 5,
             should_redact_secrets: false,
             api_keys: None,
             custom_model_providers: None,
@@ -207,6 +212,7 @@ impl RequestParams {
         let ai_settings = AISettings::as_ref(app);
         let is_memory_enabled = ai_settings.is_memory_enabled(app);
         let warp_drive_context_enabled = ai_settings.is_warp_drive_context_enabled(app);
+        let response_verbosity = (*ai_settings.agent_verbosity).min(10) as u8;
 
         // Build MCP context - either grouped by server or flat lists based on feature flag
         let mcp_context = if FeatureFlag::MCPGroupedServerContext.is_enabled() {
@@ -374,6 +380,7 @@ impl RequestParams {
             warp_drive_context_enabled,
             mcp_context,
             planning_enabled: true,
+            response_verbosity,
             should_redact_secrets,
             api_keys,
             custom_model_providers,

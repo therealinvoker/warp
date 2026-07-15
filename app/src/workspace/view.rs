@@ -309,7 +309,7 @@ use crate::referral_theme_status::ReferralThemeEvent;
 use crate::remote_server::manager::RemoteServerManager;
 use crate::resource_center::{
     mark_feature_used_and_write_to_user_defaults, skip_tips_and_write_to_user_defaults,
-    ResourceCenterEvent, ResourceCenterPage, ResourceCenterView, Tip, TipAction, TipsCompleted,
+    ChangelogModalBody, Tip, TipAction, TipsCompleted,
 };
 use crate::reward_view::{RewardEvent, RewardKind, RewardView};
 use crate::root_view::{
@@ -573,9 +573,6 @@ const UPDATE_READY_TEXT: &str = "Update Bang";
 
 const TAB_BAR_OVERFLOW_MENU_WIDTH: f32 = 300.;
 
-#[cfg(not(target_family = "wasm"))]
-const RESOURCE_CENTER_WIDTH: f32 = 361.;
-
 // Ratio of terminal : theme chooser when theme chooser is active
 const THEME_CHOOSER_RATIO: f32 = 3.5;
 
@@ -592,7 +589,6 @@ pub(crate) const VERTICAL_TABS_PANEL_POSITION_ID: &str = "workspace_view:vertica
 const TAB_CONTENT_POSITION_ID: &str = "workspace_view:tab_content";
 
 const WELCOME_TIPS_POSITION_ID: &str = "welcome_tips_pill";
-const ELLIPSE_SVG_PATH: &str = "bundled/svg/ellipse.svg";
 
 const AI_ASSISTANT_BUTTON_ID: &str = "workspace_view:ai_assistant_button";
 
@@ -601,7 +597,6 @@ const VERSION_DEPRECATION_BANNER_TEXT: &str = "Your app is out of date and some 
 const VERSION_DEPRECATION_WITHOUT_PERMISSIONS_BANNER_TEXT: &str = "Some Bang features may not work as expected without updating immediately, but Bang is unable to perform the update.";
 
 const ASK_AI_ASSISTANT_KEYBINDING_NAME: &str = "workspace:toggle_ai_assistant";
-const TOGGLE_RESOURCE_CENTER_KEYBINDING_NAME: &str = "workspace:toggle_resource_center";
 
 /// Shared position ID for the new-session sidecar overlay. Used for both the
 /// `SavePosition` wrapper and the safe-zone rect lookup.
@@ -643,6 +638,7 @@ pub(crate) const NEW_TERMINAL_TAB_BINDING_NAME: &str = "workspace:new_terminal_t
 pub(crate) const NEW_AGENT_TAB_BINDING_NAME: &str = "workspace:new_agent_tab";
 pub(crate) const NEW_AMBIENT_AGENT_TAB_BINDING_NAME: &str = "workspace:new_ambient_agent_tab";
 pub(crate) const TOGGLE_TAB_CONFIGS_MENU_BINDING_NAME: &str = "workspace:toggle_tab_configs_menu";
+pub(crate) const TOGGLE_KEYBINDINGS_PAGE_BINDING_NAME: &str = "workspace:toggle_keybindings_page";
 
 // Editable left panel toolbelt keybindings.
 pub(crate) const LEFT_PANEL_PROJECT_EXPLORER_BINDING_NAME: &str =
@@ -652,9 +648,8 @@ pub(crate) const LEFT_PANEL_WARP_DRIVE_BINDING_NAME: &str = "workspace:left_pane
 pub(crate) const LEFT_PANEL_AGENT_CONVERSATIONS_BINDING_NAME: &str =
     "workspace:left_panel_agent_conversations";
 
-const KEYBINDINGS_TO_CACHE: [&str; 4] = [
+const KEYBINDINGS_TO_CACHE: [&str; 3] = [
     ASK_AI_ASSISTANT_KEYBINDING_NAME,
-    TOGGLE_RESOURCE_CENTER_KEYBINDING_NAME,
     SHOW_SETTINGS_KEYBINDING_NAME,
     TOGGLE_COMMAND_PALETTE_KEYBINDING_NAME,
 ];
@@ -1067,7 +1062,6 @@ pub struct Workspace {
     close_session_confirmation_dialog: ViewHandle<CloseSessionConfirmationDialog>,
     rewind_confirmation_dialog: ViewHandle<RewindConfirmationDialog>,
     delete_conversation_confirmation_dialog: ViewHandle<DeleteConversationConfirmationDialog>,
-    resource_center_view: ViewHandle<ResourceCenterView>,
     command_search_view: ViewHandle<CommandSearchView>,
     autoupdate_unable_to_update_banner_dismissed: bool,
     autoupdate_unable_to_launch_new_version: bool,
@@ -1087,6 +1081,9 @@ pub struct Workspace {
     show_header_toolbar_context_menu: Option<Vector2F>,
     theme_creator_modal: ViewHandle<ThemeCreatorModal>,
     theme_deletion_modal: ViewHandle<ThemeDeletionModal>,
+    /// "What's new" changelog modal, opened from the caret segment of the
+    /// side-nav "Update" split button (Bang/OSS fork).
+    changelog_modal: ViewHandle<Modal<ChangelogModalBody>>,
     suggested_agent_mode_workflow_modal: ViewHandle<SuggestedAgentModeWorkflowModal>,
     suggested_rule_modal: ViewHandle<SuggestedRuleModal>,
     oz_launch_modal: ModalWithTab<LaunchModal<OzLaunchSlide>>,
@@ -1735,22 +1732,6 @@ impl Workspace {
         ai_assistant_panel
     }
 
-    fn build_resource_center_view(
-        ctx: &mut ViewContext<Self>,
-        tips_completed: ModelHandle<TipsCompleted>,
-        changelog_model_handle: ModelHandle<ChangelogModel>,
-    ) -> ViewHandle<ResourceCenterView> {
-        let resource_center_view = ctx.add_typed_action_view(|ctx| {
-            ResourceCenterView::new(ctx, tips_completed.clone(), changelog_model_handle)
-        });
-
-        ctx.subscribe_to_view(&resource_center_view, |me, _, event, ctx| {
-            me.handle_resource_center_event(event, ctx);
-        });
-
-        resource_center_view
-    }
-
     fn build_settings_views(
         global_resource_handles: GlobalResourceHandles,
         tips_completed: ModelHandle<TipsCompleted>,
@@ -1843,6 +1824,21 @@ impl Workspace {
         });
 
         theme_creator_modal
+    }
+
+    fn build_changelog_modal(
+        changelog_model: ModelHandle<ChangelogModel>,
+        ctx: &mut ViewContext<Self>,
+    ) -> ViewHandle<Modal<ChangelogModalBody>> {
+        let body = ctx.add_typed_action_view(|ctx| ChangelogModalBody::new(changelog_model, ctx));
+        let changelog_modal = ctx.add_typed_action_view(|ctx| {
+            Modal::new(Some("What's new".to_string()), body, ctx).with_dismiss_on_click()
+        });
+        ctx.subscribe_to_view(&changelog_modal, move |me, _, event, ctx| {
+            me.handle_changelog_modal_event(event, ctx);
+        });
+
+        changelog_modal
     }
 
     fn build_theme_deletion_modal(ctx: &mut ViewContext<Self>) -> ViewHandle<ThemeDeletionModal> {
@@ -2909,8 +2905,7 @@ impl Workspace {
         let (settings_pane, theme_chooser_view) =
             Self::build_settings_views(global_resource_handles, tips_completed.clone(), ctx);
 
-        let resource_center_view =
-            Self::build_resource_center_view(ctx, tips_completed.clone(), changelog_model.clone());
+        let changelog_modal = Self::build_changelog_modal(changelog_model.clone(), ctx);
 
         let enable_auto_reload_modal = ctx.add_typed_action_view(EnableAutoReloadModal::new);
         ctx.subscribe_to_view(&enable_auto_reload_modal, |me, _, event, ctx| {
@@ -3360,6 +3355,7 @@ impl Workspace {
             new_session_dropdown_menu,
             show_new_session_dropdown_menu: None,
             changelog_model,
+            changelog_modal,
             welcome_tips_view_state,
             welcome_tips_view,
             palette,
@@ -3385,7 +3381,6 @@ impl Workspace {
             close_session_confirmation_dialog,
             rewind_confirmation_dialog,
             delete_conversation_confirmation_dialog,
-            resource_center_view,
             command_search_view,
             autoupdate_unable_to_update_banner_dismissed: false,
             autoupdate_unable_to_launch_new_version: false,
@@ -4234,6 +4229,7 @@ impl Workspace {
                 LeftPanelDisplayedTab::ConversationListView => ToolPanelView::ConversationListView,
                 LeftPanelDisplayedTab::CodeReview => ToolPanelView::CodeReview,
                 LeftPanelDisplayedTab::BrowserPreview => ToolPanelView::BrowserPreview,
+                LeftPanelDisplayedTab::KeyboardShortcuts => ToolPanelView::KeyboardShortcuts,
             };
             lp.restore_active_view_from_snapshot(active_view, ctx);
         });
@@ -4928,8 +4924,6 @@ impl Workspace {
         self.current_workspace_state.close_all_modals();
 
         if self.current_workspace_state.is_ai_assistant_panel_open {
-            // Close the resource center panel if we open the AI Assistant panel.
-            self.current_workspace_state.is_resource_center_open = false;
             ctx.focus(&self.ai_assistant_panel);
         } else {
             self.focus_active_tab(ctx);
@@ -4978,9 +4972,7 @@ impl Workspace {
             return FocusRegion::LeftPanel;
         }
 
-        if self.ai_assistant_panel.is_self_or_child_focused(app)
-            || self.resource_center_view.is_self_or_child_focused(app)
-        {
+        if self.ai_assistant_panel.is_self_or_child_focused(app) {
             return FocusRegion::RightPanel;
         }
 
@@ -5026,8 +5018,6 @@ impl Workspace {
     fn focus_right_region_entry(&mut self, ctx: &mut ViewContext<Self>) {
         if self.current_workspace_state.is_ai_assistant_panel_open {
             ctx.focus(&self.ai_assistant_panel);
-        } else if self.current_workspace_state.is_resource_center_open {
-            ctx.focus(&self.resource_center_view);
         }
     }
 
@@ -5165,14 +5155,10 @@ impl Workspace {
                 ctx.focus(&self.theme_chooser_view);
             } else if self.current_workspace_state.is_ai_assistant_panel_open {
                 ctx.focus(&self.ai_assistant_panel);
-            } else if self.current_workspace_state.is_resource_center_open {
-                ctx.focus(&self.resource_center_view);
             }
         }
-        // Starts from a right panel: AI panel, resource center (keyboard shortcuts page only)
-        else if self.ai_assistant_panel.is_self_or_child_focused(ctx)
-            || self.resource_center_view.is_self_or_child_focused(ctx)
-        {
+        // Starts from a right panel: AI panel
+        else if self.ai_assistant_panel.is_self_or_child_focused(ctx) {
             self.focus_active_tab(ctx);
         }
         // Starts from a left panel: Warp Drive
@@ -5181,8 +5167,6 @@ impl Workspace {
                 self.set_selected_object(None, ctx);
                 if self.current_workspace_state.is_ai_assistant_panel_open {
                     ctx.focus(&self.ai_assistant_panel);
-                } else if self.current_workspace_state.is_resource_center_open {
-                    ctx.focus(&self.resource_center_view);
                 }
             } else {
                 self.focus_active_tab(ctx);
@@ -5193,8 +5177,6 @@ impl Workspace {
             if self.current_workspace_state.is_right_panel_open() {
                 if self.current_workspace_state.is_ai_assistant_panel_open {
                     ctx.focus(&self.ai_assistant_panel);
-                } else if self.current_workspace_state.is_resource_center_open {
-                    ctx.focus(&self.resource_center_view);
                 }
             } else {
                 self.focus_active_tab(ctx);
@@ -5212,8 +5194,6 @@ impl Workspace {
         if self.active_tab_pane_group().is_self_or_child_focused(ctx) {
             if self.current_workspace_state.is_ai_assistant_panel_open {
                 ctx.focus(&self.ai_assistant_panel);
-            } else if self.current_workspace_state.is_resource_center_open {
-                ctx.focus(&self.resource_center_view);
             } else if self.current_workspace_state.is_warp_drive_open {
                 self.reset_focused_index_in_warp_drive(true, ctx);
             } else if self.is_theme_chooser_open() {
@@ -5226,10 +5206,8 @@ impl Workspace {
         {
             self.focus_active_tab(ctx);
         }
-        // Starts from a right panel: AI panel, resource center (keyboard shortcuts page only)
-        else if self.ai_assistant_panel.is_self_or_child_focused(ctx)
-            || self.resource_center_view.is_self_or_child_focused(ctx)
-        {
+        // Starts from a right panel: AI panel
+        else if self.ai_assistant_panel.is_self_or_child_focused(ctx) {
             if self.current_workspace_state.is_left_panel_open() {
                 if self.current_workspace_state.is_warp_drive_open {
                     self.reset_focused_index_in_warp_drive(true, ctx);
@@ -5252,10 +5230,6 @@ impl Workspace {
 
     pub fn is_overflow_menu_showing(&self) -> bool {
         self.show_tab_bar_overflow_menu
-    }
-
-    pub fn is_resource_center_showing(&self) -> bool {
-        self.current_workspace_state.is_resource_center_open
     }
 
     #[cfg(feature = "integration_tests")]
@@ -9284,36 +9258,6 @@ impl Workspace {
         }
     }
 
-    fn open_resource_center_main_page(&mut self, ctx: &mut ViewContext<Self>) {
-        // Set current page to Main
-        self.resource_center_view
-            .update(ctx, |resource_center_view, ctx| {
-                resource_center_view.set_current_page(ResourceCenterPage::Main, ctx)
-            });
-
-        // Open side panel
-        self.current_workspace_state.is_resource_center_open = true;
-    }
-
-    pub fn toggle_resource_center(&mut self, ctx: &mut ViewContext<Self>) {
-        // Close AI Assistant panel when resource center is opened
-        if !self.current_workspace_state.is_resource_center_open {
-            self.current_workspace_state.is_ai_assistant_panel_open = false;
-            self.focus_active_tab(ctx);
-        }
-
-        if !self.current_workspace_state.is_resource_center_open {
-            self.open_resource_center_main_page(ctx);
-            send_telemetry_from_ctx!(TelemetryEvent::ResourceCenterOpened, ctx);
-        } else {
-            // Close side panel
-            self.current_workspace_state.is_resource_center_open = false;
-        }
-
-        self.update_resource_center_action_target(ctx);
-        ctx.notify();
-    }
-
     fn open_left_panel(&mut self, ctx: &mut ViewContext<Self>) {
         self.left_panel_open = true;
 
@@ -9878,50 +9822,18 @@ impl Workspace {
     }
 
     pub fn toggle_keybindings_page(&mut self, ctx: &mut ViewContext<Self>) {
-        let current_page = self
-            .resource_center_view
-            .read(ctx, |resource_center_view, _ctx| {
-                resource_center_view.get_current_page()
-            });
+        // Keyboard shortcuts now live as a tab inside the tools (left) panel.
+        let is_left_panel_open = self.active_tab_pane_group().as_ref(ctx).left_panel_open;
+        let is_showing =
+            self.left_panel_view.as_ref(ctx).active_view() == ToolPanelView::KeyboardShortcuts;
 
-        if !self.current_workspace_state.is_resource_center_open {
-            // Set current page to Keybindings
-            self.resource_center_view
-                .update(ctx, |resource_center_view, ctx| {
-                    resource_center_view.set_current_page(ResourceCenterPage::Keybindings, ctx)
-                });
-
-            // Ensure other right panels are closed
-            self.current_workspace_state.is_ai_assistant_panel_open = false;
-            // Open side panel
-            self.current_workspace_state.is_resource_center_open = true;
+        // Only emit the "opened" telemetry when we're about to open/switch to the
+        // page, not when toggling it closed.
+        if !(is_left_panel_open && is_showing) {
             send_telemetry_from_ctx!(TelemetryEvent::KeybindingsPageOpened, ctx);
-        } else if current_page != ResourceCenterPage::Keybindings
-            && self.current_workspace_state.is_resource_center_open
-        {
-            // Navigate to keybindings page
-            self.resource_center_view
-                .update(ctx, |resource_center_view, ctx| {
-                    resource_center_view.set_current_page(ResourceCenterPage::Keybindings, ctx)
-                });
-            send_telemetry_from_ctx!(TelemetryEvent::KeybindingsPageOpened, ctx);
-        } else {
-            // Close side panel
-            self.current_workspace_state.is_resource_center_open = false;
-            self.focus_active_tab(ctx);
         }
 
-        ctx.notify();
-    }
-
-    fn update_resource_center_action_target(&mut self, ctx: &mut ViewContext<Self>) {
-        if self.current_workspace_state.is_resource_center_open {
-            let input_id = self.active_input_id(ctx);
-            self.resource_center_view
-                .update(ctx, |resource_center_view, ctx| {
-                    resource_center_view.set_action_target(ctx.window_id(), input_id, ctx)
-                });
-        }
+        self.toggle_left_panel_view(&LeftPanelAction::KeyboardShortcuts, is_showing, ctx);
     }
 
     fn handle_tab_right_click_menu_event(
@@ -11282,6 +11194,21 @@ impl Workspace {
                 ctx.notify();
             }
         }
+    }
+
+    fn handle_changelog_modal_event(&mut self, event: &ModalEvent, ctx: &mut ViewContext<Self>) {
+        match event {
+            ModalEvent::Close => {
+                self.current_workspace_state.is_changelog_modal_open = false;
+                ctx.notify();
+            }
+        }
+    }
+
+    fn open_changelog_modal(&mut self, ctx: &mut ViewContext<Self>) {
+        self.current_workspace_state.is_changelog_modal_open = true;
+        ctx.focus(&self.changelog_modal);
+        ctx.notify();
     }
 
     fn handle_theme_creator_modal_event(
@@ -15024,25 +14951,14 @@ impl Workspace {
                             stack.add_ephemeral_toast(toast, ctx);
                         });
                     } else {
-                        // If resource center isn't already open and Warp AI isn't open, then open resource center
-                        if !self.current_workspace_state.is_resource_center_open
-                            && !self.current_workspace_state.is_ai_assistant_panel_open
-                        {
-                            self.open_resource_center_main_page(ctx);
-                            self.update_resource_center_action_target(ctx);
-                            ctx.notify();
-                        }
+                        // The Resource Center drawer has been removed; show the
+                        // "What's new" changelog modal instead.
+                        self.open_changelog_modal(ctx);
                     }
                 }
             }
             (_, Some(ChangelogRequestType::UserAction), _) => {
-                if !self.current_workspace_state.is_resource_center_open
-                    && !self.current_workspace_state.is_ai_assistant_panel_open
-                {
-                    self.open_resource_center_main_page(ctx);
-                    self.update_resource_center_action_target(ctx);
-                    ctx.notify();
-                }
+                self.open_changelog_modal(ctx);
             }
             (false, _, Some(kind)) => {
                 // We shouldn't show the changelog modal, but we have a pending reward modal, so we
@@ -16144,7 +16060,6 @@ impl Workspace {
             pane_group::Event::AppStateChanged => {
                 ctx.dispatch_global_action("workspace:save_app", ());
                 self.refresh_working_directories_for_pane_group(&pane_group, ctx);
-                self.update_resource_center_action_target(ctx);
                 self.update_active_session(ctx);
 
                 if FeatureFlag::DirectoryTabColors.is_enabled() {
@@ -16161,12 +16076,7 @@ impl Workspace {
                 self.update_active_session(ctx);
                 // ctx.notify();
             }
-            pane_group::Event::Escape => {
-                if self.current_workspace_state.is_resource_center_open {
-                    self.current_workspace_state.is_resource_center_open = false;
-                    ctx.notify()
-                }
-            }
+            pane_group::Event::Escape => {}
             pane_group::Event::Exited { add_to_undo_stack } => {
                 let tab = self.tabs.iter().position(|t| {
                     t.pane_group.id() == pane_group.id()
@@ -17394,31 +17304,6 @@ impl Workspace {
         };
     }
 
-    fn handle_resource_center_event(
-        &mut self,
-        event: &ResourceCenterEvent,
-        ctx: &mut ViewContext<Self>,
-    ) {
-        match event {
-            ResourceCenterEvent::Close => {
-                self.current_workspace_state.is_resource_center_open = false;
-                ctx.notify();
-            }
-            ResourceCenterEvent::Escape => {
-                // Calls terminal view focus to determine where focus should be
-                if let Some(pane_group_handle) = self.get_pane_group_view(self.active_tab_index) {
-                    pane_group_handle.update(ctx, |pane_group, ctx| {
-                        if let Some(terminal_view_handle) = pane_group.active_session_view(ctx) {
-                            terminal_view_handle.update(ctx, |terminal, ctx| {
-                                terminal.redetermine_global_focus(ctx);
-                            });
-                        }
-                    });
-                }
-            }
-        };
-    }
-
     fn show_command_search(
         &mut self,
         query_filter: Option<search::QueryFilter>,
@@ -18591,8 +18476,6 @@ impl Workspace {
                 self.open_command_palette(ctx);
             } else if self.current_workspace_state.is_theme_chooser_open {
                 self.focus_theme_chooser(ctx);
-            } else if self.current_workspace_state.is_resource_center_open {
-                ctx.focus(&self.resource_center_view);
             } else if self.current_workspace_state.is_ai_assistant_panel_open {
                 ctx.focus(&self.ai_assistant_panel);
             } else if self
@@ -19635,7 +19518,7 @@ impl Workspace {
     /// in-flight
     ///
     fn is_changelog_open_or_pending(&self, ctx: &mut ViewContext<Self>) -> bool {
-        self.current_workspace_state.is_resource_center_open
+        self.current_workspace_state.is_changelog_modal_open
             || self.changelog_model.as_ref(ctx).is_check_pending()
     }
 
@@ -20560,6 +20443,7 @@ impl Workspace {
                         ToolPanelView::ConversationListView => "Agent conversations",
                         ToolPanelView::CodeReview => "Code review",
                         ToolPanelView::BrowserPreview => "Preview",
+                        ToolPanelView::KeyboardShortcuts => "Keyboard shortcuts",
                     }
                 } else {
                     "Tools panel"
@@ -20616,6 +20500,7 @@ impl Workspace {
                 ToolPanelView::ConversationListView => "Agent conversations",
                 ToolPanelView::CodeReview => "Code review",
                 ToolPanelView::BrowserPreview => "Preview",
+                ToolPanelView::KeyboardShortcuts => "Keyboard shortcuts",
             }
         } else {
             "Tools panel"
@@ -21414,17 +21299,7 @@ impl Workspace {
         }
 
         // The user avatar and settings now live in the side-nav footer
-        // (bottom-left). The top-right shows the resource center (when
-        // applicable) followed by the tools/drawer toggle.
-        let resource_center_closed = !self.current_workspace_state.is_resource_center_open;
-        if resource_center_closed && ContextFlag::WarpEssentials.is_enabled() {
-            target.add_child(
-                Container::new(self.render_resource_center_button(appearance, ctx))
-                    .with_margin_left(TAB_BAR_PADDING_LEFT)
-                    .finish(),
-            );
-        }
-
+        // (bottom-left). The top-right shows the tools/drawer toggle.
         if let Some(button) =
             self.render_header_toolbar_button(&HeaderToolbarItemKind::ToolsPanel, appearance, ctx)
         {
@@ -21720,54 +21595,6 @@ impl Workspace {
             ret.finish()
         })
         .finish()
-    }
-
-    fn render_resource_center_button(
-        &self,
-        appearance: &Appearance,
-        ctx: &AppContext,
-    ) -> Box<dyn Element> {
-        // only show the unread indicator if the tips are NOT completed
-        let should_show_unread_indicator = !self.tips_completed.as_ref(ctx).skipped_or_completed;
-        let mut button = self
-            .render_tab_bar_icon_button(
-                appearance,
-                icons::Icon::Lightbulb,
-                &self.mouse_states.resource_center_icon,
-                WorkspaceAction::ToggleResourceCenter,
-                "Warp Essentials".to_string(),
-                self.cached_keybindings[TOGGLE_RESOURCE_CENTER_KEYBINDING_NAME].clone(),
-                false,
-                false,
-            )
-            .finish();
-
-        if should_show_unread_indicator {
-            const INDICATOR_DIAMETER: f32 = 6.;
-            let indicator = Container::new(
-                ConstrainedBox::new(
-                    WarpUiIcon::new(ELLIPSE_SVG_PATH, appearance.theme().accent()).finish(),
-                )
-                .with_height(INDICATOR_DIAMETER)
-                .with_width(INDICATOR_DIAMETER)
-                .finish(),
-            )
-            .finish();
-            let mut stack = Stack::new();
-            stack.add_child(button);
-            stack.add_positioned_child(
-                indicator,
-                OffsetPositioning::offset_from_parent(
-                    Vector2F::zero(),
-                    ParentOffsetBounds::WindowByPosition,
-                    ParentAnchor::TopRight,
-                    ChildAnchor::TopRight,
-                ),
-            );
-            button = stack.finish();
-        }
-
-        Align::new(button).finish()
     }
 
     fn render_web_anonymous_user_sign_in_button(
@@ -22151,13 +21978,6 @@ impl Workspace {
         let theme_chooser = ChildView::new(&self.theme_chooser_view).finish();
         ConstrainedBox::new(theme_chooser)
             .with_max_width(240.0)
-            .finish()
-    }
-
-    #[cfg(not(target_family = "wasm"))]
-    fn render_resource_center(&self) -> Box<dyn Element> {
-        ConstrainedBox::new(ChildView::new(&self.resource_center_view).finish())
-            .with_width(RESOURCE_CENTER_WIDTH)
             .finish()
     }
 
@@ -22759,28 +22579,14 @@ impl Workspace {
             }
         }
 
-        // Resource center and AI assistant are workspace-level panels, not configurable.
+        // The AI assistant is a workspace-level right panel, not configurable.
         #[cfg(not(target_family = "wasm"))]
-        if self.current_workspace_state.is_right_panel_open() {
-            let right_panel_content = if self.current_workspace_state.is_resource_center_open {
-                Some(self.render_panel(app, self.render_resource_center(), &PanelPosition::Right))
-            } else if self.current_workspace_state.is_ai_assistant_panel_open {
-                Some(self.render_panel(
-                    app,
-                    ChildView::new(&self.ai_assistant_panel).finish(),
-                    &PanelPosition::Right,
-                ))
-            } else {
-                log::warn!(
-                    "is_right_panel_open() returned true, but neither the resource center nor AI \
-                    assistant are open"
-                );
-                None
-            };
-
-            if let Some(right_panel_content) = right_panel_content {
-                panels_view = panels_view.with_child(right_panel_content);
-            }
+        if self.current_workspace_state.is_ai_assistant_panel_open {
+            panels_view = panels_view.with_child(self.render_panel(
+                app,
+                ChildView::new(&self.ai_assistant_panel).finish(),
+                &PanelPosition::Right,
+            ));
         }
 
         panels_view.finish()
@@ -23703,6 +23509,9 @@ impl Workspace {
         if cfg!(target_os = "macos") && FeatureFlag::BrowserPreview.is_enabled() {
             views.push(ToolPanelView::BrowserPreview);
         }
+        // Keyboard shortcuts is always available as a tools-panel tab so the
+        // reference lives in one place (and Cmd+/ can always open it).
+        views.push(ToolPanelView::KeyboardShortcuts);
         views
     }
 
@@ -24243,6 +24052,8 @@ impl TypedActionView for Workspace {
             }
             AutoupdateFailureLink => self.open_autoupdate_failure_link(ctx),
             ApplyUpdate => self.apply_update(ctx),
+            RelaunchForNewBuild => autoupdate::relaunch_app(ctx),
+            ShowChangelogModal => self.open_changelog_modal(ctx),
             LogOut => {
                 // Need to dispatch global action, or else we will not be able to retrieve
                 // the currently active session in the log out modal.
@@ -24345,7 +24156,6 @@ impl TypedActionView for Workspace {
             ToggleInBandGenerators => self.toggle_in_band_generators(ctx),
             ToggleDebugNetworkStatus => self.toggle_debug_network_status(ctx),
             ToggleShowMemoryStats => self.toggle_show_memory_stats(ctx),
-            ToggleResourceCenter => self.toggle_resource_center(ctx),
             ToggleUserMenu => self.toggle_user_menu(ctx),
             ReplayWelcome => {
                 // Close the user menu and hand off to RootView, which owns the
@@ -27050,6 +26860,10 @@ impl View for Workspace {
             stack.add_child(ChildView::new(&self.theme_creator_modal).finish());
         }
 
+        if self.current_workspace_state.is_changelog_modal_open {
+            stack.add_child(ChildView::new(&self.changelog_modal).finish());
+        }
+
         if self.current_workspace_state.is_import_modal_open {
             stack.add_child(ChildView::new(&self.import_modal).finish());
         }
@@ -27459,7 +27273,6 @@ impl View for Workspace {
             && AISettings::as_ref(app).is_any_ai_enabled(app)
             && self.should_show_ai_assistant_warm_welcome
             && !self.current_workspace_state.is_changelog_modal_open
-            && !self.current_workspace_state.is_resource_center_open
             && !self.current_workspace_state.is_ai_assistant_panel_open
             && tab_bar_mode.has_tab_bar()
         {

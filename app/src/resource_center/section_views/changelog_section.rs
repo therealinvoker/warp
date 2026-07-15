@@ -64,7 +64,6 @@ impl TypedActionView for ChangelogSectionView {
                 ctx.open_url(url.as_str());
             }
             ToggleExpanded => self.toggle_expanded(ctx),
-            _ => {}
         }
     }
 }
@@ -222,10 +221,93 @@ impl ChangelogSectionView {
     }
 }
 
-fn render_icon(icon: icons::Icon, color: Fill) -> ConstrainedBox {
+pub(crate) fn render_icon(icon: icons::Icon, color: Fill) -> ConstrainedBox {
     ConstrainedBox::new(Icon::new(icon.into(), color).finish())
         .with_width(16.)
         .with_height(16.)
+}
+
+/// Renders the changelog sections (New features / Improvements / Bug fixes) as
+/// a standalone column, for reuse outside the Resource Center section view —
+/// e.g. the "What's new" modal. Uses basic headers with no collapse chrome.
+///
+/// Link clicks dispatch [`SectionAction::OpenUrl`], so the hosting view must
+/// use `SectionAction` as its action type and open the URL.
+pub(crate) fn render_changelog_content(
+    model: &ChangelogModel,
+    appearance: &Appearance,
+) -> Box<dyn Element> {
+    let mut content = Flex::column();
+
+    match &model.changelog {
+        ChangelogState::Some(_) => {
+            let sections = [
+                (ChangelogHeader::NewFeatures, icons::Icon::Gift),
+                (ChangelogHeader::Improvements, icons::Icon::Tool),
+                (ChangelogHeader::BugFixes, icons::Icon::Bug),
+            ];
+
+            for (section, icon) in sections {
+                let title = section.to_string();
+                let Some(markdown) = model.parsed_changelog.get(&title) else {
+                    continue;
+                };
+
+                content.add_child(render_basic_changelog_header(
+                    &title,
+                    render_icon(
+                        icon,
+                        appearance
+                            .theme()
+                            .sub_text_color(appearance.theme().surface_2()),
+                    ),
+                    appearance,
+                ));
+
+                // Show the hero image beneath the "New features" header when present.
+                if matches!(section, ChangelogHeader::NewFeatures) {
+                    if let Some(image_source) = &model.image {
+                        content.add_child(
+                            Container::new(
+                                ConstrainedBox::new(
+                                    Image::new(image_source.clone(), CacheOption::BySize)
+                                        .enable_animation_with_start_time(Instant::now())
+                                        .finish(),
+                                )
+                                .with_max_height(200.)
+                                .with_max_width(350.)
+                                .finish(),
+                            )
+                            .with_margin_top(4.)
+                            .finish(),
+                        );
+                    }
+                }
+
+                content.add_child(render_changelog_body(
+                    markdown.clone(),
+                    HighlightedHyperlink::default(),
+                    appearance,
+                ));
+            }
+        }
+        ChangelogState::Pending => {
+            content.add_child(render_changelog_body(
+                create_formatted_text_from_string(CHANGELOG_LOADING_MSG.to_string()),
+                HighlightedHyperlink::default(),
+                appearance,
+            ));
+        }
+        ChangelogState::None => {
+            content.add_child(render_changelog_body(
+                create_formatted_text_from_string(CHANGELOG_FETCH_ERROR_MSG.to_string()),
+                HighlightedHyperlink::default(),
+                appearance,
+            ));
+        }
+    }
+
+    content.finish()
 }
 
 fn render_special_changelog_header(
@@ -273,7 +355,7 @@ fn render_special_changelog_header(
     .finish()
 }
 
-fn render_basic_changelog_header(
+pub(crate) fn render_basic_changelog_header(
     title: &str,
     icon: ConstrainedBox,
     appearance: &Appearance,
@@ -313,7 +395,7 @@ fn render_basic_changelog_header(
     .finish()
 }
 
-fn render_changelog_body(
+pub(crate) fn render_changelog_body(
     parsed_markdown: FormattedText,
     highlighted_link: HighlightedHyperlink,
     appearance: &Appearance,
@@ -367,7 +449,7 @@ impl SectionView for ChangelogSectionView {
                 .ui_builder()
                 .link(
                     "Read all changelogs".into(),
-                    Some("https://docs.warp.dev/changelog".into()),
+                    Some("https://trybang.ai/changelog".into()),
                     None,
                     self.changelog_button_mouse_states
                         .view_changelogs_mouse_state

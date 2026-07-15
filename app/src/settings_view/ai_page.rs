@@ -745,6 +745,11 @@ pub struct AISettingsPageView {
     last_synced_context_window_editor_value: Option<u32>,
     dragged_context_window_value: Option<u32>,
 
+    verbosity_slider_state: SliderStateHandle,
+    /// Live value while dragging the verbosity slider (before commit), so the
+    /// numeric readout tracks the thumb.
+    dragged_verbosity_value: Option<u8>,
+
     thinking_display_mode_dropdown: ViewHandle<Dropdown<AISettingsPageAction>>,
     orchestration_message_display_mode_dropdown: ViewHandle<Dropdown<AISettingsPageAction>>,
     default_prompt_submission_mode_dropdown: ViewHandle<Dropdown<AISettingsPageAction>>,
@@ -884,6 +889,7 @@ impl AISettingsPageView {
             .map(|cw| initial_context_window_value.clamp(cw.min, cw.max))
             .unwrap_or(initial_context_window_value);
         let context_window_slider_state = SliderStateHandle::default();
+        let verbosity_slider_state = SliderStateHandle::default();
 
         let context_window_editor = ctx.add_typed_action_view(|ctx| {
             let options = SingleLineEditorOptions {
@@ -1979,6 +1985,8 @@ impl AISettingsPageView {
             context_window_editor,
             last_synced_context_window_editor_value,
             dragged_context_window_value: None,
+            verbosity_slider_state,
+            dragged_verbosity_value: None,
             autonomy_dropdown_menu,
             code_read_allowlist_editor,
             code_read_autonomy_dropdown_menu,
@@ -3670,6 +3678,10 @@ pub enum AISettingsPageAction {
     /// Called when the user commits a new context window value (slider drop or
     /// input box commit).
     SetContextWindowSize(u32),
+    /// Called while the user is actively dragging the verbosity slider.
+    VerbositySliderDragged(u8),
+    /// Called when the user commits a new verbosity value (slider drop).
+    SetAgentVerbosity(u8),
     SetAutonomyReadonlyCommandsSetting,
     SetAutonomySupervisedSetting,
     SetCodingPermission(AgentModeCodingPermissionsType),
@@ -4235,6 +4247,18 @@ impl TypedActionView for AISettingsPageView {
                     profiles_model.set_context_window_limit(profile_id, Some(clamped), ctx);
                 });
                 self.sync_context_window_editor(ctx, true);
+                ctx.notify();
+            }
+            AISettingsPageAction::VerbositySliderDragged(value) => {
+                self.dragged_verbosity_value = Some((*value).min(10));
+                ctx.notify();
+            }
+            AISettingsPageAction::SetAgentVerbosity(value) => {
+                self.dragged_verbosity_value = None;
+                let clamped = (*value).min(10) as usize;
+                AISettings::handle(ctx).update(ctx, |settings, ctx| {
+                    report_if_error!(settings.agent_verbosity.set_value(clamped, ctx));
+                });
                 ctx.notify();
             }
             AISettingsPageAction::SetAutonomyReadonlyCommandsSetting
@@ -5724,6 +5748,12 @@ impl AgentsWidget {
             );
         }
 
+        children.push(
+            Container::new(self.render_verbosity_setting(view, ai_settings, appearance, app))
+                .with_margin_bottom(8.0)
+                .finish(),
+        );
+
         Flex::column().with_children(children).finish()
     }
 
@@ -5852,6 +5882,103 @@ impl AgentsWidget {
         }
 
         Some(column.finish())
+    }
+
+    /// Renders the "Response verbosity" slider (0-10). Lower = terser answers,
+    /// higher = more thorough. The value is forwarded to the agent backend each
+    /// turn (via request metadata) where it becomes a system-prompt directive.
+    fn render_verbosity_setting(
+        &self,
+        view: &AISettingsPageView,
+        ai_settings: &AISettings,
+        appearance: &Appearance,
+        app: &AppContext,
+    ) -> Box<dyn Element> {
+        let toggle_state = if ai_settings.is_any_ai_enabled(app) {
+            ToggleState::Enabled
+        } else {
+            ToggleState::Disabled
+        };
+        let current = view
+            .dragged_verbosity_value
+            .map(|v| v as usize)
+            .unwrap_or(*ai_settings.agent_verbosity)
+            .min(10);
+
+        let label = Container::new(render_body_item_label::<AISettingsPageAction>(
+            "Response verbosity".to_string(),
+            None,
+            None,
+            LocalOnlyIconState::Hidden,
+            toggle_state,
+            appearance,
+        ))
+        .with_margin_bottom(4.0)
+        .finish();
+
+        let min_label = appearance
+            .ui_builder()
+            .span("0".to_string())
+            .with_style(UiComponentStyles {
+                font_size: Some(CONTENT_FONT_SIZE),
+                ..Default::default()
+            })
+            .build()
+            .finish();
+
+        let max_label = appearance
+            .ui_builder()
+            .span("10".to_string())
+            .with_style(UiComponentStyles {
+                font_size: Some(CONTENT_FONT_SIZE),
+                ..Default::default()
+            })
+            .build()
+            .finish();
+
+        let value_label = appearance
+            .ui_builder()
+            .span(format!("{current}"))
+            .with_style(UiComponentStyles {
+                font_size: Some(CONTENT_FONT_SIZE),
+                margin: Some(Coords::default().left(12.)),
+                ..Default::default()
+            })
+            .build()
+            .finish();
+
+        let slider = appearance
+            .ui_builder()
+            .slider(view.verbosity_slider_state.clone())
+            .with_range(0.0..10.0)
+            .with_default_value(current as f32)
+            .with_style(UiComponentStyles {
+                width: Some(CONTEXT_WINDOW_SLIDER_WIDTH),
+                margin: Some(Coords::default().left(8.).right(8.)),
+                ..Default::default()
+            })
+            .on_drag(|ctx, _, val| {
+                ctx.dispatch_typed_action(AISettingsPageAction::VerbositySliderDragged(
+                    val.round() as u8,
+                ));
+            })
+            .on_change(|ctx, _, val| {
+                ctx.dispatch_typed_action(AISettingsPageAction::SetAgentVerbosity(
+                    val.round() as u8
+                ));
+            })
+            .build()
+            .finish();
+
+        let row = Flex::row()
+            .with_cross_axis_alignment(CrossAxisAlignment::Center)
+            .with_child(min_label)
+            .with_child(Shrinkable::new(1., slider).finish())
+            .with_child(max_label)
+            .with_child(value_label)
+            .finish();
+
+        Flex::column().with_child(label).with_child(row).finish()
     }
 
     fn render_permissions_section(

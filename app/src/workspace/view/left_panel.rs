@@ -35,6 +35,7 @@ use crate::pane_group::working_directories::WorkingDirectory;
 use crate::pane_group::{
     PaneGroup, WorkingDirectoriesEvent, WorkingDirectoriesModel, {self},
 };
+use crate::resource_center::KeybindingsView;
 #[cfg(feature = "local_fs")]
 use crate::server::telemetry::CodePanelsFileOpenEntrypoint;
 use crate::server::telemetry::{FileTreeSource, WarpDriveSource};
@@ -62,8 +63,8 @@ use crate::workspace::view::{
     LEFT_PANEL_AGENT_CONVERSATIONS_BINDING_NAME, LEFT_PANEL_GLOBAL_SEARCH_BINDING_NAME,
     LEFT_PANEL_PROJECT_EXPLORER_BINDING_NAME, LEFT_PANEL_WARP_DRIVE_BINDING_NAME,
     OPEN_GLOBAL_SEARCH_BINDING_NAME, TOGGLE_CONVERSATION_LIST_VIEW_BINDING_NAME,
-    TOGGLE_PROJECT_EXPLORER_BINDING_NAME, TOGGLE_RIGHT_PANEL_BINDING_NAME,
-    TOGGLE_WARP_DRIVE_BINDING_NAME,
+    TOGGLE_KEYBINDINGS_PAGE_BINDING_NAME, TOGGLE_PROJECT_EXPLORER_BINDING_NAME,
+    TOGGLE_RIGHT_PANEL_BINDING_NAME, TOGGLE_WARP_DRIVE_BINDING_NAME,
 };
 use crate::workspace::WorkspaceAction;
 use crate::TelemetryEvent;
@@ -76,6 +77,7 @@ pub enum LeftPanelAction {
     ConversationListView,
     CodeReview,
     BrowserPreview,
+    KeyboardShortcuts,
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -106,6 +108,7 @@ pub enum ToolPanelView {
     ConversationListView,
     CodeReview,
     BrowserPreview,
+    KeyboardShortcuts,
 }
 
 /// Encapsulates the active view state to enforce that all mutations go through
@@ -176,6 +179,7 @@ pub struct LeftPanelView {
     conversation_list_view: ViewHandle<ConversationListView>,
     code_review_panel: ViewHandle<CodeReviewPanelView>,
     browser_preview_view: ViewHandle<BrowserPreviewView>,
+    keybindings_view: ViewHandle<KeybindingsView>,
     active_view: active_view_state::ActiveViewState,
     toolbelt_buttons: Vec<ToolbeltButtonConfig>,
     active_pane_group: Option<WeakViewHandle<PaneGroup>>,
@@ -232,6 +236,8 @@ impl LeftPanelView {
         });
 
         let browser_preview_view = ctx.add_typed_action_view(BrowserPreviewView::new);
+
+        let keybindings_view = ctx.add_typed_action_view(KeybindingsView::new);
 
         ctx.subscribe_to_view(&warp_drive_view, |_me, _, event, ctx| {
             ctx.emit(LeftPanelEvent::WarpDrive(event.clone()));
@@ -352,6 +358,7 @@ impl LeftPanelView {
             conversation_list_view,
             code_review_panel,
             browser_preview_view,
+            keybindings_view,
             active_view: active_view_state::new(active_view),
             toolbelt_buttons,
             active_pane_group: None,
@@ -508,6 +515,19 @@ impl LeftPanelView {
                     active_icon: None,
                     tooltip_text: "Preview".to_string(),
                     action: LeftPanelAction::BrowserPreview,
+                    render_with_active_state: false,
+                    tooltip_keybinding: toolbelt_tooltip_keybinding(&tooltip_keybinding_names, ctx),
+                    tooltip_keybinding_names,
+                }
+            }
+            ToolPanelView::KeyboardShortcuts => {
+                let tooltip_keybinding_names = vec![TOGGLE_KEYBINDINGS_PAGE_BINDING_NAME];
+
+                ToolbeltButtonConfig {
+                    icon: Icon::Keyboard,
+                    active_icon: None,
+                    tooltip_text: "Keyboard shortcuts".to_string(),
+                    action: LeftPanelAction::KeyboardShortcuts,
                     render_with_active_state: false,
                     tooltip_keybinding: toolbelt_tooltip_keybinding(&tooltip_keybinding_names, ctx),
                     tooltip_keybinding_names,
@@ -792,6 +812,9 @@ impl LeftPanelView {
             ToolPanelView::BrowserPreview => {
                 ctx.focus(&self.browser_preview_view);
             }
+            ToolPanelView::KeyboardShortcuts => {
+                ctx.focus(&self.keybindings_view);
+            }
         }
     }
 
@@ -1021,6 +1044,9 @@ impl LeftPanelView {
                 LeftPanelAction::BrowserPreview => {
                     self.active_view.get() == ToolPanelView::BrowserPreview
                 }
+                LeftPanelAction::KeyboardShortcuts => {
+                    self.active_view.get() == ToolPanelView::KeyboardShortcuts
+                }
             };
         }
     }
@@ -1175,6 +1201,14 @@ impl LeftPanelView {
                     ctx.focus(&self.browser_preview_view);
                 }
             }
+            LeftPanelAction::KeyboardShortcuts => {
+                active_view_state::set(self, ToolPanelView::KeyboardShortcuts, ctx);
+                // Focus the view so its search field is ready for typing; skip on
+                // force-open so agent/programmatic opens don't steal terminal focus.
+                if !force_open {
+                    ctx.focus(&self.keybindings_view);
+                }
+            }
         }
     }
 
@@ -1311,6 +1345,7 @@ impl View for LeftPanelView {
                 ToolPanelView::ConversationListView => ctx.focus(&self.conversation_list_view),
                 ToolPanelView::CodeReview => ctx.focus(&self.code_review_panel),
                 ToolPanelView::BrowserPreview => ctx.focus(&self.browser_preview_view),
+                ToolPanelView::KeyboardShortcuts => ctx.focus(&self.keybindings_view),
             }
         }
     }
@@ -1382,6 +1417,9 @@ impl View for LeftPanelView {
             }
             ToolPanelView::BrowserPreview => {
                 Shrinkable::new(1.0, ChildView::new(&self.browser_preview_view).finish()).finish()
+            }
+            ToolPanelView::KeyboardShortcuts => {
+                Shrinkable::new(1.0, ChildView::new(&self.keybindings_view).finish()).finish()
             }
         };
 

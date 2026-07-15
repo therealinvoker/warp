@@ -61,13 +61,27 @@ fn main() -> Result<()> {
             .file("src/platform/mac/objc/services.m")
             .compile("warp_objc");
 
-        // Voice + annotation overlay native puck. Compiled with ARC in its own
-        // unit so it doesn't affect the (manual-retain) services.m above.
+        // Voice + annotation overlay native puck + text-to-speech. Compiled with
+        // ARC in its own unit so it doesn't affect the (manual-retain)
+        // services.m above. TTS uses AVSpeechSynthesizer (AVFoundation); the
+        // annotation canvas uses CGWindowList (CoreGraphics) for window picking.
+        println!("cargo:rustc-link-lib=framework=AVFoundation");
+        println!("cargo:rustc-link-lib=framework=CoreGraphics");
         println!("cargo:rerun-if-changed=src/overlay/native/overlay_puck.m");
-        cc::Build::new()
+        println!("cargo:rerun-if-changed=src/overlay/native/tts.m");
+        let mut overlay_build = cc::Build::new();
+        overlay_build
             .file("src/overlay/native/overlay_puck.m")
-            .flag("-fobjc-arc")
-            .compile("bang_overlay_objc");
+            .file("src/overlay/native/tts.m")
+            .flag("-fobjc-arc");
+        // The echo-cancelled mic capture (hands-free barge-in) bridges into the
+        // Realtime pipeline, so it's only built when `voice_input` is enabled —
+        // otherwise its `bang_aec_frame` callback has no Rust definition to link.
+        if env::var("CARGO_FEATURE_VOICE_INPUT").is_ok() {
+            println!("cargo:rerun-if-changed=src/overlay/native/aec_capture.m");
+            overlay_build.file("src/overlay/native/aec_capture.m");
+        }
+        overlay_build.compile("bang_overlay_objc");
 
         // Build the dock tile plugin
         println!("cargo:rerun-if-changed=DockTilePlugin/WarpDockTilePlugin.m");

@@ -32,7 +32,7 @@ pub mod realtime;
 #[cfg(target_os = "macos")]
 mod platform_mac;
 #[cfg(target_os = "macos")]
-pub use platform_mac::install_overlay_app_bridge;
+pub use platform_mac::{install_overlay_app_bridge, preload_tts};
 
 pub use platform::{
     Annotator, GlobalPointer, NoopAnnotator, NoopGlobalPointer, NoopOverlayWindow, NoopPermissions,
@@ -98,9 +98,30 @@ pub struct OverlayController {
     use_chunked_fallback: bool,
     /// Whether the result box is shown (dictation transcript or agent result).
     result_box_visible: bool,
-    /// Box mode: `true` = read-only agent result, `false` = editable dictation
-    /// transcript.
-    box_result_mode: bool,
+    /// Finalized conversation history rendered for the read-only history region:
+    /// completed exchanges as `> prompt\n\nanswer`, joined by blank lines. The
+    /// in-flight exchange (`last_prompt` + streaming answer) is appended on top of
+    /// this when building the display, then folded in on completion.
+    history: String,
+    /// The last prompt submitted from the overlay. Shown above the agent's reply
+    /// in the result box so the overlay reads as a chat stream (user turn +
+    /// answer), not just the answer. Cleared into `history` when the reply ends.
+    last_prompt: Option<String>,
+    /// Whether the agent's answer is currently being read aloud (TTS). Enables
+    /// click-to-interrupt: tapping the mic puck while speaking silences the agent
+    /// and starts listening.
+    speaking: bool,
+    /// Whether incoming transcript deltas should be accepted into the composer
+    /// (the current prompt). With hands-free barge-in the Realtime session stays
+    /// live across submit + response + TTS, so we gate on this flag instead of
+    /// stopping/restarting the mic each turn: `true` while dictating a prompt,
+    /// `false` while the agent is thinking/speaking (until the user barges in or
+    /// the turn completes).
+    accepting_dictation: bool,
+    /// Whether echo-cancelled capture is active this session, i.e. hands-free
+    /// barge-in is available (the mic can stay live while the agent speaks).
+    /// When false we keep the suppress-during-TTS + tap-to-interrupt behavior.
+    aec_active: bool,
 }
 
 impl OverlayController {
@@ -128,7 +149,11 @@ impl OverlayController {
             response_started: false,
             use_chunked_fallback: false,
             result_box_visible: false,
-            box_result_mode: false,
+            history: String::new(),
+            last_prompt: None,
+            speaking: false,
+            accepting_dictation: false,
+            aec_active: false,
         }
     }
 
@@ -193,16 +218,19 @@ impl OverlayController {
         self.restart_suppressed = false;
         self.response_started = false;
         self.use_chunked_fallback = false;
+        self.speaking = false;
+        self.accepting_dictation = true;
+        self.aec_active = false;
         self.window.set_paused(false);
         self.window.show();
         self.window.set_listening(true);
-        // Show the box in editable dictation mode so the user sees + can edit the
-        // live transcript before submitting.
+        // Fresh session: empty history + empty editable input line.
         self.result_box_visible = true;
-        self.box_result_mode = false;
+        self.history.clear();
+        self.last_prompt = None;
         self.window.show_result_box();
-        self.window.set_box_editable(true);
-        self.window.set_result_text("");
+        self.window.set_history_text("");
+        self.window.set_input_text("");
         self.state = OverlayState::Listening;
     }
 
@@ -214,6 +242,7 @@ impl OverlayController {
             let _ = self.annotator.finish();
         }
         self.pointer.end_capture();
+        self.window.stop_speaking();
         self.window.set_listening(false);
         self.window.set_level(0.0);
         self.window.set_thinking(false);
@@ -227,7 +256,11 @@ impl OverlayController {
         self.restart_suppressed = false;
         self.response_started = false;
         self.result_box_visible = false;
-        self.box_result_mode = false;
+        self.history.clear();
+        self.last_prompt = None;
+        self.speaking = false;
+        self.accepting_dictation = false;
+        self.aec_active = false;
         self.state = OverlayState::Closed;
     }
 
@@ -287,14 +320,14 @@ impl OverlayController {
         self.result_box_visible
     }
 
-    /// Update the result box text (streaming thinking/answer, or live transcript).
-    pub fn set_result_text(&mut self, text: &str) {
-        self.window.set_result_text(text);
+    /// Update the read-only history region (markdown; empty clears it).
+    pub fn set_history_text(&mut self, text: &str) {
+        self.window.set_history_text(text);
     }
 
-    /// Toggle whether the box is user-editable (dictation) or read-only (result).
-    pub fn set_box_editable(&mut self, editable: bool) {
-        self.window.set_box_editable(editable);
+    /// Update the editable input line (composer mirror / live transcript).
+    pub fn set_input_text(&mut self, text: &str) {
+        self.window.set_input_text(text);
     }
 
     /// Set the box background color (RGBA, 0.0..1.0) to match the main composer.
@@ -307,14 +340,123 @@ impl OverlayController {
         self.window.set_box_auto_submit(on);
     }
 
-    /// `true` = read-only agent result, `false` = editable dictation transcript.
-    pub fn is_box_result_mode(&self) -> bool {
-        self.box_result_mode
+    /// Speak text aloud via native TTS (reads the agent's answer in voice mode).
+    pub fn speak(&mut self, text: &str) {
+        self.speaking = true;
+        self.window.speak(text);
     }
 
-    /// Set the box mode (see `is_box_result_mode`).
-    pub fn set_box_result_mode(&mut self, result_mode: bool) {
-        self.box_result_mode = result_mode;
+    /// Stop any in-progress speech.
+    pub fn stop_speaking(&mut self) {
+        self.speaking = false;
+        self.window.stop_speaking();
+    }
+
+    /// Whether the agent's answer is currently being read aloud.
+    pub fn is_speaking(&self) -> bool {
+        self.speaking
+    }
+
+    /// Whether transcript deltas should be accepted into the composer right now
+    /// (dictating a prompt). False while the agent is thinking/speaking.
+    pub fn is_accepting_dictation(&self) -> bool {
+        self.accepting_dictation
+    }
+
+    /// Set whether transcript deltas are accepted into the composer.
+    pub fn set_accepting_dictation(&mut self, accepting: bool) {
+        self.accepting_dictation = accepting;
+    }
+
+    /// Whether echo-cancelled capture is active (hands-free barge-in available).
+    pub fn is_aec_active(&self) -> bool {
+        self.aec_active
+    }
+
+    /// Record whether the current session uses echo-cancelled capture. Set from
+    /// the Realtime pipeline once it negotiates its audio source.
+    pub fn set_aec_active(&mut self, active: bool) {
+        self.aec_active = active;
+    }
+
+    /// Reflect the voice-output setting on the overlay's settings menu.
+    pub fn set_voice_enabled(&mut self, on: bool) {
+        self.window.set_voice_enabled(on);
+    }
+
+    /// Set the shared puck accent color to a preset palette index.
+    pub fn set_puck_color(&mut self, index: i32) {
+        self.window.set_puck_color(index);
+    }
+
+    /// Reflect the transcription language (ISO code, "" = auto) on the settings
+    /// popover.
+    pub fn set_language(&mut self, code: &str) {
+        self.window.set_language(code);
+    }
+
+    /// Reflect the response-verbosity level (0-10) on the settings popover.
+    pub fn set_verbosity(&mut self, level: u8) {
+        self.window.set_verbosity(level);
+    }
+
+    /// Enter freeform annotation mode: hides the pucks/box and shows the
+    /// full-screen drawing canvas. The composer drives capture on Done.
+    pub fn begin_annotation(&mut self) {
+        self.window.stop_speaking();
+        self.window.begin_annotation();
+        self.state = OverlayState::Annotating;
+    }
+
+    /// Exit annotation mode (Done or Cancel): hides the canvas and restores the
+    /// pucks/box, returning to the listening state.
+    pub fn end_annotation(&mut self) {
+        self.window.end_annotation();
+        self.state = OverlayState::Listening;
+    }
+
+    /// Whether the annotation canvas is active.
+    pub fn is_annotating(&self) -> bool {
+        self.state == OverlayState::Annotating
+    }
+
+    /// The last prompt submitted from the overlay (shown above the reply).
+    pub fn last_prompt(&self) -> Option<&str> {
+        self.last_prompt.as_deref()
+    }
+
+    /// Record the last submitted prompt (see `last_prompt`).
+    pub fn set_last_prompt(&mut self, prompt: Option<String>) {
+        self.last_prompt = prompt;
+    }
+
+    /// Fold a completed exchange into the finalized history.
+    pub fn push_history_exchange(&mut self, prompt: &str, answer: &str) {
+        if !self.history.is_empty() {
+            self.history.push_str("\n\n");
+        }
+        self.history.push_str("> ");
+        self.history.push_str(prompt);
+        self.history.push_str("\n\n");
+        self.history.push_str(answer);
+    }
+
+    /// Build the read-only history text: finalized exchanges plus the in-flight
+    /// exchange (`last_prompt` + `streaming_answer`) if one is active.
+    pub fn history_display(&self, streaming_answer: &str) -> String {
+        let mut out = self.history.clone();
+        if let Some(prompt) = &self.last_prompt {
+            if !prompt.is_empty() {
+                if !out.is_empty() {
+                    out.push_str("\n\n");
+                }
+                out.push_str("> ");
+                out.push_str(prompt);
+                out.push_str("\n\n");
+                out.push_str(streaming_answer);
+            }
+        }
+        out
     }
 
     /// Peak mic level observed during the current recording window.

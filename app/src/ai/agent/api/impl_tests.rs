@@ -32,6 +32,7 @@ fn request_params_with_ask_user_question_enabled(ask_user_question_enabled: bool
         context_window_limit: None,
         mcp_context: None,
         planning_enabled: true,
+        response_verbosity: 5,
         should_redact_secrets: false,
         api_keys: None,
         custom_model_providers: None,

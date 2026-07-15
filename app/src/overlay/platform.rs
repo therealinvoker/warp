@@ -39,18 +39,39 @@ pub trait OverlayWindow: Send {
     fn show_result_box(&mut self) {}
     /// Hide the streaming result box. No-op by default.
     fn hide_result_box(&mut self) {}
-    /// Set the result box text (streaming thinking/answer, or live transcript).
+    /// Set the read-only conversation history (markdown) shown above the input
+    /// line. Empty string clears + hides it. No-op by default.
+    fn set_history_text(&mut self, _text: &str) {}
+    /// Set the always-editable input line (mirrors the composer / live transcript).
     /// No-op by default.
-    fn set_result_text(&mut self, _text: &str) {}
-    /// Toggle whether the result box is user-editable (dictation vs result mode).
-    /// No-op by default.
-    fn set_box_editable(&mut self, _editable: bool) {}
+    fn set_input_text(&mut self, _text: &str) {}
     /// Set the result box background color (RGBA, 0.0..1.0) to match the main UI.
     /// No-op by default.
     fn set_box_background(&mut self, _r: f32, _g: f32, _b: f32, _a: f32) {}
     /// Reflect the auto-submit setting on the box's in-overlay toggle. No-op by
     /// default.
     fn set_box_auto_submit(&mut self, _on: bool) {}
+    /// Speak the given text aloud (native TTS). No-op by default.
+    fn speak(&mut self, _text: &str) {}
+    /// Stop any in-progress speech. No-op by default.
+    fn stop_speaking(&mut self) {}
+    /// Reflect the voice-output setting on the box's settings menu. No-op by
+    /// default.
+    fn set_voice_enabled(&mut self, _on: bool) {}
+    /// Set the shared puck accent color to a preset index. No-op by default.
+    fn set_puck_color(&mut self, _index: i32) {}
+    /// Reflect the transcription language (ISO code, "" = auto) on the settings
+    /// popover. No-op by default.
+    fn set_language(&mut self, _code: &str) {}
+    /// Reflect the response-verbosity level (0-10) on the settings popover.
+    /// No-op by default.
+    fn set_verbosity(&mut self, _level: u8) {}
+    /// Enter annotation mode: hide the pucks/result box and show the full-screen
+    /// drawing canvas. No-op by default.
+    fn begin_annotation(&mut self) {}
+    /// Exit annotation mode: hide the canvas and restore the pucks/result box.
+    /// No-op by default.
+    fn end_annotation(&mut self) {}
 }
 
 /// Captures the screen to PNG bytes. Backed on macOS by the `screencapture`

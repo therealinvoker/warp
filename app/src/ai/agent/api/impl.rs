@@ -49,6 +49,19 @@ pub async fn generate_multi_agent_output(
         );
     }
 
+    // Forward the response-verbosity setting (0-10) to the backend. `logging` is
+    // a generic string->Value map the backend already receives, so this needs no
+    // proto change; the harness reads this key and turns it into a system-prompt
+    // directive scaling how terse/thorough the answer is.
+    logging_metadata.insert(
+        "response_verbosity".to_owned(),
+        prost_types::Value {
+            kind: Some(prost_types::value::Kind::NumberValue(
+                params.response_verbosity as f64,
+            )),
+        },
+    );
+
     if params.should_redact_secrets {
         redaction::redact_inputs(&mut params.input);
     }

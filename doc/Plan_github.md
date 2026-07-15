@@ -3,8 +3,8 @@
 Status of the GitHub integration for the Bang fork, and the plan for the
 remaining work. Spans two repos:
 
-- **Client**: `~/Workspace/Warped/warp` (the Bang app, Rust)
-- **Backend**: `~/Workspace/Warped/harness-backend` (Node/Express/Mongo stand-in), deployed at **https://api.trybang.ai** on Railway (auto-deploys on push to `main`)
+- **Client**: `~/Workspace/Bang/bang-client` (the Bang app, Rust)
+- **Backend**: `~/Workspace/Bang/harness-backend` (Node/Express/Mongo stand-in), deployed at **https://api.trybang.ai** on Railway (auto-deploys on push to `main`)
 
 ## Context
 

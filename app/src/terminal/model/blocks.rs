@@ -57,6 +57,7 @@ use crate::terminal::view::{InlineBannerId, InlineBannerItem, SeparatorId, Withi
 use crate::terminal::{BlockPadding, ShellHost, SizeInfo, SizeUpdate};
 
 #[cfg(feature = "local_fs")]
+#[allow(dead_code)]
 const RESTORED_BLOCK_SEPARATOR_HEIGHT: f64 = 1.5;
 pub(in crate::terminal) const INLINE_BANNER_HEIGHT: f64 = 2.5;
 
@@ -930,6 +931,7 @@ impl BlockList {
     }
 
     #[cfg(feature = "local_fs")]
+    #[allow(dead_code)]
     pub(in crate::terminal) fn append_session_restoration_separator_to_block_list(
         &mut self,
         is_historical_conversation_restoration: bool,

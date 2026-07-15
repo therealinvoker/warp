@@ -324,6 +324,7 @@ pub enum LeftPanelDisplayedTab {
     ConversationListView,
     CodeReview,
     BrowserPreview,
+    KeyboardShortcuts,
 }
 
 impl From<ToolPanelView> for LeftPanelDisplayedTab {
@@ -335,6 +336,7 @@ impl From<ToolPanelView> for LeftPanelDisplayedTab {
             ToolPanelView::ConversationListView => LeftPanelDisplayedTab::ConversationListView,
             ToolPanelView::CodeReview => LeftPanelDisplayedTab::CodeReview,
             ToolPanelView::BrowserPreview => LeftPanelDisplayedTab::BrowserPreview,
+            ToolPanelView::KeyboardShortcuts => LeftPanelDisplayedTab::KeyboardShortcuts,
         }
     }
 }

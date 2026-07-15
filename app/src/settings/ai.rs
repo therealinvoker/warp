@@ -932,6 +932,55 @@ define_settings_group!(AISettings, settings: [
         toml_path: "agents.voice.voice_overlay_auto_submit",
         description: "When the voice overlay is open, auto-submit the transcript when you stop speaking (hands-free). When off, submit manually.",
     },
+    // When the voice overlay is open, read the agent's answer aloud with native
+    // text-to-speech. Toggled from the overlay's settings menu. Off by default.
+    voice_overlay_tts_enabled: VoiceOverlayTtsEnabled {
+        type: bool,
+        default: false,
+        supported_platforms: SupportedPlatforms::DESKTOP,
+        sync_to_cloud: SyncToCloud::Globally(RespectUserSyncSetting::Yes),
+        private: false,
+        toml_path: "agents.voice.voice_overlay_tts_enabled",
+        description: "When the voice overlay is open, read the agent's answer aloud (text-to-speech).",
+    },
+    // The accent color of the voice overlay pucks, as an index into the native
+    // preset palette (see kPuckPresets in overlay/native/overlay_puck.m). Chosen
+    // from the overlay's settings popover.
+    voice_overlay_puck_color: VoiceOverlayPuckColor {
+        type: usize,
+        default: 0,
+        supported_platforms: SupportedPlatforms::DESKTOP,
+        sync_to_cloud: SyncToCloud::Globally(RespectUserSyncSetting::Yes),
+        private: false,
+        toml_path: "agents.voice.voice_overlay_puck_color",
+        description: "The accent color of the voice overlay pucks (index into the preset palette).",
+    },
+    // The transcription language for the voice overlay, as an ISO-639-1 code
+    // (e.g. "en", "es"). Empty string means auto-detect. Chosen from the
+    // overlay's settings popover; pins the language so short words aren't
+    // mis-detected (e.g. "hey" transcribed as Chinese).
+    voice_overlay_language: VoiceOverlayLanguage {
+        type: String,
+        default: "en".to_string(),
+        supported_platforms: SupportedPlatforms::DESKTOP,
+        sync_to_cloud: SyncToCloud::Globally(RespectUserSyncSetting::Yes),
+        private: false,
+        toml_path: "agents.voice.voice_overlay_language",
+        description: "Transcription language for the voice overlay (ISO-639-1 code; empty = auto-detect).",
+    },
+    // How verbose agent responses should be, from 0 (most terse — e.g. a bare
+    // "Done.") to 10 (most thorough — full reasoning, caveats, and alternatives).
+    // Sent to the agent backend each turn via request metadata, where it becomes
+    // a system-prompt directive. 5 is balanced.
+    agent_verbosity: AgentVerbosity {
+        type: usize,
+        default: 5,
+        supported_platforms: SupportedPlatforms::ALL,
+        sync_to_cloud: SyncToCloud::Globally(RespectUserSyncSetting::Yes),
+        private: false,
+        toml_path: "agents.response_verbosity",
+        description: "How verbose agent responses are, from 0 (most terse) to 10 (most thorough).",
+    },
     // The number of times the user has entered Agent Mode.
     // Not a user-visible setting. We model it so we can show the voice input new feature popup
     // the correct number of times.

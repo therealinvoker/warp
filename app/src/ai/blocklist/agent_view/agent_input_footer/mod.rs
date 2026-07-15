@@ -126,6 +126,10 @@ const START_REMOTE_CONTROL_LOGIN_REQUIRED_TOOLTIP: &str = "Log in to use /remote
 
 const CLOUD_MODE_V2_FOOTER_GAP: f32 = 4.;
 
+/// The `(left, right)` pair of optional inside-composer controls returned by
+/// [`render_inside_controls_split`]; either side is `None` when disabled.
+type InsideControlsSplit = (Option<Box<dyn Element>>, Option<Box<dyn Element>>);
+
 /// Voice input state for the CLI agent footer. Unlike the editor-based voice
 /// flow (which goes through Input → EditorView), this state is self-contained
 /// so that transcribed text can be written directly to the PTY.
@@ -282,8 +286,13 @@ impl AgentInputFooter {
 
         let nld_button = ctx.add_typed_action_view(|ctx| {
             let is_nld_enabled = AISettings::as_ref(ctx).is_ai_autodetection_enabled(ctx);
+            // Match the `A+` glyph to a text button's label (e.g. `/remote-control`)
+            // instead of filling the whole square button, so it reads at the same
+            // size/weight as the neighboring toolbar text.
+            let nld_icon_size = Appearance::as_ref(ctx).monospace_font_size() + 2.0;
             let mut button = ActionButton::new("", NLDButtonTheme)
                 .with_icon(Icon::NLD)
+                .with_icon_size(nld_icon_size)
                 .with_size(button_size)
                 .with_tooltip_alignment(TooltipAlignment::Left)
                 .on_click(|ctx| {
@@ -813,6 +822,7 @@ impl AgentInputFooter {
                     BlocklistAIHistoryEvent::UpdatedTodoList { .. }
                     | BlocklistAIHistoryEvent::UpdatedConversationStatus { .. }
                     | BlocklistAIHistoryEvent::AppendedExchange { .. }
+                    | BlocklistAIHistoryEvent::ConversationUsageMetadataUpdated { .. }
                     | BlocklistAIHistoryEvent::UpdatedStreamingExchange { .. } => {
                         me.update_context_window_button(ctx);
                         me.model_selector.update(ctx, |_, ctx| ctx.notify());
@@ -2276,10 +2286,7 @@ impl AgentInputFooter {
     ///
     /// Locks the terminal model, so callers must not hold that lock (the terminal
     /// `Input` releases its model guard before calling this).
-    pub fn render_inside_controls_split(
-        &self,
-        app: &AppContext,
-    ) -> (Option<Box<dyn Element>>, Option<Box<dyn Element>>) {
+    pub fn render_inside_controls_split(&self, app: &AppContext) -> InsideControlsSplit {
         // A prompt alert takes over the outside row; keep the composer row clean.
         if !self.prompt_alert.as_ref(app).is_no_alert() {
             return (None, None);

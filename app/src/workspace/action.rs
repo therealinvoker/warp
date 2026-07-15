@@ -295,6 +295,13 @@ pub enum WorkspaceAction {
     SelectNewSessionMenuItem(NewSessionMenuItem),
     AutoupdateFailureLink,
     ApplyUpdate,
+    /// Bang (OSS) fork: quit and relaunch to pick up a newer build already on
+    /// disk. Triggered by the side-nav "Update" badge when the harness
+    /// changelog advertises a newer version than the running build.
+    RelaunchForNewBuild,
+    /// Bang (OSS) fork: open the "What's new" changelog modal. Triggered by the
+    /// caret segment of the side-nav "Update" split button.
+    ShowChangelogModal,
     LogOut,
     CopyVersion(&'static str),
     DownloadNewVersion,
@@ -356,7 +363,6 @@ pub enum WorkspaceAction {
     OpenLaunchConfigSaveModal,
     SelectTabConfig(TabConfig),
     DispatchToSettingsTab(SettingsTabAction),
-    ToggleResourceCenter,
     ToggleUserMenu,
     /// Dev-only: re-enter the first-run welcome/onboarding experience from the
     /// user menu. Bridges to `RootViewAction::DebugEnterOnboardingState`.
@@ -1031,6 +1037,8 @@ impl WorkspaceAction {
             // restarted, the user can continue working
             AutoupdateFailureLink
             | ApplyUpdate
+            | RelaunchForNewBuild
+            | ShowChangelogModal
             | CopyVersion(_)
             | DownloadNewVersion
             | ConfigureKeybindingSettings { .. }
@@ -1074,7 +1082,6 @@ impl WorkspaceAction {
             | SetA11yVerbosityLevel(_)
             | ToggleNotifications
             | DispatchToSettingsTab { .. }
-            | ToggleResourceCenter
             | ToggleUserMenu
             | ReplayWelcome
             | ClickedAIAssistantIcon

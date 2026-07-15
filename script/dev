@@ -13,6 +13,20 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")"/.. && pwd)"
 # `npx --yes skills@1.5.6 update -p -y`, commit skills-lock.json, then relaunch.
 export WARP_SKIP_COMMON_SKILLS_INSTALL=1
 
+# Stamp a GIT_RELEASE_TAG so `ChannelState::app_version()` is Some for this build.
+# The OSS/Bang build otherwise has no version, which disables auto-opening the
+# changelog ("What's New?") on launch and its per-version "already shown" dedup
+# (see app/src/workspace/view.rs handle_changelog_event + Settings::
+# has_changelog_been_shown). Derive it from the HEAD commit so rebuilding the
+# same commit doesn't re-pop the changelog, but a new commit does. The format
+# matches script/update_plist's vN.YYYY.MM.DD.HH.MM.channel_NN so plist stamping
+# stays clean. cargo/rustc re-fingerprints crates when an `option_env!` var
+# changes, so this is picked up on the next bundle without a manual clean.
+if [ -z "${GIT_RELEASE_TAG:-}" ]; then
+  bang_commit_date="$(git -C "$ROOT" show -s --format=%cd --date=format:%Y.%m.%d.%H.%M HEAD 2>/dev/null || true)"
+  [ -n "$bang_commit_date" ] && export GIT_RELEASE_TAG="v0.${bang_commit_date}.oss_00"
+fi
+
 TARGET="local"
 ARGS=()
 for a in "$@"; do

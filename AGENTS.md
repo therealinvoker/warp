@@ -20,6 +20,33 @@ This file provides guidance when working with code in this repository.
 >   ```
 >   The OSS channel now honors `WARP_SERVER_ROOT_URL`, so the client talks to the local harness backend instead of Warp's servers.
 
+### Changelog / "What's New?" (Bang fork)
+
+The client's **Resource Center** ("Bang Essentials", the top-right lightbulb) shows a **"What's New?"** section (the latest release). On the Bang (OSS) build this is served by the harness, and its "Read all changelogs" link goes to **https://trybang.ai/changelog** (the `bang-site` repo), which shows the full history.
+
+Both are driven by a **single source of truth**: **`../harness-backend/src/assets/changelogs.json`** — a JSON **array of releases, newest first** (route: `../harness-backend/src/routes/clientVersion.js`). Each entry is a `Changelog` object plus a `version` string.
+
+- `GET /changelog.json` returns the **latest** entry (`changelogs[0]`). The client fetches this on window launch and when the user opens the changelog, and — when a `GIT_RELEASE_TAG` is baked in (see `script/dev` / `script/snapshot`) — auto-opens the panel once per build and dedupes via `Settings::has_changelog_been_shown`.
+- `GET /changelogs.json` returns the **full array**; `bang-site` fetches it server-side to render trybang.ai/changelog.
+
+**When to update `changelogs.json`** (do this in the same change, without being asked, whenever it applies):
+
+- You add or ship a **user-visible feature, enhancement, or notable bug fix** in the client (roughly the same bar as the `CHANGELOG-*` PR markers below). Internal refactors, tests, and non-user-facing changes do **not** warrant an entry.
+- Before cutting a new daily-driver via `script/snapshot`, make sure `changelogs.json` reflects what's new since the last snapshot.
+
+**How to update it:**
+
+- Edit `../harness-backend/src/assets/changelogs.json`. **Prepend** a new entry at index 0 (newest first) so the public history is preserved; only fold into the existing top entry while iterating on an unreleased build. Each entry's `Changelog` fields must match the Rust struct (`crates/channel_versions/src/lib.rs`):
+  - `version`: the release tag (`vN.YYYY.MM.DD.HH.MM.channel_NN`, matches `GIT_RELEASE_TAG`). Shown on the public page **and** used to drive the update badge (see below). Set it to the tag of the build you're shipping.
+  - `date`: RFC 3339 (e.g. `"2026-07-14T00:00:00-07:00"`).
+  - `sections`: required — leave as `[]`.
+  - `markdown_sections`: entries whose `title` is **exactly** `"New features"`, `"Improvements"`, or `"Bug fixes"`; put items as a markdown bullet list in `markdown` (`"* …\n"`, supports `**bold**`, `` `code` ``, `[text](https://url)`). Leave a section's `markdown` as `""` when it has nothing.
+  - `image_url`: optional hero image URL, or `null`.
+- Keep entries short and user-facing (what changed / why it matters), not implementation detail. New entries typically go under `"New features"` or `"Improvements"`.
+- No client rebuild is needed for content changes — the routes read the file per-request, so the next fetch picks it up (restart the harness only if it wasn't running).
+
+**Update badge (the Bang analogue of autoupdate):** the side-nav footer shows an "Update" pill (`render_update_badge` in `app/src/workspace/view/vertical_tabs.rs`) when the latest changelog's `version` is **newer** than the running build's baked `GIT_RELEASE_TAG` (`ChangelogModel::available_update_version` compares them via `is_incoming_version_past_current`). Clicking it dispatches `WorkspaceAction::RelaunchForNewBuild`, which quits and relaunches so the app re-execs the newer bundle already on disk. So: after you rebuild with `script/snapshot` (which bakes a new `GIT_RELEASE_TAG` from the HEAD commit date), set the top `changelogs.json` entry's `version` to that same tag — any older instance still running will then surface the badge and can relaunch into the new build.
+
 ## Development Commands
 
 ### Build and Run

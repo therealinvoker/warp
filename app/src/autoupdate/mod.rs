@@ -922,6 +922,23 @@ pub fn initiate_relaunch_for_update(app: &mut AppContext) {
     }
 }
 
+/// Quit and relaunch the app to pick up a newly-built bundle already on disk.
+///
+/// This is the Bang (OSS) fork's "update" path. Unlike
+/// [`initiate_relaunch_for_update`], it does not depend on the autoupdate state
+/// machine (which is disabled on the OSS channel) — there is no download to
+/// apply, because the new build was produced locally by `script/snapshot`. It
+/// simply requests a relaunch and terminates; on the way out
+/// [`spawn_child_if_necessary`] re-execs the bundle path, which now points at
+/// the newer build. The badge that triggers this is gated on the harness
+/// changelog advertising a newer version (see
+/// `ChangelogModel::available_update_version`).
+pub fn relaunch_app(app: &mut AppContext) {
+    log::info!("Relaunching Bang to pick up a newer build on disk");
+    RelaunchModel::handle(app).update(app, RelaunchModel::request_relaunch);
+    app.terminate_app(TerminationMode::Cancellable, None);
+}
+
 /// Apply a pending update without relaunching. This is called at shutdown in case the user quit
 /// without updating. Returns `true` if there was a pending update to apply.
 ///

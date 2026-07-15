@@ -24,6 +24,13 @@ fn main() -> Result<()> {
     if cfg!(debug_assertions) {
         state = state.with_additional_features(warp_core::features::DEBUG_FLAGS);
     }
+    // Personal-fork: enable the changelog ("What's New?") surface in the OSS
+    // build. It normally ships via RELEASE_FLAGS, which the OSS channel doesn't
+    // pull in. This gates the launch-time fetch, the `/changelog` command, and
+    // the changelog menu entries; the content itself is served by the harness
+    // backend at {WARP_SERVER_ROOT_URL}/changelog.json (see
+    // app/src/autoupdate/changelog.rs).
+    state = state.with_additional_features(&[warp_core::features::FeatureFlag::Changelog]);
     // Personal-fork: surface the embedded browser preview tab (and its toolbelt
     // launcher) in the OSS build, since it otherwise only ships in dogfood.
     #[cfg(target_os = "macos")]

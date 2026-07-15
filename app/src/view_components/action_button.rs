@@ -94,6 +94,11 @@ pub struct ActionButton {
     /// Overrides the default corner radius. Useful for making an icon-only button
     /// fully circular (e.g. `CornerRadius::with_all(Radius::Percentage(50.))`).
     corner_radius_override: Option<CornerRadius>,
+
+    /// Overrides the icon glyph size derived from [`ButtonSize`]. Useful when an
+    /// icon-only button (e.g. the `A+` autodetection toggle) needs to visually
+    /// match a text button's label instead of filling the whole square button.
+    icon_size_override: Option<f32>,
 }
 
 pub type ClickHandler = Box<dyn Fn(&mut EventContext) + 'static>;
@@ -247,6 +252,7 @@ impl ActionButton {
             compact_keybinding: false,
             keybinding_before_label: false,
             corner_radius_override: None,
+            icon_size_override: None,
         }
     }
 
@@ -257,6 +263,13 @@ impl ActionButton {
     /// Set the icon shown to the left of this button.
     pub fn with_icon(mut self, icon: Icon) -> Self {
         self.icon = Some(icon);
+        self
+    }
+
+    /// Override the icon glyph size (in px) instead of deriving it from the
+    /// button size. Lets an icon-only button match a text button's label size.
+    pub fn with_icon_size(mut self, icon_size: f32) -> Self {
+        self.icon_size_override = Some(icon_size);
         self
     }
 
@@ -764,7 +777,9 @@ impl View for ActionButton {
             };
 
             if let Some(icon) = self.icon {
-                let icon_size = self.size.icon_size(appearance, app);
+                let icon_size = self
+                    .icon_size_override
+                    .unwrap_or_else(|| self.size.icon_size(appearance, app));
                 let icon_fill = self
                     .icon_ansi_color
                     .map(|ansi| {

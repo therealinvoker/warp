@@ -128,13 +128,11 @@ pub(crate) fn handle(
             target,
             ctx,
         ),
-        ActionKind::SurfaceResourceCenterToggle => workspace_action(
-            instance_id,
-            action,
-            WorkspaceAction::ToggleResourceCenter,
-            target,
-            ctx,
-        ),
+        // The Resource Center / Warp Essentials drawer has been removed.
+        ActionKind::SurfaceResourceCenterToggle => Err(ControlError::new(
+            ErrorCode::UnsupportedAction,
+            "surface.resource_center.toggle is no longer supported; the Resource Center drawer has been removed",
+        )),
         ActionKind::SurfaceAiAssistantToggle => workspace_action(
             instance_id,
             action,

@@ -1,0 +1,34 @@
+[package]
+name = "voice_tts"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-only"
+publish = false
+
+# Local, embeddable neural text-to-speech (Piper VITS via ONNX Runtime).
+#
+# Modularity (see Phase 1 plan): this crate has NO UI and NO Bang/IDE
+# dependencies, so it can back both the standalone overlay app and the in-Bang
+# integration. The TTS engine and the phonemizer are separate traits so the
+# licensing-sensitive phonemization (eSpeak-NG, GPL, invoked out-of-process) is
+# swappable without touching synthesis or callers.
+
+[features]
+# Software acoustic echo cancellation (WebRTC APM). Off by default so the C++
+# WebRTC build (meson/ninja) is only required where AEC is used. Enables
+# hands-free barge-in: cancel the agent's spoken answer from the mic input.
+aec = ["dep:webrtc-audio-processing"]
+
+[dependencies]
+anyhow.workspace = true
+command.workspace = true
+serde = { workspace = true }
+serde_json = { workspace = true }
+# Match input_classifier's versions so ONNX Runtime is shared across the app.
+ort = "2.0.0-rc.10"
+ndarray = "0.16.1"
+# BSD-3; builds the WebRTC AudioProcessing C++ statically (bundled).
+webrtc-audio-processing = { version = "2.1", features = ["bundled"], optional = true }
+
+[dev-dependencies]
+hound = "3.5"

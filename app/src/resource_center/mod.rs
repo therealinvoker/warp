@@ -7,17 +7,14 @@ use crate::report_if_error;
 use crate::terminal::general_settings::GeneralSettings;
 use crate::util::bindings::trigger_to_keystroke;
 
-mod main_page;
+mod changelog_modal;
 pub mod utils;
-pub use main_page::{ResourceCenterMainEvent, ResourceCenterMainView};
+pub use changelog_modal::ChangelogModalBody;
 mod keybindings_page;
 pub use keybindings_page::KeybindingsView;
 mod section_views;
-pub use section_views::{ChangelogSectionView, ContentSectionView, FeatureSectionView};
-pub mod sections;
-mod view;
+pub use section_views::ChangelogSectionView;
 use serde::{Deserialize, Serialize};
-pub use view::{ResourceCenterAction, ResourceCenterEvent, ResourceCenterPage, ResourceCenterView};
 use warpui::keymap::Keystroke;
 use warpui::{AppContext, Entity, SingletonEntity};
 

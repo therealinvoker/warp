@@ -299,6 +299,9 @@ objc2-foundation = { workspace = true, features = [
 permissions = "0.4.1"
 pprof = { workspace = true, optional = true, features = ["frame-pointer"] }
 security-framework-sys = "2.0.0"
+# Local neural TTS (Piper) for the voice overlay's spoken answers, plus software
+# AEC (WebRTC) for hands-free barge-in.
+voice_tts = { path = "../crates/voice_tts", features = ["aec"] }
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 winit = { workspace = true }

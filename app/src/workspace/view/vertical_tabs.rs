@@ -47,6 +47,7 @@ use crate::ai::conversation_status_ui::render_status_element;
 use crate::appearance::Appearance;
 use crate::auth::AuthStateProvider;
 use crate::autoupdate::get_update_state;
+use crate::changelog_model::ChangelogModel;
 use crate::cloud_object::model::generic_string_model::StringModel;
 use crate::cloud_object::CloudObjectLookup as _;
 use crate::code::buffer_location::LocalOrRemotePath;
@@ -793,6 +794,9 @@ pub(super) struct VerticalTabsPanelState {
     settings_launcher_mouse_state: MouseStateHandle,
     account_button_mouse_state: MouseStateHandle,
     update_badge_mouse_state: MouseStateHandle,
+    /// Hover state for the caret segment of the "Update" split button, which
+    /// opens the "What's new" changelog modal.
+    update_badge_split_mouse_state: MouseStateHandle,
     panes_segment_mouse_state: MouseStateHandle,
     tabs_segment_mouse_state: MouseStateHandle,
     workspace_segment_mouse_state: MouseStateHandle,
@@ -851,6 +855,7 @@ impl Default for VerticalTabsPanelState {
             settings_launcher_mouse_state: Default::default(),
             account_button_mouse_state: Default::default(),
             update_badge_mouse_state: Default::default(),
+            update_badge_split_mouse_state: Default::default(),
             panes_segment_mouse_state: Default::default(),
             tabs_segment_mouse_state: Default::default(),
             workspace_segment_mouse_state: Default::default(),
@@ -2016,7 +2021,18 @@ fn render_update_badge(
     appearance: &Appearance,
     app: &AppContext,
 ) -> Option<Box<dyn Element>> {
-    if !(FeatureFlag::Autoupdate.is_enabled() && get_update_state(app).ready_for_update()) {
+    // Stock autoupdate path (Warp channels): a downloaded update is staged.
+    let stock_update_ready =
+        FeatureFlag::Autoupdate.is_enabled() && get_update_state(app).ready_for_update();
+    // Bang (OSS) fork: autoupdate is disabled, so instead we surface the badge
+    // when the harness changelog advertises a newer build than the one running
+    // (the new bundle is already on disk from `script/snapshot`). Clicking just
+    // quits + relaunches to pick it up.
+    let bang_update_available = ChangelogModel::handle(app)
+        .as_ref(app)
+        .available_update_version()
+        .is_some();
+    if !stock_update_ready && !bang_update_available {
         return None;
     }
 
@@ -2025,50 +2041,99 @@ fn render_update_badge(
         .to_ansi_color(&theme.terminal_colors().normal)
         .into();
     let font_family = appearance.ui_font_family();
-    let ui_builder = appearance.ui_builder().clone();
+    // Blue "what's new" bubble on the split segment.
+    let blue: ColorU = AnsiColorIdentifier::Blue
+        .to_ansi_color(&theme.terminal_colors().normal)
+        .into();
 
-    Some(
-        Hoverable::new(state.update_badge_mouse_state.clone(), move |hover_state| {
+    // Left segment: applies the staged update (stock) or relaunches to pick up
+    // the newer build on disk (Bang/OSS). No leading arrow.
+    let left_ui_builder = appearance.ui_builder().clone();
+    let left = Hoverable::new(state.update_badge_mouse_state.clone(), move |hover_state| {
+        let is_hovered = hover_state.is_hovered();
+        let segment = Container::new(
+            Text::new_inline("Update".to_string(), font_family, 11.)
+                .with_color(WarpThemeFill::Solid(accent).into())
+                .finish(),
+        )
+        .with_background(ThemeFill::Solid(coloru_with_opacity(
+            accent,
+            if is_hovered { 32 } else { 0 },
+        )))
+        .with_horizontal_padding(6.)
+        .with_vertical_padding(2.)
+        .finish();
+
+        if is_hovered {
+            let tooltip = left_ui_builder
+                .tool_tip("Update and relaunch Bang".to_string())
+                .build()
+                .finish();
+            let mut stack = Stack::new().with_child(segment);
+            stack.add_positioned_overlay_child(
+                tooltip,
+                OffsetPositioning::offset_from_parent(
+                    vec2f(0., -4.),
+                    ParentOffsetBounds::WindowByPosition,
+                    ParentAnchor::TopMiddle,
+                    ChildAnchor::BottomMiddle,
+                ),
+            );
+            stack.finish()
+        } else {
+            segment
+        }
+    })
+    .on_click(move |ctx, _, _| {
+        if bang_update_available {
+            ctx.dispatch_typed_action(WorkspaceAction::RelaunchForNewBuild);
+        } else {
+            ctx.dispatch_typed_action(WorkspaceAction::ApplyUpdate);
+        }
+    })
+    .with_cursor(Cursor::PointingHand)
+    .finish();
+
+    // Thin vertical divider separating the two segments of the split button.
+    let divider = ConstrainedBox::new(
+        Container::new(Flex::row().finish())
+            .with_background(ThemeFill::Solid(coloru_with_opacity(accent, 64)))
+            .finish(),
+    )
+    .with_width(1.)
+    .with_height(12.)
+    .finish();
+
+    // Right (caret) segment: opens the "What's new" changelog modal.
+    let right_ui_builder = appearance.ui_builder().clone();
+    let right = Hoverable::new(
+        state.update_badge_split_mouse_state.clone(),
+        move |hover_state| {
             let is_hovered = hover_state.is_hovered();
-            let background = ThemeFill::Solid(coloru_with_opacity(
-                accent,
-                if is_hovered { 28 } else { 16 },
-            ));
-
-            let pill = Container::new(
-                Flex::row()
-                    .with_main_axis_size(MainAxisSize::Min)
-                    .with_cross_axis_alignment(CrossAxisAlignment::Center)
-                    .with_spacing(4.)
-                    .with_child(
-                        ConstrainedBox::new(
-                            WarpIcon::ArrowUp
-                                .to_warpui_icon(WarpThemeFill::Solid(accent))
-                                .finish(),
-                        )
-                        .with_width(11.)
-                        .with_height(11.)
+            let segment = Container::new(
+                ConstrainedBox::new(
+                    WarpIcon::CircleFilled
+                        .to_warpui_icon(WarpThemeFill::Solid(blue))
                         .finish(),
-                    )
-                    .with_child(
-                        Text::new_inline("Update".to_string(), font_family, 11.)
-                            .with_color(WarpThemeFill::Solid(accent).into())
-                            .finish(),
-                    )
-                    .finish(),
+                )
+                .with_width(9.)
+                .with_height(9.)
+                .finish(),
             )
-            .with_background(background)
-            .with_corner_radius(CornerRadius::with_all(CONTROL_BAR_BUTTON_RADIUS))
-            .with_horizontal_padding(6.)
+            .with_background(ThemeFill::Solid(coloru_with_opacity(
+                accent,
+                if is_hovered { 32 } else { 0 },
+            )))
+            .with_horizontal_padding(5.)
             .with_vertical_padding(2.)
             .finish();
 
             if is_hovered {
-                let tooltip = ui_builder
-                    .tool_tip("Update and relaunch Warp".to_string())
+                let tooltip = right_ui_builder
+                    .tool_tip("What's new".to_string())
                     .build()
                     .finish();
-                let mut stack = Stack::new().with_child(pill);
+                let mut stack = Stack::new().with_child(segment);
                 stack.add_positioned_overlay_child(
                     tooltip,
                     OffsetPositioning::offset_from_parent(
@@ -2080,13 +2145,28 @@ fn render_update_badge(
                 );
                 stack.finish()
             } else {
-                pill
+                segment
             }
-        })
-        .on_click(|ctx, _, _| {
-            ctx.dispatch_typed_action(WorkspaceAction::ApplyUpdate);
-        })
-        .with_cursor(Cursor::PointingHand)
+        },
+    )
+    .on_click(move |ctx, _, _| {
+        ctx.dispatch_typed_action(WorkspaceAction::ShowChangelogModal);
+    })
+    .with_cursor(Cursor::PointingHand)
+    .finish();
+
+    Some(
+        Container::new(
+            Flex::row()
+                .with_main_axis_size(MainAxisSize::Min)
+                .with_cross_axis_alignment(CrossAxisAlignment::Center)
+                .with_child(left)
+                .with_child(divider)
+                .with_child(right)
+                .finish(),
+        )
+        .with_background(ThemeFill::Solid(coloru_with_opacity(accent, 16)))
+        .with_corner_radius(CornerRadius::with_all(CONTROL_BAR_BUTTON_RADIUS))
         .finish(),
     )
 }

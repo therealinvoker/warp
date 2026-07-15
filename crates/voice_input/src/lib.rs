@@ -33,6 +33,13 @@ pub struct RealtimeVoiceStream {
 }
 
 impl RealtimeVoiceStream {
+    /// Wrap an externally-produced PCM16 frame channel (e.g. the macOS
+    /// echo-cancelled AEC capture) so it can feed the same Realtime pipeline as
+    /// the built-in cpal streaming. Frames must already be 24kHz mono PCM16 LE.
+    pub fn from_receiver(pcm_rx: async_channel::Receiver<Vec<u8>>) -> Self {
+        Self { pcm_rx }
+    }
+
     /// Await the next 24kHz mono PCM16 LE frame, or `None` once the stream ends
     /// (the `VoiceInput` streaming state was dropped/stopped).
     pub async fn next_frame(&self) -> Option<Vec<u8>> {
@@ -503,8 +510,9 @@ impl VoiceInput {
             .map_err(|e| {
                 StartListeningError::Other(anyhow::anyhow!("Failed to build input stream: {e}"))
             })?;
-        cpal::traits::StreamTrait::play(&stream)
-            .map_err(|e| StartListeningError::Other(anyhow::anyhow!("Failed to play stream: {e}")))?;
+        cpal::traits::StreamTrait::play(&stream).map_err(|e| {
+            StartListeningError::Other(anyhow::anyhow!("Failed to play stream: {e}"))
+        })?;
 
         let (pcm_tx, pcm_rx) = async_channel::unbounded();
         self.voice_session_start = Some(instant::Instant::now());
@@ -546,7 +554,8 @@ impl VoiceInput {
         let pcm_tx = pcm_tx.clone();
         ctx.spawn(
             async move {
-                if let Err(e) = Self::stream_resampled_pcm16(resampler, pcm_tx, input_buffer).await {
+                if let Err(e) = Self::stream_resampled_pcm16(resampler, pcm_tx, input_buffer).await
+                {
                     log::error!("Failed to resample streaming frame: {e}");
                 }
             },

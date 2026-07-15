@@ -41,6 +41,16 @@ fi
 # so building the snapshot never triggers the per-launch skills fetch/prompt.
 export WARP_SKIP_COMMON_SKILLS_INSTALL=1
 
+# Stamp a GIT_RELEASE_TAG so `ChannelState::app_version()` is Some, matching
+# script/dev. Without it the OSS/Bang build has no version, which disables the
+# changelog auto-open-on-launch and its per-version "already shown" dedup. Derive
+# it from the HEAD commit (so a new snapshot at a new commit re-pops the changelog
+# once) in script/update_plist's vN.YYYY.MM.DD.HH.MM.channel_NN format.
+if [ -z "${GIT_RELEASE_TAG:-}" ]; then
+  bang_commit_date="$(git -C "$ROOT" show -s --format=%cd --date=format:%Y.%m.%d.%H.%M HEAD 2>/dev/null || true)"
+  [ -n "$bang_commit_date" ] && export GIT_RELEASE_TAG="v0.${bang_commit_date}.oss_00"
+fi
+
 DEST=""
 BUILD_SUBDIR="debug"
 GUI=false

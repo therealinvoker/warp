@@ -91,7 +91,6 @@ pub enum CustomAction {
     FilesPalette,
     TriggerWelcomeBlock,
     CommandSearch,
-    ToggleResourceCenter,
     ToggleKeybindingsPage,
     ScrollToTopOfSelectedBlocks,
     ScrollToBottomOfSelectedBlocks,
@@ -362,7 +361,6 @@ pub fn custom_tag_to_keystroke(custom: CustomTag) -> Option<Keystroke> {
         // Note: The base character '/' is used instead of '?' as mac registers keybindings
         // differently compared to the app which saves the resulting character used with shift
         // TODO: resolve these keybinding differences
-        CustomAction::ToggleResourceCenter => Keystroke::parse("ctrl-shift-/").ok(),
         CustomAction::ToggleKeybindingsPage => Keystroke::parse("cmdorctrl-/").ok(),
         CustomAction::ScrollToTopOfSelectedBlocks => Keystroke::parse("cmdorctrl-shift-up").ok(),
         CustomAction::ScrollToBottomOfSelectedBlocks => {

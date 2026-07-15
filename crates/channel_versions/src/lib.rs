@@ -176,6 +176,13 @@ pub struct Changelog {
     pub image_url: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub oz_updates: Vec<String>,
+    /// The release tag this changelog entry describes (e.g.
+    /// `v0.2026.07.14.00.00.oss_00`). Only populated by the Bang (OSS) fork's
+    /// harness-served changelog; used to detect when a newer build is available
+    /// (see the update badge in `vertical_tabs.rs`). Absent for Warp's own
+    /// per-version changelog map (the version is the map key there).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
 }
 
 // Default value for when the changelog JSON doesn't have the markdown_sections field

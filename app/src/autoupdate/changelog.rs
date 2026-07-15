@@ -71,6 +71,17 @@ async fn fetch_current_changelog(client: &http_client::Client, nonce: &str) -> R
 /// Returns the URL to the changelog for the given version of this release
 /// bundle.
 fn changelog_url(channel: Channel, version: &str) -> String {
+    // The Bang (OSS) fork has no per-version GCS release bucket, and
+    // `release_assets_directory_url` is `unreachable!` for the OSS channel. Its
+    // changelog is served by the harness backend at a fixed path off the
+    // configured server root (WARP_SERVER_ROOT_URL). The client appends a
+    // cache-busting `?r=` query param (see `fetch_current_changelog`).
+    if channel == Channel::Oss {
+        return format!(
+            "{}/changelog.json",
+            ChannelState::server_root_url().trim_end_matches('/')
+        );
+    }
     format!(
         "{}/changelog.json",
         release_assets_directory_url(channel, version)
@@ -81,5 +92,9 @@ fn changelog_url(channel: Channel, version: &str) -> String {
 /// build (true), or use the changelog information embedded in
 /// channel_versions.json (false).
 pub fn should_fetch_changelog_json(channel: Channel) -> bool {
-    channel == Channel::Dev
+    // Dev fetches a per-release changelog.json from GCS. The OSS/Bang fork fetches
+    // a single changelog.json served by its harness backend (see `changelog_url`),
+    // since the channel_versions changelog map explicitly excludes `Channel::Oss`
+    // (see `get_current_changelog`).
+    matches!(channel, Channel::Dev | Channel::Oss)
 }

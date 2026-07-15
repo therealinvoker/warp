@@ -162,7 +162,11 @@ pub(super) fn relaunch() -> Result<()> {
     relaunch_command.push(launch_command);
 
     log::info!("Executing relaunch command {relaunch_command:?}");
-    blocking::Command::new("sh")
+    // Use an absolute path to the shell. When Bang is launched by launchd (via
+    // `script/run`), the process inherits a minimal `PATH` that may not contain
+    // `/bin`, so spawning a bare `sh` fails with ENOENT and the relaunch never
+    // happens. `/bin/sh` always exists on macOS and sidesteps `PATH` entirely.
+    blocking::Command::new("/bin/sh")
         .arg("-c")
         .arg(relaunch_command)
         .spawn()?;

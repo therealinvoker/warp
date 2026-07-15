@@ -6660,6 +6660,15 @@ impl Input {
             // and reflect the current auto-submit setting on the overlay toggle.
             let bg: ColorU = Appearance::as_ref(ctx).theme().background().into();
             let auto_submit = *crate::settings::AISettings::as_ref(ctx).voice_overlay_auto_submit;
+            let voice_on = *crate::settings::AISettings::as_ref(ctx).voice_overlay_tts_enabled;
+            let puck_color =
+                *crate::settings::AISettings::as_ref(ctx).voice_overlay_puck_color as i32;
+            let language = crate::settings::AISettings::as_ref(ctx)
+                .voice_overlay_language
+                .value()
+                .clone();
+            let verbosity =
+                (*crate::settings::AISettings::as_ref(ctx).agent_verbosity).min(10) as u8;
             crate::overlay::OverlayController::handle(ctx).update(ctx, |controller, _| {
                 controller.set_box_background(
                     bg.r as f32 / 255.0,
@@ -6668,16 +6677,51 @@ impl Input {
                     1.0,
                 );
                 controller.set_box_auto_submit(auto_submit);
+                controller.set_voice_enabled(voice_on);
+                controller.set_puck_color(puck_color);
+                controller.set_language(&language);
+                controller.set_verbosity(verbosity);
             });
+            // Warm up the neural TTS voice off-thread so the first spoken answer
+            // doesn't pause while the model loads.
+            #[cfg(target_os = "macos")]
+            crate::overlay::preload_tts();
         }
         #[cfg(feature = "voice_input")]
         if now_open {
-            self.start_overlay_voice(ctx);
+            // Show voice mode as "on" in the main input immediately (mic button
+            // + "Listening…" placeholder), before the deferred audio startup.
+            self.set_overlay_mic_indicator(true, ctx);
+            // Defer audio startup by one frame so the just-shown puck paints
+            // first. `RealtimeVoice::start()` initializes the AEC/cpal capture
+            // synchronously on the main thread, which would otherwise block the
+            // runloop from compositing the overlay window until mic setup
+            // finishes — the perceived "delay before the overlay appears".
+            ctx.spawn(
+                async {
+                    warpui::r#async::Timer::after(std::time::Duration::from_millis(16)).await;
+                },
+                Self::start_overlay_voice_deferred,
+            );
         } else {
             self.stop_overlay_voice(ctx);
+            self.set_overlay_mic_indicator(false, ctx);
         }
         #[cfg(not(feature = "voice_input"))]
         let _ = now_open;
+    }
+
+    /// Second half of `toggle_overlay`'s open path, run one frame later so the
+    /// overlay window is visible before the (synchronous, main-thread) mic setup
+    /// runs. No-op if the overlay was toggled shut again before this tick.
+    #[cfg(feature = "voice_input")]
+    fn start_overlay_voice_deferred(&mut self, _: (), ctx: &mut ViewContext<Self>) {
+        if crate::overlay::OverlayController::handle(ctx)
+            .as_ref(ctx)
+            .is_open()
+        {
+            self.start_overlay_voice(ctx);
+        }
     }
 
     #[cfg(feature = "voice_input")]
@@ -6685,6 +6729,26 @@ impl Input {
         self.enter_ai_mode(Some(InputTypeAutoDetectionSource::VoiceInputToggle), ctx);
         self.overlay_start_listening(ctx);
         self.schedule_overlay_level_poll(ctx);
+    }
+
+    /// Reflect the overlay's listening state on the main agent input: light up
+    /// the mic button and show a "Listening…" placeholder while the overlay is
+    /// capturing, so voice mode is visibly "on" in the IDE (the Realtime path
+    /// doesn't emit `EditorEvent::VoiceStateUpdated`, which normally drives this).
+    #[cfg(feature = "voice_input")]
+    fn set_overlay_mic_indicator(&mut self, listening: bool, ctx: &mut ViewContext<Self>) {
+        self.agent_input_footer.update(ctx, |footer, ctx| {
+            footer.set_voice_is_active(listening, ctx);
+        });
+        if listening {
+            if self.editor.as_ref(ctx).is_empty(ctx) {
+                self.editor.update(ctx, |editor, ctx| {
+                    editor.set_placeholder_text("Listening…", ctx);
+                });
+            }
+        } else {
+            self.set_zero_state_hint_text(ctx);
+        }
     }
 
     #[cfg(feature = "voice_input")]
@@ -6707,6 +6771,14 @@ impl Input {
         } else {
             crate::overlay::realtime::RealtimeVoice::handle(ctx)
                 .update(ctx, |realtime, ctx| realtime.start(ctx));
+            // The Realtime session negotiates its audio source asynchronously
+            // (macOS AEC capture vs. cpal) and confirms it before use, so
+            // `is_aec()` isn't known yet here. We (re)enter dictation now and
+            // learn whether hands-free barge-in is available on the `Ready`
+            // event (see `on_realtime_voice_event`).
+            crate::overlay::OverlayController::handle(ctx).update(ctx, |controller, _| {
+                controller.set_accepting_dictation(true);
+            });
         }
     }
 
@@ -6726,6 +6798,20 @@ impl Input {
         }
     }
 
+    /// Reconnect the transcription session (only if one is currently live) so a
+    /// changed setting like the language takes effect immediately; a paused/idle
+    /// overlay picks it up on the next start.
+    #[cfg(feature = "voice_input")]
+    pub(crate) fn overlay_restart_listening(&mut self, ctx: &mut ViewContext<Self>) {
+        let active = crate::overlay::realtime::RealtimeVoice::handle(ctx)
+            .as_ref(ctx)
+            .is_active();
+        if active {
+            self.overlay_stop_listening(ctx);
+            self.overlay_start_listening(ctx);
+        }
+    }
+
     /// Handle a Realtime voice event: transcript -> composer, VAD -> puck,
     /// turn-end -> auto-submit (when enabled), failure -> chunked fallback.
     #[cfg(feature = "voice_input")]
@@ -6739,40 +6825,155 @@ impl Input {
         if !overlay.as_ref(ctx).is_open() {
             return;
         }
+        // Every `Input` view (agent tab, cloud tab, …) subscribes to the shared
+        // RealtimeVoice model, so without this guard they'd *all* insert the
+        // transcript and fire auto-submit — writing into multiple tabs and
+        // double-submitting. Only the composer that opened the overlay (its
+        // `active_input`) should react.
+        let is_active_input = overlay
+            .as_ref(ctx)
+            .active_input()
+            .map(|weak| weak.id() == ctx.view_id())
+            .unwrap_or(false);
+        if !is_active_input {
+            return;
+        }
         match event {
-            RealtimeVoiceEvent::Ready => {}
+            RealtimeVoiceEvent::Ready => {
+                // Hands-free barge-in keeps the mic live during TTS; the software
+                // AEC (macOS) cancels the agent's spoken answer from the mic so it
+                // doesn't self-interrupt. Enabled on macOS (software AEC) or when
+                // the OS VoiceProcessing capture is active. The AEC's ERLE is
+                // logged in `overlay::platform_mac` so we can confirm/tune
+                // cancellation on-device; if it still leaks, tap-to-interrupt
+                // remains as the fallback.
+                let aec = crate::overlay::realtime::RealtimeVoice::handle(ctx)
+                    .as_ref(ctx)
+                    .is_aec()
+                    || cfg!(target_os = "macos");
+                overlay.update(ctx, |controller, _| controller.set_aec_active(aec));
+            }
             RealtimeVoiceEvent::SpeechStarted => {
+                let (accepting, speaking, awaiting, aec) = {
+                    let controller = overlay.as_ref(ctx);
+                    (
+                        controller.is_accepting_dictation(),
+                        controller.is_speaking(),
+                        controller.is_restart_suppressed(),
+                        controller.is_aec_active(),
+                    )
+                };
                 overlay.update(ctx, |controller, _| controller.set_recording(true));
+                // Speech fired while we're *not* accepting dictation, i.e. the
+                // agent is thinking or reading its answer aloud. With hands-free
+                // AEC that means the user is barging in over the agent.
+                if !accepting && (speaking || awaiting) {
+                    // Validation signal (see plan): if this fires while the agent
+                    // is speaking with no real user speech, `say` is leaking
+                    // through the AEC and we should escalate to path B.
+                    log::info!(
+                        "[overlay] realtime speech.started while not accepting dictation \
+                         (speaking={speaking}, awaiting={awaiting}, aec={aec}) — treating as \
+                         barge-in={aec}"
+                    );
+                    if aec {
+                        self.overlay_barge_in(ctx);
+                    }
+                }
             }
             RealtimeVoiceEvent::SpeechStopped => {
                 overlay.update(ctx, |controller, _| controller.set_recording(false));
             }
             RealtimeVoiceEvent::TranscriptDelta(text) => {
-                if !text.is_empty() {
+                // Only feed the composer while dictating a prompt; ignore audio
+                // captured while the agent is thinking/speaking (hands-free mic
+                // stays live but its transcript isn't part of the next prompt
+                // unless the user barged in, which flips accepting back on).
+                let accepting = overlay.as_ref(ctx).is_accepting_dictation();
+                if accepting && !text.is_empty() {
                     self.editor
                         .update(ctx, |editor, ctx| editor.user_insert(text, ctx));
                 }
             }
             RealtimeVoiceEvent::TranscriptDone(_) => {}
             RealtimeVoiceEvent::TurnEnd => {
-                // Only auto-submit when enabled and not already awaiting a response.
+                // Only auto-submit when enabled and we're actually dictating a
+                // prompt (not mid-response / awaiting the agent).
                 let auto = *crate::settings::AISettings::as_ref(ctx).voice_overlay_auto_submit;
-                let awaiting = overlay.as_ref(ctx).is_restart_suppressed();
-                if auto && !awaiting {
+                let accepting = overlay.as_ref(ctx).is_accepting_dictation();
+                if auto && accepting {
                     self.overlay_submit(ctx);
                 }
             }
             RealtimeVoiceEvent::Failed => {
                 // Realtime can't run this session -> chunked Whisper fallback.
+                // No hands-free barge-in on that path.
                 overlay.update(ctx, |controller, _| {
-                    controller.set_use_chunked_fallback(true)
+                    controller.set_use_chunked_fallback(true);
+                    controller.set_aec_active(false);
                 });
                 if !overlay.as_ref(ctx).is_restart_suppressed() {
                     self.begin_overlay_voice_chunk(ctx);
                 }
             }
-            RealtimeVoiceEvent::Closed => {}
+            RealtimeVoiceEvent::Closed => {
+                // Session ended: hands-free is no longer available until a new
+                // session starts.
+                overlay.update(ctx, |controller, _| controller.set_aec_active(false));
+            }
         }
+    }
+
+    /// Hands-free barge-in: the user started speaking while the agent was
+    /// thinking or reading its answer aloud. Silence the agent, drop the
+    /// in-flight response tracking, and start a fresh prompt from what the user
+    /// is now saying — all without tearing down the (echo-cancelled) session,
+    /// which stays live so the incoming transcript flows straight in.
+    /// Whether the agent is currently working: a streaming response in progress,
+    /// or the CLI agent monitoring / driving a running command (the "steering"
+    /// state, which is *not* reported as `is_in_progress`).
+    #[cfg(feature = "voice_input")]
+    fn agent_is_busy(&self, ctx: &ViewContext<Self>) -> bool {
+        let monitoring = {
+            let model = self.model.lock();
+            let block = model.block_list().active_block();
+            block.is_agent_monitoring() || block.is_agent_driving_command()
+        };
+        let in_progress = self
+            .ai_context_model
+            .as_ref(ctx)
+            .selected_conversation(ctx)
+            .map(|conversation| conversation.status().is_in_progress())
+            .unwrap_or(false);
+        monitoring || in_progress
+    }
+
+    #[cfg(feature = "voice_input")]
+    fn overlay_barge_in(&mut self, ctx: &mut ViewContext<Self>) {
+        // Fully stop the agent so the next utterance is a *fresh request*, not a
+        // mid-run steering suggestion. We route Ctrl+C through the agent status
+        // bar (exactly like the stop button) because a command-monitoring agent
+        // isn't `is_in_progress`, so `cancel_conversation_progress` alone
+        // wouldn't stop it.
+        if self.agent_is_busy(ctx) {
+            self.agent_status_bar()
+                .clone()
+                .update(ctx, |status_bar, ctx| status_bar.handle_ctrl_c(ctx));
+        }
+        crate::overlay::OverlayController::handle(ctx).update(ctx, |controller, _| {
+            controller.stop_speaking();
+            controller.set_restart_suppressed(false);
+            controller.set_response_started(false);
+            // Drop the interrupted in-flight exchange (keep finalized history).
+            controller.set_last_prompt(None);
+            controller.set_thinking(false);
+            controller.set_accepting_dictation(true);
+            let history = controller.history_display("");
+            controller.set_history_text(&history);
+            controller.set_input_text("");
+        });
+        // Clear the composer so the new utterance forms a fresh prompt.
+        self.clear_buffer_and_reset_undo_stack(ctx);
     }
 
     /// Clicked the mic puck: pause (stop capturing, dim) or resume (start a new
@@ -6782,13 +6983,35 @@ impl Input {
         if !overlay.as_ref(ctx).is_open() {
             return;
         }
+        // Barge-in: if the agent is reading its answer aloud, a mic-puck tap
+        // silences it and immediately starts listening for the next prompt (so
+        // the user doesn't have to wait for the answer to finish).
+        if overlay.as_ref(ctx).is_speaking() {
+            overlay.update(ctx, |controller, _| {
+                controller.stop_speaking();
+                controller.set_restart_suppressed(false);
+                controller.set_response_started(false);
+                controller.set_paused(false);
+            });
+            #[cfg(feature = "voice_input")]
+            self.overlay_start_listening(ctx);
+            return;
+        }
         let now_paused = !overlay.as_ref(ctx).is_paused();
-        overlay.update(ctx, |controller, _| controller.set_paused(now_paused));
+        overlay.update(ctx, |controller, _| {
+            controller.set_paused(now_paused);
+            if now_paused {
+                // Also silence any answer being read when the user pauses.
+                controller.stop_speaking();
+            }
+        });
         #[cfg(feature = "voice_input")]
         if now_paused {
             self.overlay_stop_listening(ctx);
+            self.set_overlay_mic_indicator(false, ctx);
         } else {
             self.overlay_start_listening(ctx);
+            self.set_overlay_mic_indicator(true, ctx);
         }
         #[cfg(not(feature = "voice_input"))]
         let _ = now_paused;
@@ -6802,29 +7025,40 @@ impl Input {
         if prompt.is_empty() {
             return;
         }
-        // Cancel any in-flight recording *and* pending transcription first, so it
-        // doesn't finish and re-insert the just-submitted text after we clear.
-        // Suppress the auto-restart across the cancel so the aborted session
-        // settling (an async result) doesn't fight a freshly started window;
-        // a deferred resume starts exactly one fresh window afterward.
+        // Hold off on dictation while the agent responds. With hands-free AEC we
+        // keep the mic/session *live* (so the user can barge in over the answer)
+        // but stop feeding transcript into the composer; without it we stop the
+        // pipeline entirely and rely on tap-to-interrupt. Either way, suppress
+        // the auto-restart across the submit so an in-flight window settling
+        // doesn't fight a freshly started one; a deferred resume handles it.
         #[cfg(feature = "voice_input")]
         {
+            let aec = crate::overlay::OverlayController::handle(ctx)
+                .as_ref(ctx)
+                .is_aec_active();
             crate::overlay::OverlayController::handle(ctx).update(ctx, |controller, _| {
                 controller.set_restart_suppressed(true);
                 controller.set_recording(false);
+                controller.set_accepting_dictation(false);
             });
-            self.overlay_stop_listening(ctx);
+            if !aec {
+                self.overlay_stop_listening(ctx);
+            }
         }
         self.clear_buffer_and_reset_undo_stack(ctx);
-        self.submit_user_query_now(prompt, ctx);
+        self.submit_user_query_now(prompt.clone(), ctx);
         crate::overlay::OverlayController::handle(ctx).update(ctx, |controller, _| {
-            // Switch the box to read-only result mode and start the spotlight.
-            // Listening stays suppressed until the agent finishes responding
-            // (resumed in overlay_sync_box), so we don't dictate over the answer.
+            // Stop reading any previous answer and start the spotlight. Listening
+            // stays suppressed until the agent finishes responding (resumed in
+            // overlay_sync_box / after TTS) so we don't dictate over the answer.
+            // The submitted prompt joins the scrollable history above the input
+            // line; the input line clears for the next prompt.
+            controller.stop_speaking();
+            controller.set_last_prompt(Some(prompt.clone()));
             controller.show_result_box();
-            controller.set_box_result_mode(true);
-            controller.set_box_editable(false);
-            controller.set_result_text("Thinking…");
+            let history = controller.history_display("Thinking…");
+            controller.set_history_text(&history);
+            controller.set_input_text("");
             controller.set_thinking(true);
             controller.set_response_started(false);
         });
@@ -6846,82 +7080,384 @@ impl Input {
     #[cfg(feature = "voice_input")]
     fn overlay_resume_after_submit(&mut self, _: (), ctx: &mut ViewContext<Self>) {
         let overlay = crate::overlay::OverlayController::handle(ctx);
-        let (open, suppressed) = {
+        let (open, suppressed, aec) = {
             let controller = overlay.as_ref(ctx);
-            (controller.is_open(), controller.is_restart_suppressed())
+            (
+                controller.is_open(),
+                controller.is_restart_suppressed(),
+                controller.is_aec_active(),
+            )
         };
         if open && suppressed {
             overlay.update(ctx, |controller, _| {
                 controller.set_restart_suppressed(false);
                 controller.set_response_started(false);
+                controller.set_accepting_dictation(true);
             });
-            self.overlay_start_listening(ctx);
+            // Hands-free: the session stayed live, so just accept dictation
+            // again. Otherwise restart the pipeline for the next prompt.
+            if !aec {
+                self.overlay_start_listening(ctx);
+            }
         }
     }
 
-    /// A user edit in the overlay box (dictation mode) — mirror it back into the
-    /// composer so submit sends the edited transcript.
-    pub(crate) fn overlay_box_edited(&mut self, text: &str, ctx: &mut ViewContext<Self>) {
-        let result_mode = crate::overlay::OverlayController::handle(ctx)
-            .as_ref(ctx)
-            .is_box_result_mode();
-        if result_mode {
+    /// Clicked the pencil puck: enter freeform annotation mode. Pauses voice
+    /// listening while the user picks a window and draws; capture + attach happen
+    /// on Done (`overlay_finish_annotation`).
+    #[cfg(target_os = "macos")]
+    pub(crate) fn overlay_start_annotation(&mut self, ctx: &mut ViewContext<Self>) {
+        let overlay = crate::overlay::OverlayController::handle(ctx);
+        if !overlay.as_ref(ctx).is_open() {
             return;
         }
+        overlay.update(ctx, |controller, _| controller.begin_annotation());
+        #[cfg(feature = "voice_input")]
+        self.overlay_stop_listening(ctx);
+    }
+
+    /// Done in the annotation canvas: screenshot the picked window rect (which
+    /// still shows the user's strokes) to a temp PNG, restore the overlay, attach
+    /// the image to the composer, and resume listening for spoken commentary.
+    /// `(x, y, w, h)` is the window rect in screen points (top-left origin).
+    #[cfg(target_os = "macos")]
+    pub(crate) fn overlay_finish_annotation(
+        &mut self,
+        x: f64,
+        y: f64,
+        w: f64,
+        h: f64,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        // Capture BEFORE tearing down the canvas so the strokes are still on
+        // screen and included in the shot.
+        let captured = Self::capture_screen_region_to_png(x, y, w, h);
+        crate::overlay::OverlayController::handle(ctx)
+            .update(ctx, |controller, _| controller.end_annotation());
+        if let Some(path_str) = captured.as_ref().and_then(|p| p.to_str()) {
+            self.handle_pasted_or_dragdropped_image_filepaths(vec![path_str.to_owned()], ctx);
+        }
+        #[cfg(feature = "voice_input")]
+        self.overlay_start_listening(ctx);
+    }
+
+    /// Cancelled the annotation canvas: restore the overlay and resume listening.
+    #[cfg(target_os = "macos")]
+    pub(crate) fn overlay_cancel_annotation(&mut self, ctx: &mut ViewContext<Self>) {
+        crate::overlay::OverlayController::handle(ctx)
+            .update(ctx, |controller, _| controller.end_annotation());
+        #[cfg(feature = "voice_input")]
+        self.overlay_start_listening(ctx);
+    }
+
+    /// Run macOS `screencapture -R` to grab a screen rectangle (points, top-left
+    /// origin) to a temp PNG. Returns the path on success.
+    #[cfg(target_os = "macos")]
+    fn capture_screen_region_to_png(x: f64, y: f64, w: f64, h: f64) -> Option<std::path::PathBuf> {
+        if w < 1.0 || h < 1.0 {
+            return None;
+        }
+        let millis = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let path = std::env::temp_dir().join(format!("bang-annotation-{millis}.png"));
+        let region = format!("{},{},{},{}", x as i64, y as i64, w as i64, h as i64);
+        let status = command::blocking::Command::new("/usr/sbin/screencapture")
+            .arg("-x")
+            .arg("-tpng")
+            .arg("-R")
+            .arg(&region)
+            .arg(&path)
+            .status();
+        match status {
+            Ok(s) if s.success() && path.exists() => Some(path),
+            Ok(s) => {
+                log::warn!("[overlay] screencapture exited with {s}");
+                None
+            }
+            Err(err) => {
+                log::warn!("[overlay] failed to run screencapture: {err}");
+                None
+            }
+        }
+    }
+
+    /// Called when native TTS finishes reading the agent's answer. We suppress
+    /// listening while speaking (so the mic doesn't hear the TTS); resume now.
+    pub(crate) fn overlay_tts_finished(&mut self, ctx: &mut ViewContext<Self>) {
+        // Clear the speaking flag regardless (drives the mic puck's barge-in).
+        crate::overlay::OverlayController::handle(ctx)
+            .update(ctx, |controller, _| controller.stop_speaking());
+        #[cfg(feature = "voice_input")]
+        {
+            let overlay = crate::overlay::OverlayController::handle(ctx);
+            let (open, suppressed, aec) = {
+                let controller = overlay.as_ref(ctx);
+                (
+                    controller.is_open(),
+                    controller.is_restart_suppressed(),
+                    controller.is_aec_active(),
+                )
+            };
+            if open && suppressed {
+                overlay.update(ctx, |controller, _| {
+                    controller.set_restart_suppressed(false);
+                    controller.set_response_started(false);
+                    controller.set_accepting_dictation(true);
+                });
+                // Hands-free: the session stayed live during TTS, so just accept
+                // dictation again. Otherwise restart the pipeline.
+                if !aec {
+                    self.overlay_start_listening(ctx);
+                }
+            }
+        }
+    }
+
+    /// Strip common markdown so TTS reads clean prose (no `*`, backticks, `#`,
+    /// or `[label](url)` link plumbing).
+    fn strip_markdown_for_speech(text: &str) -> String {
+        let chars: Vec<char> = text.chars().collect();
+        let mut out = String::with_capacity(text.len());
+        let mut i = 0;
+        while i < chars.len() {
+            match chars[i] {
+                '*' | '`' | '#' => i += 1,
+                '[' => {
+                    // Copy the link label, drop the `(url)`.
+                    i += 1;
+                    while i < chars.len() && chars[i] != ']' {
+                        out.push(chars[i]);
+                        i += 1;
+                    }
+                    if i < chars.len() {
+                        i += 1; // skip ']'
+                    }
+                    if i < chars.len() && chars[i] == '(' {
+                        while i < chars.len() && chars[i] != ')' {
+                            i += 1;
+                        }
+                        if i < chars.len() {
+                            i += 1; // skip ')'
+                        }
+                    }
+                }
+                '/' => {
+                    // Speak "slash" — espeak otherwise renders "/" (common in
+                    // paths like /Users/foo) as a breathy clause break.
+                    Self::push_spoken_word(&mut out, "slash");
+                    i += 1;
+                }
+                '-' => {
+                    // Speak "dash" for standalone/separator hyphens (flags like
+                    // -v, ranges, " - "), which sound breathy otherwise, but keep
+                    // an intra-word hyphen (e.g. "well-known") so compounds read
+                    // naturally.
+                    let between_letters = i > 0
+                        && chars[i - 1].is_ascii_alphabetic()
+                        && chars.get(i + 1).is_some_and(char::is_ascii_alphabetic);
+                    if between_letters {
+                        out.push('-');
+                    } else {
+                        Self::push_spoken_word(&mut out, "dash");
+                    }
+                    i += 1;
+                }
+                '.' => {
+                    // Speak "dot" for an in-token dot (filenames, versions,
+                    // domains — e.g. "screenshot-4839284.jpg" → "… dot jpg"), but
+                    // keep a sentence-ending dot as a natural silent pause (so
+                    // "Done." isn't read "Done dot").
+                    let prev_nonspace = i > 0 && !chars[i - 1].is_whitespace();
+                    let next_nonspace = chars.get(i + 1).is_some_and(|c| !c.is_whitespace());
+                    if prev_nonspace && next_nonspace {
+                        Self::push_spoken_word(&mut out, "dot");
+                    } else {
+                        out.push('.');
+                    }
+                    i += 1;
+                }
+                ',' => {
+                    // Drop a digit-group comma ("11,200") so the number is read as
+                    // a whole ("eleven thousand two hundred") instead of espeak
+                    // treating the comma as a clause-break pause. Keep prose commas.
+                    let between_digits = i > 0
+                        && chars[i - 1].is_ascii_digit()
+                        && chars.get(i + 1).is_some_and(char::is_ascii_digit);
+                    if !between_digits {
+                        out.push(',');
+                    }
+                    i += 1;
+                }
+                '~' => {
+                    // Say "around" for an approximation ("~2" → "around two") and
+                    // "home" for a home-dir path ("~/Users" → "home slash Users"),
+                    // rather than espeak literally reading "tilde".
+                    if chars.get(i + 1) == Some(&'/') {
+                        Self::push_spoken_word(&mut out, "home");
+                    } else {
+                        Self::push_spoken_word(&mut out, "around");
+                    }
+                    i += 1;
+                }
+                '%' => {
+                    Self::push_spoken_word(&mut out, "percent");
+                    i += 1;
+                }
+                '&' => {
+                    Self::push_spoken_word(&mut out, "and");
+                    i += 1;
+                }
+                '=' => {
+                    Self::push_spoken_word(&mut out, "equals");
+                    i += 1;
+                }
+                '>' => {
+                    Self::push_spoken_word(&mut out, "greater than");
+                    i += 1;
+                }
+                '<' => {
+                    Self::push_spoken_word(&mut out, "less than");
+                    i += 1;
+                }
+                '$' => {
+                    // Currency: "$5" / "$1,200" → "5 dollars" / "1200 dollars"
+                    // (English speaks the unit after the amount). A non-numeric
+                    // "$" (env vars / shell like $PATH) is read as "dollar".
+                    if chars.get(i + 1).is_some_and(char::is_ascii_digit) {
+                        i += 1;
+                        if out.chars().last().is_some_and(|c| !c.is_whitespace()) {
+                            out.push(' ');
+                        }
+                        // Consume the amount, dropping digit-group commas so it
+                        // reads as a whole number.
+                        while i < chars.len()
+                            && (chars[i].is_ascii_digit()
+                                || (chars[i] == ','
+                                    && chars.get(i + 1).is_some_and(char::is_ascii_digit)))
+                        {
+                            if chars[i] != ',' {
+                                out.push(chars[i]);
+                            }
+                            i += 1;
+                        }
+                        Self::push_spoken_word(&mut out, "dollars");
+                    } else {
+                        Self::push_spoken_word(&mut out, "dollar");
+                        i += 1;
+                    }
+                }
+                c if Self::is_speech_skippable_symbol(c) => i += 1,
+                c => {
+                    out.push(c);
+                    i += 1;
+                }
+            }
+        }
+        out
+    }
+
+    /// Append a spoken word, ensuring it stands alone (space-separated) so it
+    /// isn't glued onto adjacent text (e.g. "foo/bar" → "foo slash bar").
+    fn push_spoken_word(out: &mut String, word: &str) {
+        if out.chars().last().is_some_and(|c| !c.is_whitespace()) {
+            out.push(' ');
+        }
+        out.push_str(word);
+        out.push(' ');
+    }
+
+    /// Emoji / pictographic symbols that TTS would otherwise read out literally
+    /// (e.g. "👍" → "thumbs up sign"); skipped when speaking answers aloud.
+    fn is_speech_skippable_symbol(c: char) -> bool {
+        let u = c as u32;
+        matches!(
+            u,
+            0x1F000..=0x1FAFF   // emoticons, pictographs, symbols & extended
+            | 0x2600..=0x27BF   // misc symbols + dingbats (✅ ✨ ☀ ➡ …)
+            | 0x2B00..=0x2BFF   // misc symbols and arrows (★ ⬆ …)
+            | 0xFE00..=0xFE0F   // emoji variation selectors
+            | 0x200D            // zero-width joiner (emoji sequences)
+            | 0x20E3            // combining enclosing keycap
+        )
+    }
+
+    /// A user edit in the overlay input line — mirror it back into the composer so
+    /// submit sends the edited/dictated text.
+    pub(crate) fn overlay_box_edited(&mut self, text: &str, ctx: &mut ViewContext<Self>) {
         self.user_replace_editor_text(text, ctx);
     }
 
-    /// Sync the overlay box: in result mode, stream the agent's thinking/answer
-    /// (read-only) and drive the spotlight; in dictation mode, mirror the live
-    /// transcript (editable). No-op unless the box is showing.
+    /// Sync the overlay box: stream the agent's thinking/answer into the read-only
+    /// history region (folding completed exchanges into the persistent history),
+    /// and mirror the composer into the always-editable input line. No-op unless
+    /// the box is showing.
     fn overlay_sync_box(&mut self, ctx: &mut ViewContext<Self>) {
         let overlay = crate::overlay::OverlayController::handle(ctx);
-        let (open, visible, result_mode) = {
+        let (open, visible) = {
             let controller = overlay.as_ref(ctx);
-            (
-                controller.is_open(),
-                controller.is_result_box_visible(),
-                controller.is_box_result_mode(),
-            )
+            (controller.is_open(), controller.is_result_box_visible())
         };
         if !open || !visible {
             return;
         }
-        if result_mode {
-            let (thinking, agent_text) = self.overlay_agent_snapshot(ctx);
-            let text = agent_text.unwrap_or_else(|| "Thinking…".to_string());
-            // While a submit is in flight we hold off on listening. Track that
-            // the response has begun (went in-progress), and once it finishes,
-            // resume continuous voice for the next prompt.
-            let should_resume = overlay.update(ctx, |controller, _| {
-                controller.set_thinking(thinking);
-                controller.set_box_editable(false);
-                controller.set_result_text(&text);
-                if !controller.is_restart_suppressed() {
-                    return false;
-                }
+        let (thinking, agent_text) = self.overlay_agent_snapshot(ctx);
+        let answer = agent_text.unwrap_or_else(|| "Thinking…".to_string());
+        let composer = self.buffer_text(ctx);
+        // Read-aloud is opt-in (settings popover). When on, we speak the answer on
+        // completion and keep listening suppressed until speech finishes (so the
+        // mic doesn't transcribe the TTS); the resume then happens in
+        // `overlay_tts_finished`. When off, resume immediately. Only the answer is
+        // spoken — never the echoed user prompt.
+        let voice_on = *crate::settings::AISettings::as_ref(ctx).voice_overlay_tts_enabled;
+        let spoken = if voice_on && !thinking {
+            Self::strip_markdown_for_speech(&answer)
+        } else {
+            String::new()
+        };
+        // While a submit is in flight we hold off on listening. Track that the
+        // response has begun (went in-progress), and once it finishes, fold the
+        // exchange into history and resume continuous voice for the next prompt.
+        let should_resume = overlay.update(ctx, |controller, _| {
+            controller.set_thinking(thinking);
+            // Always mirror the composer into the editable input line.
+            controller.set_input_text(&composer);
+
+            let mut resume = false;
+            if controller.is_restart_suppressed() {
                 if thinking {
                     controller.set_response_started(true);
-                    false
                 } else if controller.response_started() {
-                    controller.set_restart_suppressed(false);
                     controller.set_response_started(false);
-                    true
-                } else {
-                    false
+                    // Fold the finished exchange into the persistent history.
+                    if let Some(prompt) = controller.last_prompt().map(str::to_owned) {
+                        if !prompt.is_empty() {
+                            controller.push_history_exchange(&prompt, &answer);
+                        }
+                    }
+                    controller.set_last_prompt(None);
+                    if voice_on && !spoken.trim().is_empty() {
+                        // Keep suppressed; resume after TTS finishes.
+                        controller.speak(&spoken);
+                    } else {
+                        controller.set_restart_suppressed(false);
+                        controller.set_accepting_dictation(true);
+                        // Hands-free: the session stayed live, so just accept
+                        // dictation again; only restart the pipeline in fallback.
+                        resume = !controller.is_aec_active();
+                    }
                 }
-            });
-            if should_resume {
-                #[cfg(feature = "voice_input")]
-                self.overlay_start_listening(ctx);
             }
-        } else {
-            let composer = self.buffer_text(ctx);
-            overlay.update(ctx, |controller, _| {
-                controller.set_thinking(false);
-                controller.set_box_editable(true);
-                controller.set_result_text(&composer);
-            });
+            // Rebuild the history region: finalized exchanges + the in-flight one
+            // (empty once folded above).
+            let history = controller.history_display(&answer);
+            controller.set_history_text(&history);
+            resume
+        });
+        if should_resume {
+            #[cfg(feature = "voice_input")]
+            self.overlay_start_listening(ctx);
         }
     }
 
@@ -6932,7 +7468,15 @@ impl Input {
         let Some(conversation) = context_model.selected_conversation(ctx) else {
             return (false, None);
         };
-        let thinking = conversation.status().is_in_progress();
+        // Treat command monitoring / driving as "still working" too: it isn't
+        // `is_in_progress`, but the overlay must not resume dictation (which
+        // would let speech become a steering suggestion) until it's stopped.
+        let monitoring = {
+            let model = self.model.lock();
+            let block = model.block_list().active_block();
+            block.is_agent_monitoring() || block.is_agent_driving_command()
+        };
+        let thinking = conversation.status().is_in_progress() || monitoring;
         let Some(exchange) = conversation.latest_exchange() else {
             return (thinking, None);
         };
@@ -10560,22 +11104,15 @@ impl Input {
 
         match event {
             EditorEvent::Edited(edit_origin) => {
-                // Overlay dictation: a user/transcription edit means we're composing
-                // a new prompt, so flip the box to editable dictation and mirror the
-                // live transcript (no-op unless the overlay box is showing).
+                // Overlay: a user/transcription edit means the composer changed, so
+                // mirror it into the editable input line (no-op unless the overlay
+                // box is showing).
                 if matches!(
                     edit_origin,
                     EditOrigin::UserTyped | EditOrigin::UserInitiated
                 ) {
                     let overlay = crate::overlay::OverlayController::handle(ctx);
                     if overlay.as_ref(ctx).is_result_box_visible() {
-                        // Only a non-empty edit means new dictation; an empty
-                        // buffer (e.g. the submit clearing the input) must not
-                        // knock the box out of result mode.
-                        if !self.buffer_text(ctx).trim().is_empty() {
-                            overlay
-                                .update(ctx, |controller, _| controller.set_box_result_mode(false));
-                        }
                         self.overlay_sync_box(ctx);
                     }
                 }
@@ -11562,7 +12099,35 @@ impl Input {
             EditorEvent::MiddleClickPaste => {
                 ctx.emit(Event::InputFocusedFromMiddleClick);
             }
-            EditorEvent::Focused => ctx.emit(Event::EditorFocused),
+            EditorEvent::Focused => {
+                // While the overlay is open, voice input follows the focused tab:
+                // route transcript/submit/puck to whichever composer the user
+                // clicks into. Move the mic "Listening…" indicator to it and off
+                // the previously-active one.
+                #[cfg(feature = "voice_input")]
+                {
+                    let overlay = crate::overlay::OverlayController::handle(ctx);
+                    if overlay.as_ref(ctx).is_open() {
+                        let my_id = ctx.view_id();
+                        let prev = overlay.as_ref(ctx).active_input();
+                        let already_active = prev
+                            .as_ref()
+                            .map(|weak| weak.id() == my_id)
+                            .unwrap_or(false);
+                        if !already_active {
+                            if let Some(prev) = prev.and_then(|weak| weak.upgrade(ctx)) {
+                                prev.update(ctx, |input, ctx| {
+                                    input.set_overlay_mic_indicator(false, ctx)
+                                });
+                            }
+                            let weak = self.weak_view_handle.clone();
+                            overlay.update(ctx, |controller, _| controller.set_active_input(weak));
+                            self.set_overlay_mic_indicator(true, ctx);
+                        }
+                    }
+                }
+                ctx.emit(Event::EditorFocused)
+            }
             EditorEvent::ProcessingAttachedImages(is_processing) => {
                 self.set_is_processing_attached_images(*is_processing, ctx);
             }

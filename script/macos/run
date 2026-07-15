@@ -205,6 +205,32 @@ if [ -n "${WARP_APP_ICON:-}" ] && [ -f "${WARP_APP_ICON}" ]; then
   plutil -remove CFBundleIconName "$DISPLAY_NAME_PLIST" 2>/dev/null || true
 fi
 
+# When we've been given a distinct display name, rename the on-disk .app
+# directory to match it. `cargo bundle` always emits "Bang.app", which shares
+# its on-disk name (and Team ID) with the stable snapshot at
+# ~/Applications/Bang.app. macOS attributes TCC permissions — notably the Screen
+# Recording grant needed for the agent's `screencapture` — to the *responsible
+# app* it resolves via LaunchServices, and two bundles both named "Bang.app"
+# collapse onto a single identity. That means the dev build's capture requests
+# get attributed to the already-registered snapshot "Bang" (the prompt even says
+# "Bang"), the grant lands on the snapshot, and the dev build never appears as
+# its own grantable entry under System Settings > Privacy & Security > Screen &
+# System Audio Recording. Renaming the bundle dir gives the dev build a distinct
+# on-disk identity so it registers separately and can be granted on its own.
+# Must run before codesign (signature covers the bundle) and before the `open`
+# / lsregister calls below (which use $WARP_APP_PATH).
+if [ -n "${WARP_APP_DISPLAY_NAME:-}" ]; then
+  RENAMED_APP_PATH="$(dirname "$WARP_APP_PATH")/${WARP_APP_DISPLAY_NAME}.app"
+  if [ "$RENAMED_APP_PATH" != "$WARP_APP_PATH" ]; then
+    echo "Renaming bundle to '${WARP_APP_DISPLAY_NAME}.app' for a distinct TCC/LaunchServices identity"
+    rm -rf "$RENAMED_APP_PATH"
+    mv "$WARP_APP_PATH" "$RENAMED_APP_PATH"
+    WARP_APP_PATH="$RENAMED_APP_PATH"
+    WARP_PLIST_PATH="$WARP_APP_PATH/Contents/Info.plist"
+    DISPLAY_NAME_PLIST="$WARP_PLIST_PATH"
+  fi
+fi
+
 echo "Codesigning app..."
 SIGNING_CERT="$(security find-identity -p codesigning -v | grep "Apple Development" | awk '{print $2}' | head -1)"
 codesign --force --deep --options runtime --sign "${SIGNING_CERT:--}" "$WARP_APP_PATH" --entitlements script/Debug-Entitlements.plist

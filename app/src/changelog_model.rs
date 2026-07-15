@@ -198,6 +198,23 @@ impl ChangelogModel {
     pub fn is_check_pending(&self) -> bool {
         matches!(self.changelog, ChangelogState::Pending)
     }
+
+    /// For the Bang (OSS) build: the release tag advertised by the
+    /// harness-served changelog, but only when it's newer than the running
+    /// build. This drives the side-nav "Update" badge — the Bang analogue of
+    /// autoupdate, which is disabled on the OSS channel. Returns `None` on other
+    /// channels (they use the real autoupdate state machine instead), when no
+    /// changelog has been fetched yet, or when the changelog carries no version.
+    pub fn available_update_version(&self) -> Option<&str> {
+        if ChannelState::channel() != Channel::Oss {
+            return None;
+        }
+        let ChangelogState::Some(changelog) = &self.changelog else {
+            return None;
+        };
+        let version = changelog.version.as_deref()?;
+        autoupdate::is_incoming_version_past_current(Some(version)).then_some(version)
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
