@@ -1,7 +1,7 @@
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::mem;
-use std::ops::{Deref, Range, RangeInclusive};
+use std::ops::{Bound, Deref, Range, RangeInclusive};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -61,6 +61,7 @@ use super::view::{
 use super::warpify::render::{draw_flag_pole, render_subshell_flag};
 use super::{heights_approx_eq, TerminalModel, HEIGHT_FUDGE_FACTOR_LINES};
 use crate::ai::blocklist::agent_view::{agent_view_bg_fill, AgentViewState};
+use crate::ai::blocklist::block::view_impl::AGENT_CONTENT_LEFT_MARGIN;
 use crate::ai::blocklist::{ai_brand_color, ATTACH_AS_AGENT_MODE_CONTEXT_TEXT};
 use crate::ai_assistant::{AI_ASSISTANT_SVG_PATH, ASK_AI_ASSISTANT_TEXT};
 use crate::appearance::Appearance;
@@ -91,6 +92,7 @@ use crate::terminal::{grid_renderer, SizeInfo};
 use crate::themes::theme::{Fill, WarpTheme};
 use crate::ui_components::{self, icons as UIIcon};
 use crate::util::color::Opacity;
+use crate::workspace::TOTAL_TAB_BAR_HEIGHT;
 
 /// The number of pixels at the bottom of padding where selection scrolling is performed.
 const BOTTOM_VERTICAL_MARGIN: f32 = 10.0;
@@ -471,6 +473,18 @@ impl SnackbarHeader {
     /// Handles a mouse down event, possibly dispatching an event to scroll to the top
     /// of the header, if the header is set and the click is within the header
     fn mouse_down(&self, position: Vector2F, ctx: &mut EventContext) -> bool {
+        // When the tab bar is hidden (e.g. fullscreen or auto-hide), the conversation
+        // extends underneath the window's top drag (titlebar) region, and a pinned
+        // snackbar header can render directly beneath it. A click there is meant to
+        // move the window, not jump to the top of the block, so leave the event
+        // unhandled and let the platform layer initiate a window drag instead.
+        // `position.y()` is measured from the top of the window, matching the native
+        // titlebar hit-test (`mouseInTitleBar`), and the titlebar height is configured
+        // to `TOTAL_TAB_BAR_HEIGHT`. When the tab bar is visible the block list sits
+        // below this region, so legitimate snackbar-header clicks are unaffected.
+        if position.y() < TOTAL_TAB_BAR_HEIGHT {
+            return false;
+        }
         self.header_position
             .filter(|header_position| header_position.rect.contains_point(position))
             .is_some_and(|header_position| {
@@ -606,6 +620,11 @@ pub struct BlockListElement {
     scroll_position: ScrollPosition,
     is_terminal_focused: bool,
     is_terminal_selecting: bool,
+    /// True while a text selection is being dragged inside a rich content (AI)
+    /// block's own `SelectableArea`. Such selections are owned by the block, not
+    /// the point-based grid selection, so this drives autoscroll-on-drag and the
+    /// z-index bypass for drags into the input footer, mirroring the terminal path.
+    is_rich_content_selecting: bool,
     /// This map contains the IDs of sessions that were subshells as keys. Their corresponding
     /// values are the command that spawned the subshell, which is needed to paint the "flag"
     subshell_sessions: HashMap<SessionId, SubshellSource>,
@@ -727,6 +746,15 @@ pub struct BlockListElement {
     /// its answer scrolls, and the next question pushes it off as it scrolls up.
     pinned_ai_queries: Vec<PinnedAiQuery>,
 
+    // The rich-content view id of the currently pinned user-query block is NOT stored on the
+    // element: `BlockListElement` is reconstructed every frame, so any per-element cell would reset
+    // each render and only appear to persist while the query block stayed continuously visible (it
+    // was re-seeded every frame). For a real turn — a short user-query block followed by several
+    // separate agent output/result blocks — the query scrolls off the top within a frame or two, at
+    // which point a per-element cell is already back to `None` and the header vanishes ("peels").
+    // The pinned id therefore lives in main-thread-persistent storage keyed by `terminal_view_id`
+    // (see `PINNED_QUERY_VIEW_IDS`), so it survives element reconstruction and stays stuck through
+    // the whole turn's output until the *next* query's top reaches the viewport top.
     shared_session_banner_state: SharedSessionBanners,
     presence_manager: Option<ModelHandle<PresenceManager>>,
     presence_avatars: HashMap<ParticipantId, Box<dyn Element>>,
@@ -887,7 +915,104 @@ pub struct BlockListMouseStates {
     pub snackbar_toggle_button_mouse_state: MouseStateHandle,
 }
 
+/// Persistent per-terminal-view state backing the sticky agent-view header.
+///
+/// Lives outside [`BlockListElement`] (which is rebuilt every frame) so it survives element
+/// reconstruction. The pinned query must be recomputed every frame as *the last user-authored
+/// query whose start is at or above the viewport top*, which requires knowing the document order
+/// of query blocks even when the relevant one has scrolled off-screen (e.g. handing the header
+/// back to the previous turn's prompt while scrolling up). We therefore remember every query
+/// block we've *seen* (`queries_by_index`, keyed by the stable document-order [`TotalIndex`]) so
+/// we can look up the query immediately before an on-screen one, plus the current `pinned` choice
+/// for retention when no query is at/above the top (mid-turn output, or the very top).
+#[derive(Default)]
+struct StickyHeaderState {
+    /// The currently pinned user-query rich-content view id, if any.
+    pinned: Option<EntityId>,
+    /// Observed user-query blocks in document order: entry index -> rich-content view id.
+    queries_by_index: BTreeMap<TotalIndex, EntityId>,
+}
+
+thread_local! {
+    /// `terminal_view_id` -> [`StickyHeaderState`]. Keyed per view so multiple agent panes don't
+    /// clobber each other; a stale entry for a closed view is harmless (tiny and never read).
+    static STICKY_HEADER_STATE: RefCell<HashMap<EntityId, StickyHeaderState>> =
+        RefCell::new(HashMap::new());
+}
+
 impl BlockListElement {
+    /// Runs `f` against this element's persistent [`StickyHeaderState`].
+    fn with_sticky_state<R>(&self, f: impl FnOnce(&mut StickyHeaderState) -> R) -> R {
+        STICKY_HEADER_STATE
+            .with(|map| f(map.borrow_mut().entry(self.terminal_view_id).or_default()))
+    }
+
+    /// The currently pinned user-query view id for this element's terminal view, if any.
+    fn pinned_query_view_id(&self) -> Option<EntityId> {
+        self.with_sticky_state(|state| state.pinned)
+    }
+
+    /// Records `view_id` as the pinned user-query for this element's terminal view.
+    fn set_pinned_query_view_id(&self, view_id: EntityId) {
+        self.with_sticky_state(|state| state.pinned = Some(view_id));
+    }
+
+    /// Clears the pinned user-query (used at the very top of the conversation, when no query is at
+    /// or above the viewport top).
+    fn clear_pinned_query_view_id(&self) {
+        self.with_sticky_state(|state| state.pinned = None);
+    }
+
+    /// Remembers that `view_id` is a user-query block at document position `index`. Any prior entry
+    /// for the same `view_id` at a different index is dropped so the map never holds duplicates if a
+    /// block's position shifts.
+    fn observe_query_block(&self, index: TotalIndex, view_id: EntityId) {
+        self.with_sticky_state(|state| {
+            state
+                .queries_by_index
+                .retain(|&i, &mut v| v != view_id || i == index);
+            state.queries_by_index.insert(index, view_id);
+        });
+    }
+
+    /// Whether `view_id` has been observed as a user-query block.
+    fn is_observed_query(&self, view_id: EntityId) -> bool {
+        self.with_sticky_state(|state| state.queries_by_index.values().any(|&v| v == view_id))
+    }
+
+    /// The observed query block immediately before document position `index`, if any.
+    fn observed_query_before(&self, index: TotalIndex) -> Option<EntityId> {
+        self.with_sticky_state(|state| {
+            state
+                .queries_by_index
+                .range(..index)
+                .next_back()
+                .map(|(_, &v)| v)
+        })
+    }
+
+    /// The observed query blocks immediately before and after `view_id` in document order. Used to
+    /// pre-lay-out neighbours of the pinned header so a hand-off (up or down) has its element ready.
+    fn observed_neighbors_of(&self, view_id: EntityId) -> (Option<EntityId>, Option<EntityId>) {
+        self.with_sticky_state(|state| {
+            let Some((&index, _)) = state.queries_by_index.iter().find(|(_, &v)| v == view_id)
+            else {
+                return (None, None);
+            };
+            let prev = state
+                .queries_by_index
+                .range(..index)
+                .next_back()
+                .map(|(_, &v)| v);
+            let next = state
+                .queries_by_index
+                .range((Bound::Excluded(index), Bound::Unbounded))
+                .next()
+                .map(|(_, &v)| v);
+            (prev, next)
+        })
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         model: Arc<FairMutex<TerminalModel>>,
@@ -931,6 +1056,7 @@ impl BlockListElement {
             scroll_position: terminal_view_render_context.scroll_position,
             is_terminal_focused: terminal_view_render_context.is_terminal_focused,
             is_terminal_selecting: terminal_view_render_context.is_terminal_selecting,
+            is_rich_content_selecting: terminal_view_render_context.is_rich_content_selecting,
             subshell_sessions: terminal_view_render_context.spawning_command_for_subshell_sessions,
             subshell_flags: HashMap::new(),
             size: None,
@@ -1722,6 +1848,83 @@ impl BlockListElement {
         }
     }
 
+    /// When a `LeftMouseDown` starts a text selection inside a rich content (AI)
+    /// block's own `SelectableArea`, that child consumes the event and returns
+    /// `true`, so the normal `mouse_down` path (guarded by `if !handled`) is
+    /// skipped and its `BlockTextSelect::Begin` never fires. Without `Begin`, the
+    /// point-based grid selection never starts and the sibling blocks aren't
+    /// seeded, so the drag can't extend across intervening command/tool blocks
+    /// into later prose. Detect that exact case — a mouse-down that a rich content
+    /// child handled by starting a block-level selection — and dispatch `Begin`
+    /// so the cross-block selection machinery engages, mirroring the terminal
+    /// path. Gating on the AI block actually selecting avoids spuriously starting
+    /// a selection when the child handled the click for another reason (e.g. a
+    /// button inside the block).
+    fn maybe_seed_rich_content_text_selection(
+        &self,
+        position: Vector2F,
+        click_count: u32,
+        modifiers: &ModifiersState,
+        ctx: &mut EventContext,
+        app: &AppContext,
+    ) {
+        if !self.pane_state.is_focused() || !self.is_mouse_position_within_bounds(position) {
+            return;
+        }
+
+        let Some(point) = self.coord_to_point(
+            SnackbarPoint::within_snackbar(position),
+            ClampingMode::ClampToGridIfWithinBlock,
+        ) else {
+            return;
+        };
+
+        // Resolve the AI block under the pointer, dropping the model lock before
+        // reading the block handle (reading/rendering an `AIBlock` re-locks the model).
+        let view_id = {
+            let model = self.model.lock();
+            let viewport = self.viewport_state_after_layout(model.block_list());
+            match viewport.block_height_item_from_point(point) {
+                Some(BlockHeightItem::RichContent(RichContentItem { view_id, .. })) => *view_id,
+                _ => return,
+            }
+        };
+
+        let is_ai_block_selecting = matches!(
+            self.rich_content_metadata.get(&view_id),
+            Some(RichContentMetadata::AIBlock(meta))
+                if meta
+                    .ai_block_handle
+                    .read(app, |block, _| block.is_block_level_selecting())
+        );
+        if !is_ai_block_selecting {
+            return;
+        }
+
+        let bounds = self
+            .bounds
+            .expect("Bounds should be set before event dispatching");
+        let side = self.size_info.get_mouse_side(position - bounds.origin());
+        let selection_type = if FeatureFlag::RectSelection.is_enabled() {
+            SelectionType::from_mouse_event(*modifiers, click_count)
+        } else {
+            SelectionType::from_click_count(click_count)
+        };
+
+        ctx.dispatch_typed_action(TerminalAction::BlockSelect {
+            action: BlockSelectAction::MouseDown(None),
+            should_redetermine_focus: false,
+        });
+        ctx.dispatch_typed_action(TerminalAction::BlockTextSelect(
+            BlockTextSelectAction::Begin {
+                point,
+                side,
+                selection_type,
+                position,
+            },
+        ));
+    }
+
     fn mouse_up(
         &self,
         position: Vector2F,
@@ -1964,31 +2167,10 @@ impl BlockListElement {
                 .snackbar_header_state()
                 .header_rect()
                 .map_or(0., |rect| rect.height());
-            let bounds_top = bounds.origin_y();
-            let snackbar_bottom = bounds_top + snackbar_height;
-            let bottom = bounds.lower_left().y() - BOTTOM_VERTICAL_MARGIN;
+            let snackbar_bottom = bounds.origin_y() + snackbar_height;
 
             // Adjust the scroll delta if the mouse position is not within the current element.
-            let delta_y = if position.y() < snackbar_bottom {
-                // In order to make scrolling feel smooth when there is a block based
-                // snackbar, we only calculate exponential scroll acceleration on the
-                // portion of the scroll delta that is above the bounds of the element.
-                // Otherwise, if you exponentially scroll on the snackbar portion of the
-                // delta, you end up with "jumps" in scroll once one snackbar scrolls offscreen
-                // and the next header shows.
-                let (delta_outside_bounds, delta_from_snackbar_bottom) = (
-                    (bounds_top - position.y()).max(0.),
-                    (snackbar_bottom - position.y())
-                        .min(snackbar_height)
-                        .max(0.),
-                );
-                POLYNOMIAL_SCROLLING.accelerated_delta(delta_outside_bounds)
-                    + LINEAR_SCROLLING.accelerated_delta(delta_from_snackbar_bottom)
-            } else if position.y() > bottom {
-                -POLYNOMIAL_SCROLLING.accelerated_delta(position.y() - bottom)
-            } else {
-                0.0
-            };
+            let delta_y = self.selection_autoscroll_delta(position);
 
             let side = self
                 .size_info
@@ -2040,8 +2222,64 @@ impl BlockListElement {
             }
 
             true
+        } else if self.is_rich_content_selecting && self.bounds.is_some() {
+            // A text selection is being dragged inside a rich content (AI) block's
+            // own `SelectableArea`, which owns the selection and extends it from the
+            // drag events it receives directly in `dispatch_event`. The point-based
+            // grid path above never runs for these, so mirror its edge autoscroll
+            // here: scroll the block list toward the dragged-past edge to reveal more
+            // content, and let the `SelectableArea` keep extending its selection as
+            // the newly revealed lines slide under the pointer. We report the event as
+            // unhandled since the `SelectableArea` already consumed it for selection.
+            let delta_y = self.selection_autoscroll_delta(position);
+            if delta_y != 0.0 {
+                ctx.dispatch_typed_action(TerminalAction::Scroll {
+                    delta: delta_y.into_lines(),
+                });
+            }
+            false
         } else {
             false
+        }
+    }
+
+    /// Computes the vertical autoscroll delta for a selection drag whose pointer is
+    /// at `position`. A positive delta scrolls toward older content (pointer dragged
+    /// above the top/snackbar edge), a negative delta toward newer content (pointer
+    /// dragged below the bottom edge), and `0.0` when the pointer is within the
+    /// non-scrolling region. Returns `0.0` if bounds have not been laid out yet.
+    fn selection_autoscroll_delta(&self, position: Vector2F) -> f32 {
+        let Some(bounds) = self.bounds else {
+            return 0.0;
+        };
+
+        let snackbar_height = self
+            .snackbar_header_state()
+            .header_rect()
+            .map_or(0., |rect| rect.height());
+        let bounds_top = bounds.origin_y();
+        let snackbar_bottom = bounds_top + snackbar_height;
+        let bottom = bounds.lower_left().y() - BOTTOM_VERTICAL_MARGIN;
+
+        if position.y() < snackbar_bottom {
+            // In order to make scrolling feel smooth when there is a block based
+            // snackbar, we only calculate exponential scroll acceleration on the
+            // portion of the scroll delta that is above the bounds of the element.
+            // Otherwise, if you exponentially scroll on the snackbar portion of the
+            // delta, you end up with "jumps" in scroll once one snackbar scrolls offscreen
+            // and the next header shows.
+            let (delta_outside_bounds, delta_from_snackbar_bottom) = (
+                (bounds_top - position.y()).max(0.),
+                (snackbar_bottom - position.y())
+                    .min(snackbar_height)
+                    .max(0.),
+            );
+            POLYNOMIAL_SCROLLING.accelerated_delta(delta_outside_bounds)
+                + LINEAR_SCROLLING.accelerated_delta(delta_from_snackbar_bottom)
+        } else if position.y() > bottom {
+            -POLYNOMIAL_SCROLLING.accelerated_delta(position.y() - bottom)
+        } else {
+            0.0
         }
     }
 
@@ -2480,66 +2718,32 @@ impl BlockListElement {
         rect.with_background(block_grid_params.grid_render_params.warp_theme.outline());
     }
 
-    /// Paints the pinned "sticky" AI question header for the top-most visible AI block, keeping the
-    /// user's question visible at the top of the viewport while its answer scrolls beneath it.
+    /// Paints the pinned "sticky" AI question header for the current turn, keeping the user's
+    /// question visible at the top of the viewport while the whole turn's answer scrolls beneath it.
     ///
-    /// `block_origin` is the top-left of the AI block being drawn and `origin` is the top-left of
-    /// the block list. Takes the pinned query by `&mut` (rather than through `&mut self`) so it can
-    /// be called from the paint loop, which holds an immutable borrow of `self.visible_items`.
-    fn paint_pinned_ai_query(
+    /// The current header is pinned to the viewport top. When the next turn's question is rising up
+    /// into the header band (`incoming_top`), the current header rides up out of view as it's pushed
+    /// off, so the hand-off to the next question is seamless. `origin` is the top-left of the block
+    /// list. Takes the pinned query by `&mut` (rather than through `&mut self`) so it can be called
+    /// from the paint loop, which holds an immutable borrow of `self.visible_items`.
+    fn paint_current_pinned_query(
         pinned: &mut PinnedAiQuery,
-        view_id: EntityId,
-        block_origin: Vector2F,
-        block_height_px: f32,
+        incoming_top: Option<f32>,
         origin: Vector2F,
         ctx: &mut PaintContext,
         app: &AppContext,
     ) {
-        if pinned.view_id != view_id {
-            return;
-        }
         let viewport_top = origin.y();
-        // Only pin once the block's top has scrolled above the top of the viewport. Use a strict
-        // comparison (no epsilon slack) so there's no dead-zone at the hand-off from the incoming
-        // header: the outgoing path takes over the instant `block_top` crosses the viewport top,
-        // exactly where the incoming path stops, avoiding a one-pixel flicker between the two.
-        if block_origin.y() >= viewport_top {
-            return;
-        }
-        let block_bottom = block_origin.y() + block_height_px;
-        // Pin to the viewport top, but once only the header's worth of the block remains on screen,
-        // let the header ride the bottom of the block off-screen (matching the snackbar header).
-        let header_y = if block_bottom - pinned.height > viewport_top {
-            viewport_top
-        } else {
-            block_bottom - pinned.height
+        // Pin to the viewport top. Once the next question has risen to within the header's height of
+        // the top, ride up so it pushes this header off-screen. Use a strict comparison at the top
+        // edge so the hand-off to the incoming header has no dead-zone (avoids a one-pixel flicker).
+        let header_y = match incoming_top {
+            Some(in_top) if in_top > viewport_top && in_top <= viewport_top + pinned.height => {
+                in_top - pinned.height
+            }
+            _ => viewport_top,
         };
         pinned.element.paint(vec2f(origin.x(), header_y), ctx, app);
-    }
-
-    /// Paints the "incoming" sticky question for the block directly below the top one. It's drawn at
-    /// the block's natural top edge, but only while that edge is inside the top header band — i.e.
-    /// while it's rising up to push the outgoing (top) header off. Once it reaches the viewport top,
-    /// the block becomes the top-most visible item and is painted by [`Self::paint_pinned_ai_query`]
-    /// instead, so the hand-off is seamless.
-    ///
-    /// `block_top` is the y of the incoming block's top edge and `outgoing_height` is the height of
-    /// the outgoing header it's pushing off.
-    fn paint_incoming_pinned_query(
-        pinned: &mut PinnedAiQuery,
-        block_top: f32,
-        outgoing_height: f32,
-        origin: Vector2F,
-        ctx: &mut PaintContext,
-        app: &AppContext,
-    ) {
-        let viewport_top = origin.y();
-        // Below the header band: still far enough down that its natural rendering handles it.
-        // At or above the viewport top: it's now the top-most block, handled by the outgoing path.
-        if block_top <= viewport_top || block_top > viewport_top + outgoing_height {
-            return;
-        }
-        pinned.element.paint(vec2f(origin.x(), block_top), ctx, app);
     }
 
     // TODO(alokedesai): Clean this up even more by pulling out parameters into various structs.
@@ -3690,22 +3894,44 @@ impl Element for BlockListElement {
         // so it can't deadlock. Only active in the fullscreen agent view for now.
         self.pinned_ai_queries.clear();
         if FeatureFlag::AgentView.is_enabled() {
-            // Consider the top-most visible item and the one directly below it: the first is pinned
-            // to the top, and the second's question rides up from below to push the first off.
-            let candidate_view_ids: Vec<EntityId> = self
-                .visible_items
-                .as_ref()
-                .map(|items| {
-                    items
-                        .iter()
-                        .take(2)
-                        .filter_map(|item| match item {
-                            VisibleItem::RichContent { view_id, .. } => Some(*view_id),
-                            _ => None,
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
+            // Classify every *visible* block as a user query or not (reading handles is safe here:
+            // the terminal model lock was dropped above, and `has_pinnable_user_query` only inspects
+            // conversation inputs — it doesn't render an AIBlock, so it can't re-lock/deadlock).
+            // Record each visible query block's document position so the sticky header can hand off
+            // in *both* scroll directions, including back to a previous turn's prompt that has
+            // scrolled off the top (see `StickyHeaderState`).
+            let visible_items = self.visible_items.clone();
+            let mut candidate_view_ids: Vec<EntityId> = Vec::new();
+            if let Some(items) = visible_items.as_ref() {
+                for item in items.iter() {
+                    if let VisibleItem::RichContent { view_id, index, .. } = item {
+                        let is_query = matches!(
+                            self.rich_content_metadata.get(view_id),
+                            Some(RichContentMetadata::AIBlock(meta))
+                                if meta
+                                    .ai_block_handle
+                                    .read(app, |block, app| block.has_pinnable_user_query(app))
+                        );
+                        if is_query {
+                            self.observe_query_block(*index, *view_id);
+                            if !candidate_view_ids.contains(view_id) {
+                                candidate_view_ids.push(*view_id);
+                            }
+                        }
+                    }
+                }
+            }
+            // Always lay out the persisted pinned query (its block may have scrolled off the top)
+            // plus its immediate neighbours in document order, so a hand-off in either direction has
+            // the target header element ready to paint on the same frame.
+            if let Some(current) = self.pinned_query_view_id() {
+                let (prev, next) = self.observed_neighbors_of(current);
+                for view_id in [Some(current), prev, next].into_iter().flatten() {
+                    if !candidate_view_ids.contains(&view_id) {
+                        candidate_view_ids.push(view_id);
+                    }
+                }
+            }
             for view_id in candidate_view_ids {
                 if let Some(RichContentMetadata::AIBlock(meta)) =
                     self.rich_content_metadata.get(&view_id)
@@ -3929,9 +4155,11 @@ impl Element for BlockListElement {
         // which borrows `self.visible_items` immutably (preventing `&mut self` method calls). It's
         // rebuilt every layout, so there's no need to restore it afterwards.
         let mut pinned_ai_queries = std::mem::take(&mut self.pinned_ai_queries);
-        // Geometry (view id, block origin, block height) for the top two visible items, captured
-        // during the paint loop and used afterwards to paint the sticky question headers.
-        let mut pinned_ai_query_geom: [Option<(EntityId, Vector2F, f32)>; 2] = [None, None];
+        // Geometry (view id, top y, document index) for every *visible* user-query block, captured
+        // during the paint loop and used afterwards to select and paint the sticky question header.
+        // We capture all visible query blocks (not just the top two) so the current/incoming
+        // selection is correct even with several short turns on screen.
+        let mut visible_query_geom: Vec<(EntityId, f32, TotalIndex)> = Vec::new();
 
         let items = self
             .visible_items
@@ -4178,6 +4406,24 @@ impl Element for BlockListElement {
                         grid_origin += vec2f(0., banner.banner_height());
                     }
 
+                    // In the fullscreen agent conversation, indent connected/running terminal
+                    // command blocks so their left text edge lines up with the agent prose and the
+                    // user-prompt text (`AGENT_CONTENT_LEFT_MARGIN`) instead of the terminal's
+                    // default left padding (`size_info.padding_x`). Only the block grid content and
+                    // its backgrounds shift; the toolbelt/selection/subshell chrome above was
+                    // computed from the unshifted origin, and we restore the running cursor's x
+                    // after `draw_block` (which only advances y) so subsequent rich-content items —
+                    // which already bake in `AGENT_CONTENT_LEFT_MARGIN` — aren't double-indented.
+                    // Gated on the fullscreen agent view so the normal terminal is untouched.
+                    let agent_block_left_inset = if FeatureFlag::AgentView.is_enabled()
+                        && agent_view_state.is_fullscreen()
+                    {
+                        (AGENT_CONTENT_LEFT_MARGIN - self.size_info.padding_x_px().as_f32()).max(0.)
+                    } else {
+                        0.
+                    };
+                    grid_origin += vec2f(agent_block_left_inset, 0.);
+
                     Self::draw_block(
                         block,
                         &mut grid_origin,
@@ -4213,6 +4459,10 @@ impl Element for BlockListElement {
                         ctx,
                         app,
                     );
+
+                    // Restore the running cursor's x (draw_block only advances y) so the
+                    // agent-conversation indent applied above doesn't leak into subsequent items.
+                    grid_origin.set_x(grid_origin.x() - agent_block_left_inset);
 
                     ctx.scene.start_layer(ClipBounds::ActiveLayer);
                     let block_is_bookmarked = self.bookmark_elements.contains_key(block_index);
@@ -4465,19 +4715,21 @@ impl Element for BlockListElement {
                     grid_origin += vec2f(0., *height);
                 }
                 VisibleItem::RichContent {
-                    view_id, height_px, ..
+                    view_id,
+                    height_px,
+                    index,
+                    ..
                 } => {
                     let block_origin = grid_origin;
                     if let Some(rich_content) = self.rich_content_elements.get_mut(view_id) {
                         rich_content.paint(grid_origin, ctx, app);
                     }
 
-                    // Capture the top two visible items' geometry so their questions can be pinned
-                    // to the top of the viewport. The actual paint happens after the block loop (in
-                    // its own top layer) so it sits above the scrolling agent response.
-                    if visible_idx < 2 {
-                        pinned_ai_query_geom[visible_idx] =
-                            Some((*view_id, block_origin, *height_px));
+                    // Capture every visible user-query block's geometry so its question can be
+                    // pinned to the top of the viewport. The actual paint happens after the block
+                    // loop (in its own top layer) so it sits above the scrolling agent response.
+                    if self.is_observed_query(*view_id) {
+                        visible_query_geom.push((*view_id, block_origin.y(), *index));
                     }
 
                     if !FeatureFlag::AgentView.is_enabled() {
@@ -4507,53 +4759,77 @@ impl Element for BlockListElement {
             }
         }
 
-        // Paint the pinned AI question(s) above the scrolling agent response, in their own top layer
-        // so they always sit in front of the block content they're occluding. The top block's
-        // question sticks to the viewport top; the next block's question rides up from below and
-        // pushes it off, so the sticky header hands over to the next question as the user scrolls.
-        if let Some((out_view_id, out_block_origin, out_block_height)) = pinned_ai_query_geom[0] {
-            ctx.scene.start_layer(ClipBounds::ActiveLayer);
+        // Paint the pinned AI question above the scrolling agent response, in its own top layer so
+        // it always sits in front of the block content it's occluding.
+        //
+        // The pinned header is, every frame, the *last* user query whose block top is at or above
+        // the viewport top — recomputed from scratch so it tracks BOTH scroll directions:
+        //   - down: a query at/above the top wins; when the next query's top reaches the top it
+        //     takes over;
+        //   - up: once we scroll above the current query's start (its top drops below the viewport
+        //     top), the header hands back to the previous query in document order — which may have
+        //     scrolled off the top, so we look it up via the observed-query map rather than the
+        //     on-screen geometry;
+        //   - retention: only when there's genuinely no query at/above the top (mid-turn output, or
+        //     the very top of the conversation) do we keep the last choice / clear it.
+        let viewport_top = origin.y();
 
-            // Incoming header (drawn first, beneath the outgoing one as they cross).
-            if let Some((in_view_id, in_block_origin, _)) = pinned_ai_query_geom[1] {
-                let outgoing_height = pinned_ai_queries
-                    .iter()
-                    .find(|p| p.view_id == out_view_id)
-                    .map(|p| p.height);
-                if let Some(outgoing_height) = outgoing_height {
-                    if let Some(incoming) = pinned_ai_queries
-                        .iter_mut()
-                        .find(|p| p.view_id == in_view_id)
-                    {
-                        Self::paint_incoming_pinned_query(
-                            incoming,
-                            in_block_origin.y(),
-                            outgoing_height,
-                            origin,
-                            ctx,
-                            app,
-                        );
-                    }
+        // Among all visible query blocks, find (a) the lowest one whose top has reached the viewport
+        // top (the "current" header) and (b) the highest one still below the top (the "incoming"
+        // header, rising to take over on a down-scroll).
+        let mut current_candidate: Option<(EntityId, f32)> = None;
+        let mut incoming: Option<(EntityId, f32, TotalIndex)> = None;
+        for (view_id, top_y, index) in visible_query_geom.iter().copied() {
+            if top_y <= viewport_top {
+                if current_candidate.is_none_or(|(_, best_y)| top_y >= best_y) {
+                    current_candidate = Some((view_id, top_y));
                 }
+            } else if incoming.is_none_or(|(_, best_y, _)| top_y < best_y) {
+                incoming = Some((view_id, top_y, index));
             }
+        }
 
-            // Outgoing (top) header, drawn last so it stays above the incoming one as it rides up.
-            if let Some(outgoing) = pinned_ai_queries
+        let pinned = if let Some((view_id, _)) = current_candidate {
+            // A query is at/above the top — it's the pinned header (down-scroll, and up-scroll once
+            // the previous query has scrolled back into view at the top).
+            Some(view_id)
+        } else if let Some((_, _, incoming_index)) = incoming {
+            // No query at/above the top but one is visible below it: we've scrolled above the start
+            // of the topmost turn on screen, so hand back to the previous query (possibly off-screen
+            // above).
+            self.observed_query_before(incoming_index)
+        } else {
+            // No query info this frame — keep the last pinned choice (mid-turn output scrolled past
+            // the top).
+            self.pinned_query_view_id()
+        };
+        match pinned {
+            Some(view_id) => self.set_pinned_query_view_id(view_id),
+            None => self.clear_pinned_query_view_id(),
+        }
+
+        if let Some(current_view_id) = self.pinned_query_view_id() {
+            // Only the current turn's header is ever pinned. As the next turn's query block rises to
+            // the top it pushes this header up (see `paint_current_pinned_query`); that incoming
+            // block's own natural inline rendering serves as the visual "incoming" header, so at most
+            // ONE pinned header is drawn at any time — no second pinned header stacked/overlapping the
+            // incoming block during the hand-off (the previous cause of the "merge / resize on
+            // hand-off" pop). When the incoming block's top reaches the viewport top it becomes the
+            // pinned selection on the next frame, giving a clean single-header swap.
+            //
+            // `incoming_top` (the next query block's top, when different from the current one) still
+            // drives the ride-up so the outgoing header is pushed off cleanly.
+            let incoming_top = incoming
+                .filter(|(view_id, _, _)| *view_id != current_view_id)
+                .map(|(_, in_top, _)| in_top);
+            if let Some(current) = pinned_ai_queries
                 .iter_mut()
-                .find(|p| p.view_id == out_view_id)
+                .find(|p| p.view_id == current_view_id)
             {
-                Self::paint_pinned_ai_query(
-                    outgoing,
-                    out_view_id,
-                    out_block_origin,
-                    out_block_height,
-                    origin,
-                    ctx,
-                    app,
-                );
+                ctx.scene.start_layer(ClipBounds::ActiveLayer);
+                Self::paint_current_pinned_query(current, incoming_top, origin, ctx, app);
+                ctx.scene.stop_layer();
             }
-
-            ctx.scene.stop_layer();
         }
 
         let block_list = model.block_list();
@@ -4640,7 +4916,10 @@ impl Element for BlockListElement {
         // that region — breaking selection auto-scroll when dragging downward.
         // This matches the pattern used by SelectableArea, Draggable, Resizable,
         // and both Scrollable variants, which all use `raw_event()` for drags.
-        let event_at_z_index = if self.is_terminal_selecting
+        // Rich content (AI) block selections need the same bypass so their
+        // `SelectableArea` keeps receiving drags (and the block list keeps
+        // autoscrolling) when the pointer crosses into the footer.
+        let event_at_z_index = if (self.is_terminal_selecting || self.is_rich_content_selecting)
             && matches!(
                 event.raw_event(),
                 Event::LeftMouseDragged { .. } | Event::LeftMouseUp { .. }
@@ -4764,6 +5043,32 @@ impl Element for BlockListElement {
                 for view_id in self.visible_rich_content_views() {
                     if let Some(rich_content) = self.rich_content_elements.get_mut(&view_id) {
                         handled |= rich_content.dispatch_event(event, ctx, app);
+                    }
+                }
+
+                // If a rich content (AI) block just started its own text selection
+                // from this mouse-down, also engage the point-based grid selection so
+                // the drag can extend across intervening command/tool blocks into
+                // later prose (the child consumed the event, so `mouse_down` below is
+                // skipped). See `maybe_seed_rich_content_text_selection`.
+                if handled {
+                    if let Event::LeftMouseDown {
+                        position,
+                        click_count,
+                        is_first_mouse,
+                        modifiers,
+                        ..
+                    } = event_at_z_index
+                    {
+                        if !*is_first_mouse {
+                            self.maybe_seed_rich_content_text_selection(
+                                *position,
+                                *click_count,
+                                modifiers,
+                                ctx,
+                                app,
+                            );
+                        }
                     }
                 }
             }

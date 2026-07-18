@@ -62,6 +62,22 @@ impl<P: BackingView> PaneHeader<P> {
         })
     }
 
+    pub fn set_session_share_source(
+        &mut self,
+        source: Option<warpui::WeakViewHandle<crate::terminal::TerminalView>>,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        self.sharing_dialog().update(ctx, |dialog, ctx| {
+            dialog.set_session_share_source(source, ctx);
+        })
+    }
+
+    /// Whether the sharing dialog can start/stop a live session from its toggle,
+    /// even when no session is currently live.
+    pub fn has_session_share_source<C: warpui::ViewAsRef>(&self, ctx: &C) -> bool {
+        self.sharing_dialog().as_ref(ctx).is_session_share_context()
+    }
+
     pub fn sharing_dialog(&self) -> &ViewHandle<SharingDialog> {
         &self.shared_content.sharing_dialog
     }
@@ -77,11 +93,14 @@ impl<P: BackingView> PaneHeader<P> {
     }
 
     pub fn is_sharing_dialog_enabled<C: warpui::ViewAsRef>(&self, ctx: &C) -> bool {
-        let sharing_enabled = self.has_shareable_object(ctx);
         if self.has_shareable_shared_session(ctx) {
-            sharing_enabled && FeatureFlag::SessionSharingAcls.is_enabled()
+            self.has_shareable_object(ctx) && FeatureFlag::SessionSharingAcls.is_enabled()
+        } else if self.has_session_share_source(ctx) {
+            // A session-capable pane can open the dialog to toggle sharing on,
+            // even before a live session exists.
+            true
         } else {
-            sharing_enabled
+            self.has_shareable_object(ctx)
         }
     }
 
@@ -98,11 +117,15 @@ impl<P: BackingView> PaneHeader<P> {
             return;
         }
 
-        if !self
-            .sharing_dialog()
-            .as_ref(ctx)
-            .editability(ctx)
-            .can_edit()
+        // Session-capable panes always open the dialog (to reach the on/off
+        // sharing toggle), regardless of edit access on the (possibly absent)
+        // live-session target.
+        if !self.has_session_share_source(ctx)
+            && !self
+                .sharing_dialog()
+                .as_ref(ctx)
+                .editability(ctx)
+                .can_edit()
         {
             self.sharing_dialog()
                 .update(ctx, |dialog, ctx| dialog.copy_link(ctx));
@@ -189,6 +212,7 @@ impl<P: BackingView> PaneHeader<P> {
             .sharing_dialog()
             .as_ref(app)
             .is_unsharable_conversation(app);
+        let is_session_share_context = self.has_session_share_source(app);
         let editability = self.sharing_dialog().as_ref(app).editability(app);
 
         let (primary_button_icon, primary_button_active, primary_tooltip_text) =
@@ -198,7 +222,7 @@ impl<P: BackingView> PaneHeader<P> {
                     false,
                     UNSHARABLE_CONVERSATION_TOOLTIP.to_string(),
                 )
-            } else if editability.can_edit() {
+            } else if is_session_share_context || editability.can_edit() {
                 (
                     Icon::Share,
                     self.open_overlay == OpenOverlay::SharingDialog,
@@ -258,7 +282,7 @@ impl<P: BackingView> PaneHeader<P> {
         };
         element.add_child(primary_button);
 
-        if !editability.can_edit() {
+        if !is_session_share_context && !editability.can_edit() {
             let mut tooltip_text = String::from("Read-only");
             if matches!(editability, ContentEditability::RequiresLogin) {
                 tooltip_text.push_str(". Sign in to edit");

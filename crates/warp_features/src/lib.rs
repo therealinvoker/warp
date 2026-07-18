@@ -727,6 +727,10 @@ pub enum FeatureFlag {
     QueueSlashCommand,
     /// Extends queued prompts to Cloud Mode setup and follow-up draining.
     QueuedPromptsV2,
+    /// Gates the `/steer` slash command, which sends a mid-run steering message to
+    /// the agent's mailbox for the current conversation so the harness loop folds
+    /// it in on its next step (redirect in place, no cancel/restart).
+    SteerSlashCommand,
 
     /// Enables an agent tool for the CLI subagent to explicitly transfer command control to the
     /// user.
@@ -954,6 +958,12 @@ pub enum FeatureFlag {
     /// (`open_browser_preview`) that lets the agent point the preview at a
     /// dev-server URL to show what is being built.
     BrowserPreview,
+
+    /// Enables the redesigned orchestration agent-visibility UI: a composer-
+    /// anchored "N Working" indicator that expands to a task-named worker list,
+    /// a clickable in-stream delegation card, and a read-only live per-agent
+    /// progress modal. Replaces the top orchestration pill bar when enabled.
+    AgentProgressUI,
 }
 
 static FLAG_STATES: [AtomicBool; cardinality::<FeatureFlag>()] =
@@ -996,6 +1006,7 @@ pub const DOGFOOD_FLAGS: &[FeatureFlag] = &[
     FeatureFlag::Projects,
     FeatureFlag::ProviderCommand,
     FeatureFlag::MarkdownImages,
+    FeatureFlag::BlocklistMarkdownImages,
     FeatureFlag::FileAndDiffSetComments,
     FeatureFlag::FileGlobV2Warnings,
     FeatureFlag::SummarizationViaMessageReplacement,
@@ -1026,6 +1037,10 @@ pub const DOGFOOD_FLAGS: &[FeatureFlag] = &[
     FeatureFlag::SequentialMultilinePaste,
     #[cfg(target_os = "macos")]
     FeatureFlag::BrowserPreview,
+    FeatureFlag::AgentProgressUI,
+    // Bang fork: /plan mode uses ask_user_question for clarifying questions, so
+    // the tool must be advertised + activated on dogfood builds.
+    FeatureFlag::AskUserQuestion,
 ];
 
 /// Features enabled for feature preview build users (e.g.: Friends of Warp).

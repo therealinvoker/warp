@@ -2,11 +2,13 @@ use std::sync::atomic::Ordering;
 
 use warp_cli::agent::Harness;
 use warp_core::settings::Setting;
+use warp_core::ui::theme::Fill;
 use warpui::elements::{
-    AnchorPair, ConstrainedBox, Container, CrossAxisAlignment, DispatchEventResult, DropTarget,
-    Element, Empty, EventHandler, Expanded, Flex, Hoverable, MainAxisSize, OffsetPositioning,
-    OffsetType, ParentElement, PositionedElementOffsetBounds, PositioningAxis, SavePosition, Stack,
-    XAxisAnchor, YAxisAnchor,
+    AnchorPair, Border, ConstrainedBox, Container, CornerRadius, CrossAxisAlignment,
+    DispatchEventResult, DropShadow, DropTarget, Element, Empty, EventHandler, Expanded, Flex,
+    Hoverable, MainAxisSize, OffsetPositioning, OffsetType, ParentElement,
+    PositionedElementOffsetBounds, PositioningAxis, Radius, SavePosition, Stack, XAxisAnchor,
+    YAxisAnchor,
 };
 use warpui::presenter::ChildView;
 use warpui::{AppContext, SingletonEntity as _};
@@ -28,6 +30,7 @@ use crate::context_chips::spacing::{self};
 use crate::editor::position_id_for_cursor;
 use crate::features::FeatureFlag;
 use crate::settings::InputModeSettings;
+use crate::terminal::input::inline_menu::styles as inline_styles;
 use crate::terminal::settings::TerminalSettings;
 use crate::terminal::view::{TerminalAction, PADDING_LEFT};
 use crate::BlocklistAIHistoryModel;
@@ -40,6 +43,13 @@ const CLOUD_MODE_V2_TOP_ROW_INNER_GAP: f32 = 4.;
 
 // Top padding above the attachment chips row inside the V2 input container.
 const CLOUD_MODE_V2_CHIPS_ROW_TOP_PADDING: f32 = 4.;
+
+// Gap between the top of the input box and the bottom of the inline suggestion
+// menu overlay (slash commands, model/profile selector, etc.).
+const INLINE_MENU_OVERLAY_GAP: f32 = 4.;
+// Corner radius for the inline suggestion menu overlay frame (matches
+// cloud-mode-v2's `MENU_CORNER_RADIUS`).
+const INLINE_MENU_OVERLAY_CORNER_RADIUS: f32 = 6.;
 
 impl Input {
     pub fn is_cloud_mode_input_v2_composing(&self, app: &AppContext) -> bool {
@@ -165,15 +175,15 @@ impl Input {
 
         if use_split_footer {
             // Single composer row: `[+] [editor] [mic/lightning]` laid out as a
-            // real, vertically-centered flex row (no overlay). The "+" attach
-            // button is owned by `Input` (it dispatches `InputAction::SelectImage`)
-            // so it can sit as a first-class flex child to the *left* of the editor
-            // while still routing correctly; the footer `ChildView` draws only the
-            // right-hand mic/lightning cluster, keeping those parented to
-            // `AgentInputFooter`. A plain flex row (rather than the previous
-            // Stack overlay) keeps the editor a normal hit target so it stays
-            // clickable, and `CrossAxisAlignment::Center` vertically aligns the
-            // buttons with the editor's text.
+            // real flex row (no overlay). The "+" attach button is owned by
+            // `Input` (it dispatches `InputAction::SelectImage`) so it can sit as
+            // a first-class flex child to the *left* of the editor while still
+            // routing correctly; the footer `ChildView` draws only the right-hand
+            // mic/lightning cluster, keeping those parented to `AgentInputFooter`.
+            // A plain flex row (rather than the previous Stack overlay) keeps the
+            // editor a normal hit target so it stays clickable. The row's cross-axis
+            // alignment (chosen below) keeps the `+`/mic/lightning lined up with the
+            // editor's first line of text whether it is one line or many.
             let attach_button =
                 Container::new(ChildView::new(&self.composer_attach_button).finish())
                     .with_margin_right(spacing::UDI_CHIP_MARGIN)
@@ -186,20 +196,18 @@ impl Input {
                 .with_padding_top(SPLIT_EDITOR_VPAD)
                 .finish();
 
-            // Decide single-row (controls inline, right of the editor) vs. stacked
-            // (controls on a row *below* the full-width editor) from a *width-stable*
-            // signal rather than the editor's live soft-wrap count. The editor is
-            // narrower when the controls sit inline and grows to full width once they
-            // drop below, so a soft-wrap count read from the current layout flip-flops
-            // for borderline-length text — and any re-render (notably mouseover) makes
-            // the flip visible, so the box jumps from one line to two on hover.
+            // Decide the composer row's vertical alignment — single-line centered
+            // vs. multi-line top-aligned (see the row built below) — from a
+            // *width-stable* signal rather than the editor's live soft-wrap count.
+            // The editor is always an `Expanded` child of the row, so its measured
+            // width doesn't change when the text wraps; but a soft-wrap count read
+            // from the current layout would still flip-flop for borderline-length
+            // text on any re-render (notably mouseover).
             //
-            // Instead, compare the text's width against the single-row editor width
-            // *captured while the composer was actually in the single-row layout*
-            // (cached across frames). That reference doesn't change when the controls
-            // drop below (which widens the live editor) or on hover, so the layout
-            // only changes when the text itself does: it stays one line until the text
-            // no longer fits beside the inline controls.
+            // Instead, compare the text's rendered width against the editor's
+            // measured width (cached across frames). That reference is stable, so
+            // the alignment only changes when the text itself does: it stays a
+            // centered single line until the text no longer fits on one line.
             let is_multiline = {
                 let editor = self.editor.as_ref(app);
                 let text = editor.buffer_text(app);
@@ -208,9 +216,9 @@ impl Input {
                     true
                 } else {
                     let was_multiline = self.composer_controls_below.load(Ordering::Relaxed);
-                    // While rendering the single row, the editor's measured width *is*
-                    // the authoritative "fits on one line" width — cache it so the
-                    // decision stays put after the controls drop below.
+                    // The editor's measured width *is* the authoritative "fits on one
+                    // line" width — cache it while the row is centered (single-line) so
+                    // the alignment decision stays put across frames.
                     if !was_multiline {
                         let window_id = self.editor.window_id(app);
                         if let Some(rect) = app.element_position_by_id_at_last_frame(
@@ -228,15 +236,25 @@ impl Input {
                     let em_width = editor.em_width(app.font_cache(), appearance);
                     let text_width = text.chars().count() as f32 * em_width;
                     // Switch a couple of characters early (the cached width includes the
-                    // box's inner padding) so we drop the controls below *before* the
-                    // text would visibly wrap inside the single row.
+                    // box's inner padding) so the row top-aligns *before* the text would
+                    // visibly wrap inside it.
                     single_row_width > 1. && text_width > single_row_width - em_width * 2.
                 }
             };
             self.composer_controls_below
                 .store(is_multiline, Ordering::Relaxed);
 
+            // Single line vs. multi-line composer layout. A single line keeps the
+            // compact one-row form `[+] [editor] [model/mic/lightning]`; once the
+            // text wraps to 2+ lines the control row drops *below* a full-width
+            // editor (Cursor-style) so long content isn't squeezed beside the
+            // inline controls. The decision is driven by the width-stable
+            // `is_multiline` signal above, so the layout doesn't flip-flop.
             if is_multiline {
+                // Multi-line: the editor spans the full width on its own row and
+                // the control row (`[+] … [model/mic/lightning]`) sits below it, with
+                // the `+` and the footer cluster pushed to opposite ends by an
+                // expanding spacer.
                 let controls_row = Flex::row()
                     .with_main_axis_size(MainAxisSize::Max)
                     .with_cross_axis_alignment(CrossAxisAlignment::Center)
@@ -244,13 +262,16 @@ impl Input {
                     .with_child(Expanded::new(1., Empty::new().finish()).finish())
                     .with_child(footer_controls)
                     .finish();
-                let stacked = Flex::column()
-                    .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
-                    .with_child(editor_box)
-                    .with_child(controls_row)
-                    .finish();
-                column.add_child(Container::new(stacked).finish());
+                // The editor already carries `SPLIT_EDITOR_VPAD` bottom padding, so
+                // the control row needs no extra top margin — an additional margin
+                // here stacks on that padding and nudges the `+`/controls a few
+                // pixels lower than the single-row layout.
+                column.add_child(Container::new(editor_box).finish());
+                column.add_child(Container::new(controls_row).finish());
             } else {
+                // Single line: `[+] [editor] [model/mic/lightning]` on one
+                // vertically-centered flex row, with the editor as an `Expanded`
+                // middle child.
                 let row = Flex::row()
                     .with_main_axis_size(MainAxisSize::Max)
                     .with_cross_axis_alignment(CrossAxisAlignment::Center)
@@ -258,8 +279,8 @@ impl Input {
                     .with_child(Expanded::new(1., editor_box).finish())
                     .with_child(footer_controls)
                     .finish();
-                // No top margin here: the balanced `SPLIT_EDITOR_VPAD` on the editor is
-                // the only vertical padding, keeping the box tight and symmetric.
+                // No top margin here: the balanced `SPLIT_EDITOR_VPAD` on the editor
+                // is the only vertical padding, keeping the box tight and symmetric.
                 column.add_child(Container::new(row).finish());
             }
         } else {
@@ -362,50 +383,58 @@ impl Input {
 
         let mut column = Flex::column();
 
-        if self
+        // The inline suggestion menus (model/profile selector, slash commands,
+        // prompts, etc.) used to be in-flow siblings *above* the input in this
+        // column, so opening one reflowed the layout and pushed the input box
+        // down. They now render as an overlay anchored above the input box (see
+        // `outer_stack.add_positioned_overlay_child` below), so the input stays
+        // pinned in place while the menu expands upward.
+        let inline_menu: Option<Box<dyn Element>> = if self
             .suggestions_mode_model
             .as_ref(app)
             .is_inline_model_selector()
         {
-            column.add_child(ChildView::new(&self.inline_model_selector_view).finish());
+            Some(ChildView::new(&self.inline_model_selector_view).finish())
         } else if FeatureFlag::InlineProfileSelector.is_enabled()
             && self
                 .suggestions_mode_model
                 .as_ref(app)
                 .is_profile_selector()
         {
-            column.add_child(ChildView::new(&self.inline_profile_selector_view).finish());
+            Some(ChildView::new(&self.inline_profile_selector_view).finish())
         } else if self.suggestions_mode_model.as_ref(app).is_slash_commands()
             && !self.is_cloud_mode_input_v2_composing(app)
         {
-            column.add_child(ChildView::new(&self.inline_slash_commands_view).finish());
+            Some(ChildView::new(&self.inline_slash_commands_view).finish())
         } else if self.suggestions_mode_model.as_ref(app).is_prompts_menu() {
-            column.add_child(ChildView::new(&self.inline_prompts_menu_view).finish());
+            Some(ChildView::new(&self.inline_prompts_menu_view).finish())
         } else if self
             .suggestions_mode_model
             .as_ref(app)
             .is_conversation_menu()
         {
-            column.add_child(ChildView::new(&self.inline_conversation_menu_view).finish());
+            Some(ChildView::new(&self.inline_conversation_menu_view).finish())
         } else if FeatureFlag::ListSkills.is_enabled()
             && self.suggestions_mode_model.as_ref(app).is_skill_menu()
         {
-            column.add_child(ChildView::new(&self.inline_skill_selector_view).finish());
+            Some(ChildView::new(&self.inline_skill_selector_view).finish())
         } else if self.suggestions_mode_model.as_ref(app).is_user_query_menu() {
-            column.add_child(ChildView::new(&self.user_query_menu_view).finish());
+            Some(ChildView::new(&self.user_query_menu_view).finish())
         } else if self.suggestions_mode_model.as_ref(app).is_rewind_menu() {
-            column.add_child(ChildView::new(&self.rewind_menu_view).finish());
+            Some(ChildView::new(&self.rewind_menu_view).finish())
         } else if self
             .suggestions_mode_model
             .as_ref(app)
             .is_inline_history_menu()
         {
-            column.add_child(ChildView::new(&self.inline_history_menu_view).finish());
+            Some(ChildView::new(&self.inline_history_menu_view).finish())
         } else if self.suggestions_mode_model.as_ref(app).is_repos_menu() {
-            column.add_child(ChildView::new(&self.inline_repos_menu_view).finish());
+            Some(ChildView::new(&self.inline_repos_menu_view).finish())
         } else if self.suggestions_mode_model.as_ref(app).is_plan_menu() {
-            column.add_child(ChildView::new(&self.inline_plan_menu_view).finish());
-        }
+            Some(ChildView::new(&self.inline_plan_menu_view).finish())
+        } else {
+            None
+        };
 
         if self
             .agent_shortcut_view_model
@@ -442,13 +471,115 @@ impl Input {
                 app,
             ));
         }
-        column.add_child(ChildView::new(&self.agent_status_view).finish());
+
+        // Composer-anchored "N Working" orchestration indicator, sitting above
+        // the status/hints row (the `? for help  / for commands …` line).
+        // Renders empty unless there are orchestration workers and
+        // `AgentProgressUI` is enabled. Left-inset to line up with the input
+        // box's content, matching the outside-controls footer row.
+        column.add_child(
+            Container::new(ChildView::new(&self.working_agents_indicator).finish())
+                .with_margin_left(FLOATING_INPUT_MARGIN + *PADDING_LEFT)
+                .with_margin_bottom(4.)
+                .finish(),
+        );
+
+        // The agent status/message bar renders the `? for help  / for commands …`
+        // hint row at rest, but collapses (produces a shorter/empty message) while
+        // an inline suggestion menu is open. In the vertically-centered zero-state
+        // composer that height change reflows the column and shifts the otherwise
+        // -pinned input box. Reserve the bar's last-frame height (as a min-height)
+        // while a menu is open so the input never moves.
+        let status_hints_id = self.agent_status_hints_save_position_id();
+        let status_bar = ChildView::new(&self.agent_status_view).finish();
+        let status_bar = if inline_menu.is_some() {
+            match app.element_position_by_id_at_last_frame(
+                self.editor.window_id(app),
+                status_hints_id.clone(),
+            ) {
+                Some(rect) if rect.height() > 0. => ConstrainedBox::new(status_bar)
+                    .with_min_height(rect.height())
+                    .finish(),
+                _ => status_bar,
+            }
+        } else {
+            status_bar
+        };
+        column.add_child(SavePosition::new(status_bar, &status_hints_id).finish());
         if let Some(panel) = self.queued_prompts_panel.as_ref() {
             if panel.as_ref(app).should_render(app) {
                 column.add_child(ChildView::new(panel).finish());
             }
         }
-        column.add_child(input);
+
+        // The inline suggestion menus (model/profile selector, slash commands,
+        // prompts, etc.) render as a floating overlay anchored to the *top* of
+        // the input box, expanding upward. Wrapping the input in a plain
+        // (non-`with_constrain_absolute_children`) `Stack` is what keeps the
+        // input box pinned: positioned overlay children of such a stack don't
+        // contribute to its measured size, so the box occupies the same layout
+        // slot whether the menu is open or closed. (Adding it to the outer
+        // `with_constrain_absolute_children` stack grew that stack to contain the
+        // upward menu, which re-centered and shifted the whole composer.) This
+        // mirrors the cloud-mode-v2 overlay pattern in
+        // `render_cloud_mode_v2_composing_input`.
+        if let Some(menu) = inline_menu {
+            let input_anchor = self.status_free_input_save_position_id();
+            let theme = appearance.theme();
+            // Restore the opaque menu frame (surface fill + border + rounded
+            // corners + drop shadow) the in-flow path got from the pane behind
+            // it; as an overlay the menu floats over conversation content, so it
+            // needs to paint its own background. Matches cloud-mode-v2's
+            // `render_menu_panel` frame.
+            let framed_menu = Container::new(menu)
+                .with_background(Fill::Solid(inline_styles::menu_background_color(app)))
+                .with_border(
+                    Border::all(1.).with_border_fill(Fill::Solid(theme.outline().into_solid())),
+                )
+                .with_corner_radius(CornerRadius::with_all(Radius::Pixels(
+                    INLINE_MENU_OVERLAY_CORNER_RADIUS,
+                )))
+                .with_drop_shadow(DropShadow::default())
+                .finish();
+
+            // Clamp the overlay to the input box's width so it lines up with the
+            // box instead of stretching to the window edge. The non-constraining
+            // stack (needed to keep the input pinned) doesn't bound the menu's
+            // width the way the previous `with_constrain_absolute_children` stack
+            // did, so we constrain it explicitly from the box's last-frame width.
+            let framed_menu = match app.element_position_by_id_at_last_frame(
+                self.editor.window_id(app),
+                self.status_free_input_save_position_id(),
+            ) {
+                Some(rect) if rect.width() > 0. => ConstrainedBox::new(framed_menu)
+                    .with_max_width(rect.width())
+                    .finish(),
+                _ => framed_menu,
+            };
+
+            let mut input_stack = Stack::new();
+            input_stack.add_child(input);
+            input_stack.add_positioned_overlay_child(
+                framed_menu,
+                OffsetPositioning::from_axes(
+                    PositioningAxis::relative_to_stack_child(
+                        &input_anchor,
+                        PositionedElementOffsetBounds::WindowByPosition,
+                        OffsetType::Pixel(0.),
+                        AnchorPair::new(XAxisAnchor::Left, XAxisAnchor::Left),
+                    ),
+                    PositioningAxis::relative_to_stack_child(
+                        &input_anchor,
+                        PositionedElementOffsetBounds::Unbounded,
+                        OffsetType::Pixel(-INLINE_MENU_OVERLAY_GAP),
+                        AnchorPair::new(YAxisAnchor::Top, YAxisAnchor::Bottom),
+                    ),
+                ),
+            );
+            column.add_child(input_stack.finish());
+        } else {
+            column.add_child(input);
+        }
 
         if use_split_footer {
             // The remaining toolbar controls (dir chip, aA, model selector,
@@ -469,6 +600,7 @@ impl Input {
 
         let mut outer_stack = Stack::new().with_constrain_absolute_children();
         outer_stack.add_child(column.finish());
+
         // Re-acquire the model lock only for the banner check; kept out of the
         // span above so the footer split methods can lock the model safely.
         let model = self.model.lock();

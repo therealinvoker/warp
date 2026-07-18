@@ -38,9 +38,11 @@ use crate::ai::blocklist::inline_action::requested_action::{
 };
 use crate::ai::blocklist::BlocklistAIHistoryModel;
 use crate::appearance::Appearance;
+use crate::features::FeatureFlag;
 use crate::terminal::view::TerminalAction;
 use crate::ui_components::blended_colors;
 use crate::ui_components::icons::Icon;
+use crate::workspace::WorkspaceAction;
 
 const GENERATING_TITLE_PLACEHOLDER: &str = "Generating title...";
 const ORCHESTRATION_COLLAPSED_MAX_HEIGHT: f32 = 200.;
@@ -377,7 +379,7 @@ pub(super) fn render_messages_received_from_agents(
         column.add_child(row_container.finish());
     }
 
-    column.finish().with_agent_output_item_spacing(app).finish()
+    column.finish().with_agent_output_item_spacing().finish()
 }
 
 fn participant_display_names(participants: &[OrchestrationParticipant]) -> String {
@@ -405,7 +407,7 @@ fn render_transcript_row_with_spacing(
     app: &AppContext,
 ) -> Box<dyn Element> {
     render_transcript_row(data, props, app)
-        .with_agent_output_item_spacing(app)
+        .with_agent_output_item_spacing()
         .finish()
 }
 
@@ -469,7 +471,7 @@ pub(super) fn render_send_message(
                     false,
                     app,
                 )
-                .with_agent_output_item_spacing(app)
+                .with_agent_output_item_spacing()
                 .with_background_color(blended_colors::neutral_2(theme))
                 .with_corner_radius(CornerRadius::with_all(Radius::Pixels(8.)))
                 .finish();
@@ -486,7 +488,7 @@ pub(super) fn render_send_message(
                     false,
                     app,
                 )
-                .with_agent_output_item_spacing(app)
+                .with_agent_output_item_spacing()
                 .with_background_color(blended_colors::neutral_2(theme))
                 .with_corner_radius(CornerRadius::with_all(Radius::Pixels(8.)))
                 .finish();
@@ -547,7 +549,7 @@ pub(super) fn render_send_message(
 
     column
         .finish()
-        .with_agent_output_item_spacing(app)
+        .with_agent_output_item_spacing()
         .with_background_color(blended_colors::neutral_2(theme))
         .with_corner_radius(CornerRadius::with_all(Radius::Pixels(8.)))
         .finish()
@@ -660,7 +662,7 @@ pub(super) fn render_start_agent(
 
         return column
             .finish()
-            .with_agent_output_item_spacing(app)
+            .with_agent_output_item_spacing()
             .with_background_color(blended_colors::neutral_2(theme))
             .with_corner_radius(CornerRadius::with_all(Radius::Pixels(8.)))
             .finish();
@@ -719,7 +721,7 @@ pub(super) fn render_start_agent(
 
     column
         .finish()
-        .with_agent_output_item_spacing(app)
+        .with_agent_output_item_spacing()
         .with_background_color(blended_colors::neutral_2(theme))
         .with_corner_radius(CornerRadius::with_all(Radius::Pixels(8.)))
         .finish()
@@ -928,7 +930,16 @@ fn render_conversation_navigation_card_row(
         title.to_string(),
         subtitle.map(|s| s.to_string()),
         move |ctx, _, _| {
-            ctx.dispatch_typed_action(TerminalAction::RevealChildAgent { conversation_id });
+            // With the redesigned agent-progress UI, the in-stream delegation
+            // card opens the read-only live progress modal instead of jumping
+            // to the child's own pane. Falls back to the pane reveal otherwise.
+            if FeatureFlag::AgentProgressUI.is_enabled() {
+                ctx.dispatch_typed_action(WorkspaceAction::OpenAgentProgressModal {
+                    conversation_id,
+                });
+            } else {
+                ctx.dispatch_typed_action(TerminalAction::RevealChildAgent { conversation_id });
+            }
         },
         mouse_state,
         true,

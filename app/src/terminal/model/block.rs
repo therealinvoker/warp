@@ -30,7 +30,7 @@ use warpui::units::{IntoLines, Lines};
 
 use super::bootstrap::BootstrapStage;
 use super::find::RegexDFAs;
-use super::grid::grid_handler::{GridHandler, PerformResetGridChecks};
+use super::grid::grid_handler::{GridHandler, InlineImagePlacement, PerformResetGridChecks};
 use super::grid::{Cursor, RespectDisplayedOutput};
 use super::header_grid::{HeaderGrid, PromptEndPoint};
 use super::image_map::StoredImageMetadata;
@@ -1882,6 +1882,14 @@ impl Block {
 
     pub fn output_grid(&self) -> &BlockGrid {
         &self.output_grid
+    }
+
+    /// Inline images (id + logical size) present in this block's output grid,
+    /// ordered top to bottom. Lets callers render the block's images
+    /// declaratively when they can't go through the grid paint path (e.g. a
+    /// middle command's output rendered inline in the agent conversation view).
+    pub fn output_grid_image_placements(&self) -> Vec<InlineImagePlacement> {
+        self.output_grid.grid_handler().output_image_placements()
     }
 
     pub fn find_prompt_and_command_grid_matches<'a>(

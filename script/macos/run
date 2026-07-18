@@ -245,7 +245,16 @@ fi
 if [ "$DONT_OPEN" = false ] ; then
     if  [ "$OPEN_WITH_LAUNCHD" = true ]; then
         echo "Launching with MacOS application launcher"
-        PATH="" /usr/bin/open "$WARP_APP_PATH"
+        # A GUI app launched by LaunchServices normally inherits launchd's PATH
+        # (which includes /usr/bin, so `git`, `kubectl`, etc. resolve). Current
+        # macOS `open` forwards THIS shell's environment to the launched app, so
+        # clearing PATH here left the app with an EMPTY PATH — every bare-name
+        # subprocess the app spawns directly (git status/diff chips, kubernetes
+        # context, the agent's shell tooling) then failed to spawn with
+        # "No such file or directory (os error 2)". Launch with at least the
+        # standard system directories (prepended to any inherited PATH) so those
+        # spawns resolve like they would in a shipped build.
+        PATH="/usr/bin:/bin:/usr/sbin:/sbin:${PATH}" /usr/bin/open "$WARP_APP_PATH"
         if [ "$WARP_CHANNEL" = "local" ]; then
             LOG_FILE=~/Library/Logs/warp_local.log
         elif [ "$WARP_CHANNEL" = "oss" ]; then

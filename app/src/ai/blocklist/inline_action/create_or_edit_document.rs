@@ -115,7 +115,7 @@ impl CreateOrEditDocumentAction {
                 });
             })
             .finish()
-            .with_agent_output_item_spacing(app)
+            .with_agent_output_item_spacing()
             .finish()
     }
 }

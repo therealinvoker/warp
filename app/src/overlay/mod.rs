@@ -31,13 +31,12 @@ pub mod realtime;
 
 #[cfg(target_os = "macos")]
 mod platform_mac;
-#[cfg(target_os = "macos")]
-pub use platform_mac::{install_overlay_app_bridge, preload_tts};
-
 pub use platform::{
     Annotator, GlobalPointer, NoopAnnotator, NoopGlobalPointer, NoopOverlayWindow, NoopPermissions,
     NoopScreenCapturer, OverlayPermissions, OverlayWindow, PermissionState, ScreenCapturer,
 };
+#[cfg(target_os = "macos")]
+pub use platform_mac::{install_overlay_app_bridge, preload_tts};
 pub use sink::{AgentSink, LoggingAgentSink};
 
 /// Session state for the overlay.

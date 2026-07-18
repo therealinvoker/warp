@@ -16,7 +16,7 @@ use warpui::{
     ViewContext, ViewHandle,
 };
 
-use crate::ai::blocklist::agent_view::agent_input_footer::AgentInputButtonTheme;
+use crate::ai::blocklist::agent_view::agent_input_footer::CloudGhostChipTheme;
 use crate::ai::cloud_agent_settings::CloudAgentSettings;
 use crate::ai::custom_model_routers::is_custom_router_id;
 use crate::ai::execution_profiles::model_menu_items::is_auto;
@@ -116,7 +116,7 @@ impl ModelSelector {
         ctx: &mut ViewContext<Self>,
     ) -> Self {
         let button = ctx.add_typed_action_view(|_ctx| {
-            ActionButton::new("", AgentInputButtonTheme)
+            ActionButton::new("", CloudGhostChipTheme)
                 .with_size(ButtonSize::AgentInputButton)
                 .with_tooltip(BUTTON_TOOLTIP)
                 .on_click(|ctx| {

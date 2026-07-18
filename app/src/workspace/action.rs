@@ -21,8 +21,7 @@ use crate::ai::agent::api::ServerConversationToken;
 #[cfg(not(target_family = "wasm"))]
 use crate::ai::agent::conversation::AIAgentHarness;
 use crate::ai::agent::conversation::AIConversationId;
-use crate::ai::agent::AIAgentExchangeId;
-use crate::ai::agent::ImageContext;
+use crate::ai::agent::{AIAgentExchangeId, ImageContext};
 use crate::ai::ambient_agents::AmbientAgentTaskId;
 use crate::ai::blocklist::PendingAttachment;
 use crate::ai::document::ai_document_model::{AIDocumentId, AIDocumentVersion};
@@ -361,6 +360,12 @@ pub enum WorkspaceAction {
         group_id: TabGroupId,
     },
     OpenLaunchConfigSaveModal,
+    /// Opens the read-only live per-agent progress modal for the given
+    /// orchestration child ("worker") conversation. Dispatched by the composer
+    /// "N Working" indicator and the in-stream delegation card.
+    OpenAgentProgressModal {
+        conversation_id: AIConversationId,
+    },
     SelectTabConfig(TabConfig),
     DispatchToSettingsTab(SettingsTabAction),
     ToggleUserMenu,
@@ -1068,6 +1073,7 @@ impl WorkspaceAction {
             | ToggleErrorUnderlining
             | ToggleSyntaxHighlighting
             | OpenLaunchConfigSaveModal
+            | OpenAgentProgressModal { .. }
             | ArchiveTab(_)
             | ToggleTabRightClickMenu { .. }
             | ToggleTabSelectionRightClickMenu { .. }

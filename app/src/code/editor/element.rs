@@ -42,6 +42,9 @@ use crate::settings::CodeEditorLineNumberMode;
 use crate::view_components::action_button::{ActionButtonTheme, SecondaryTheme};
 
 pub const GUTTER_WIDTH: f32 = 94.;
+/// Trailing gap between a left-aligned line number and the code in the compact
+/// gutter (see [`LineNumberConfig::gutter_width`]).
+pub const COMPACT_GUTTER_TRAILING_GAP: f32 = 12.;
 const VERTICAL_DIFF_HUNK_INDICATOR_WIDTH: f32 = 3.;
 const VERTICAL_DIFF_HUNK_INDICATOR_HOVERED_WIDTH: f32 = 8.;
 
@@ -352,6 +355,15 @@ pub struct LineNumberConfig {
     pub mode: CodeEditorLineNumberMode,
     pub active_line_number: Option<LineCount>,
     pub active_cursor_is_visible: bool,
+    /// Width of the line-number gutter. Defaults to [`GUTTER_WIDTH`]; read-only
+    /// snippet editors use a narrower, content-sized gutter (see
+    /// `CodeEditorView::with_compact_gutter`) so the code sits with symmetric
+    /// left/right padding instead of being pushed right by the full gutter.
+    pub gutter_width: f32,
+    /// When `true`, line numbers are left-aligned within the gutter so the number
+    /// sits flush at the content's left-padding edge (used by the compact gutter).
+    /// When `false`, they are centered (the default editor behavior).
+    pub left_align: bool,
 }
 impl LineNumberConfig {
     pub fn absolute_line_number(&self, line_count: LineCount) -> usize {
@@ -950,7 +962,7 @@ impl<V: EditorView> EditorWrapper<V> {
         let element = Container::new(
             ConstrainedBox::new(Align::new(icon).finish())
                 .with_height(height)
-                .with_width(GUTTER_WIDTH)
+                .with_width(line_number_config.gutter_width)
                 .finish(),
         )
         .with_background_color(gutter_background_color.into())
@@ -1163,17 +1175,19 @@ impl<V: EditorView> EditorWrapper<V> {
                 } else {
                     line_number_config.text_color
                 };
-                Align::new(
-                    Text::new_inline(
-                        line.to_string(),
-                        line_number_config.font_family,
-                        line_number_config.font_size,
-                    )
-                    .with_selectable(true)
-                    .with_color(text_color)
-                    .finish(),
+                let line_number_text = Text::new_inline(
+                    line.to_string(),
+                    line_number_config.font_family,
+                    line_number_config.font_size,
                 )
-                .finish()
+                .with_selectable(true)
+                .with_color(text_color)
+                .finish();
+                if line_number_config.left_align {
+                    Align::new(line_number_text).left().finish()
+                } else {
+                    Align::new(line_number_text).finish()
+                }
             }
             None => {
                 // If no current line, render empty element
@@ -1183,7 +1197,7 @@ impl<V: EditorView> EditorWrapper<V> {
 
         let constrained_base = ConstrainedBox::new(base_content)
             .with_height(gutter_element_height)
-            .with_width(GUTTER_WIDTH)
+            .with_width(line_number_config.gutter_width)
             .finish();
 
         let show_add_as_context_button = self.add_hunk_as_context_button.is_some();
@@ -1291,11 +1305,9 @@ impl<V: EditorView> EditorWrapper<V> {
     }
 
     fn size_buffer(&self) -> Vector2F {
-        let is_gutter_present = self.line_number_config.is_some();
-        if is_gutter_present {
-            GUTTER_WIDTH.along(Axis::Horizontal)
-        } else {
-            Vector2F::zero()
+        match &self.line_number_config {
+            Some(config) => config.gutter_width.along(Axis::Horizontal),
+            None => Vector2F::zero(),
         }
     }
 }

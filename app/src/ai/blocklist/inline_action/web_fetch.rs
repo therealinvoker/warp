@@ -162,16 +162,16 @@ impl View for WebFetchView {
         match &self.status {
             WebFetchStatus::Fetching { urls } => self
                 .render_loading(urls, app)
-                .with_agent_output_item_spacing(app)
+                .with_agent_output_item_spacing()
                 .finish(),
             WebFetchStatus::Success { pages } => self
                 .render_success(pages, app)
-                .with_agent_output_item_spacing(app)
+                .with_agent_output_item_spacing()
                 .finish(),
             WebFetchStatus::Error => {
                 // Render as if fetch completed with no results
                 self.render_success(&[], app)
-                    .with_agent_output_item_spacing(app)
+                    .with_agent_output_item_spacing()
                     .finish()
             }
         }

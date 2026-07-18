@@ -8,6 +8,11 @@ use std::path::{Path, PathBuf};
 
 use warp_util::standardized_path::StandardizedPath;
 
+/// Directory (relative to a repo root) that holds Bang's per-repo state.
+pub const PROJECT_MEMORY_DIR: &str = ".bang";
+/// File name of the auto-discovered per-repo memory file (`.bang/memory.md`).
+pub const PROJECT_MEMORY_FILE_NAME: &str = "memory.md";
+
 /// Repository-scoped standing query configuration.
 #[derive(Debug, Clone)]
 pub struct StandingQueryDefinitions {
@@ -19,7 +24,13 @@ impl Default for StandingQueryDefinitions {
     fn default() -> Self {
         Self {
             project_skill_provider_paths: Vec::new(),
-            project_rule_file_names: vec!["WARP.md".to_string(), "AGENTS.md".to_string()],
+            // `BANG.md` is Bang's native project-rules file; `WARP.md` is still
+            // recognized for backward compatibility with existing repos.
+            project_rule_file_names: vec![
+                "BANG.md".to_string(),
+                "WARP.md".to_string(),
+                "AGENTS.md".to_string(),
+            ],
         }
     }
 }
@@ -64,6 +75,22 @@ impl StandingQueryDefinitions {
                     .iter()
                     .any(|rule_name| file_name.eq_ignore_ascii_case(rule_name))
             })
+    }
+
+    /// The auto-discovered per-repo memory file, `.bang/memory.md`. Matched by
+    /// its full `.bang/memory.md` tail (not just the file name) so an unrelated
+    /// `memory.md` elsewhere in the tree isn't treated as project memory.
+    fn is_project_memory_file(&self, path: &Path) -> bool {
+        let is_memory_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|file_name| file_name.eq_ignore_ascii_case(PROJECT_MEMORY_FILE_NAME));
+        is_memory_name
+            && path
+                .parent()
+                .and_then(Path::file_name)
+                .and_then(|name| name.to_str())
+                .is_some_and(|dir_name| dir_name.eq_ignore_ascii_case(PROJECT_MEMORY_DIR))
     }
 }
 
@@ -122,7 +149,9 @@ impl StandingQueryResults {
             self.project_skills
                 .insert(StandingQueryContent::file(standardized.clone()));
         }
-        if !is_directory && definitions.is_project_rule_file(path) {
+        if !is_directory
+            && (definitions.is_project_rule_file(path) || definitions.is_project_memory_file(path))
+        {
             self.project_rules
                 .insert(StandingQueryContent::file(standardized));
         }

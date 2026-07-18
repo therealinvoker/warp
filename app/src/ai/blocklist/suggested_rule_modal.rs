@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use pathfinder_geometry::vector::vec2f;
 use warp_core::ui::appearance::Appearance;
 use warp_editor::editor::NavigationKey;
@@ -33,7 +35,9 @@ use crate::server::cloud_objects::update_manager::{
 use crate::server::ids::SyncId;
 use crate::server::telemetry::TelemetryEvent;
 use crate::ui_components::blended_colors;
-use crate::view_components::action_button::{ActionButton, PrimaryTheme};
+use crate::view_components::action_button::{ActionButton, PrimaryTheme, SecondaryTheme};
+use crate::view_components::DismissibleToast;
+use crate::workspace::ToastStack;
 use crate::workspaces::user_workspaces::UserWorkspaces;
 
 const HEADER_TEXT: &str = "Suggested rule";
@@ -134,6 +138,16 @@ impl SuggestedRuleModal {
         }
     }
 
+    pub fn set_working_directory(
+        &mut self,
+        working_directory: Option<PathBuf>,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        self.view.update(ctx, |view, ctx| {
+            view.set_working_directory(working_directory, ctx);
+        });
+    }
+
     pub fn set_rule_and_id(
         &mut self,
         rule_and_id: &SuggestedRuleAndId,
@@ -198,7 +212,10 @@ impl TypedActionView for SuggestedRuleModal {
 
 #[derive(Debug, Clone)]
 enum SuggestedRuleDialogAction {
+    /// Save globally (cloud AIFact — applies to every project).
     Add,
+    /// Save to the current project (local `.bang/memory.md`).
+    AddToProject,
     Edit,
     Close,
 }
@@ -219,10 +236,17 @@ pub struct SuggestedRuleAndId {
 struct SuggestedRuleView {
     rule_and_id: Option<SuggestedRuleAndId>,
     owner: Option<Owner>,
+    /// Working directory of the terminal that surfaced the suggestion, used to
+    /// resolve the repo root for a "Save to project" (local `.bang/memory.md`)
+    /// write. `None` when no local directory is known (e.g. remote sessions).
+    working_directory: Option<PathBuf>,
     is_saved: bool,
     current_editor: EditorType,
     name_editor: ViewHandle<EditorView>,
     content_editor: ViewHandle<EditorView>,
+    /// "Save to project" — local per-repo memory (default when a repo is known).
+    project_button: ViewHandle<ActionButton>,
+    /// "Save globally" — cloud AIFact applying to every project.
     add_button: ViewHandle<ActionButton>,
     edit_button: ViewHandle<ActionButton>,
     clipped_scroll_state: ClippedScrollStateHandle,
@@ -307,8 +331,13 @@ impl SuggestedRuleView {
             me.handle_editor_event(event, ctx);
         });
 
+        let project_button = ctx.add_typed_action_view(|_| {
+            ActionButton::new("Save to project", PrimaryTheme)
+                .on_click(|ctx| ctx.dispatch_typed_action(SuggestedRuleDialogAction::AddToProject))
+        });
+
         let add_button = ctx.add_typed_action_view(|_| {
-            ActionButton::new("Add rule", PrimaryTheme)
+            ActionButton::new("Save globally", SecondaryTheme)
                 .on_click(|ctx| ctx.dispatch_typed_action(SuggestedRuleDialogAction::Add))
         });
 
@@ -320,14 +349,37 @@ impl SuggestedRuleView {
         Self {
             rule_and_id: None,
             owner,
+            working_directory: None,
             is_saved: false,
             current_editor: EditorType::Name,
             name_editor,
             content_editor,
+            project_button,
             add_button,
             edit_button,
             clipped_scroll_state: Default::default(),
         }
+    }
+
+    pub fn set_working_directory(
+        &mut self,
+        working_directory: Option<PathBuf>,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        self.working_directory = working_directory;
+        ctx.notify();
+    }
+
+    /// Whether a local "Save to project" write is possible: a working directory
+    /// is known and this build has local filesystem access.
+    #[cfg(all(feature = "local_fs", not(target_family = "wasm")))]
+    fn project_save_available(&self) -> bool {
+        self.working_directory.is_some()
+    }
+
+    #[cfg(not(all(feature = "local_fs", not(target_family = "wasm"))))]
+    fn project_save_available(&self) -> bool {
+        false
     }
 
     pub fn set_rule_and_id(
@@ -534,6 +586,68 @@ impl SuggestedRuleView {
         ctx.emit(SuggestedRuleDialogEvent::AddNewRule { rule });
     }
 
+    /// Saves the suggestion to the current project's local memory file
+    /// (`<repo>/.bang/memory.md`) instead of the cloud. Keeps the modal open on
+    /// failure (surfacing a toast) so the user can retry or save globally.
+    #[cfg(all(feature = "local_fs", not(target_family = "wasm")))]
+    pub fn add_rule_to_project(&mut self, ctx: &mut ViewContext<Self>) {
+        use crate::ai::project_memory;
+
+        let Some(SuggestedRuleAndId { rule, .. }) = self.rule_and_id.clone() else {
+            log::warn!("No rule to save to project in suggested rule dialog");
+            return;
+        };
+        let Some(working_directory) = self.working_directory.clone() else {
+            log::warn!("No working directory to save project memory into");
+            return;
+        };
+
+        let name = self.name_editor.as_ref(ctx).buffer_text(ctx);
+        let content = self.content_editor.as_ref(ctx).buffer_text(ctx);
+        let entry = if name.trim().is_empty() {
+            content
+        } else {
+            format!("{}: {content}", name.trim())
+        };
+
+        let repo_root = project_memory::repo_root_for(&working_directory);
+        let window_id = ctx.window_id();
+        match project_memory::append_memory_entry(&repo_root, &entry) {
+            Ok(path) => {
+                ToastStack::handle(ctx).update(ctx, |toast_stack, ctx| {
+                    toast_stack.add_ephemeral_toast(
+                        DismissibleToast::default(format!(
+                            "Saved to project memory ({})",
+                            path.display()
+                        )),
+                        window_id,
+                        ctx,
+                    );
+                });
+                self.on_add_rule(ctx);
+                ctx.emit(SuggestedRuleDialogEvent::AddNewRule { rule });
+            }
+            Err(error) => {
+                log::warn!("Failed to save project memory: {error}");
+                ToastStack::handle(ctx).update(ctx, |toast_stack, ctx| {
+                    toast_stack.add_ephemeral_toast(
+                        DismissibleToast::default(
+                            "Couldn't save to project memory. Try again or save globally."
+                                .to_owned(),
+                        ),
+                        window_id,
+                        ctx,
+                    );
+                });
+            }
+        }
+    }
+
+    #[cfg(not(all(feature = "local_fs", not(target_family = "wasm"))))]
+    pub fn add_rule_to_project(&mut self, _ctx: &mut ViewContext<Self>) {
+        log::warn!("Project memory saving is not supported in this build");
+    }
+
     /// Updates the UI state to reflect that a rule has been added.
     fn on_add_rule(&mut self, ctx: &mut ViewContext<Self>) {
         self.is_saved = true;
@@ -626,22 +740,33 @@ impl View for SuggestedRuleView {
 
     fn render(&self, app: &AppContext) -> Box<dyn Element> {
         let appearance = Appearance::as_ref(app);
-        let add_edit_button = if self.is_saved {
-            &self.edit_button
+
+        // Once saved, the form collapses to a single "Edit rule" button.
+        // Before saving, offer "Save to project" (local, default) alongside
+        // "Save globally" (cloud) — falling back to global-only when no local
+        // repo is available.
+        let buttons = if self.is_saved {
+            Flex::row()
+                .with_child(ChildView::new(&self.edit_button).finish())
+                .finish()
+        } else if self.project_save_available() {
+            Flex::row()
+                .with_child(ChildView::new(&self.add_button).finish())
+                .with_child(
+                    Container::new(ChildView::new(&self.project_button).finish())
+                        .with_margin_left(8.)
+                        .finish(),
+                )
+                .finish()
         } else {
-            &self.add_button
+            Flex::row()
+                .with_child(ChildView::new(&self.add_button).finish())
+                .finish()
         };
 
         Flex::column()
             .with_child(self.render_rule_form(appearance))
-            .with_child(
-                Container::new(
-                    Align::new(ChildView::new(add_edit_button).finish())
-                        .right()
-                        .finish(),
-                )
-                .finish(),
-            )
+            .with_child(Container::new(Align::new(buttons).right().finish()).finish())
             .finish()
     }
 }
@@ -653,6 +778,9 @@ impl TypedActionView for SuggestedRuleView {
         match action {
             SuggestedRuleDialogAction::Add => {
                 self.add_rule(ctx);
+            }
+            SuggestedRuleDialogAction::AddToProject => {
+                self.add_rule_to_project(ctx);
             }
             SuggestedRuleDialogAction::Edit => {
                 if let Some(SuggestedRuleAndId { rule, .. }) = &self.rule_and_id {

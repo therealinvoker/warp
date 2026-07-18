@@ -202,7 +202,8 @@ impl AgentToolbarItemKind {
         if FeatureFlag::GithubPrPromptChip.is_enabled() {
             items.push(Self::ContextChip(ContextChipKind::GithubPullRequest));
         }
-        items.push(Self::NLDToggle);
+        // The autodetection ("A") toggle was removed from the footer; it is now
+        // the `/disable-autoterm` slash command instead.
         items
     }
 

@@ -22,6 +22,7 @@ use warpui::keymap::FixedBinding;
 use warpui::platform::{Cursor, SaveFilePickerConfiguration};
 use warpui::ui_components::button::{ButtonVariant, TextAndIcon, TextAndIconAlignment};
 use warpui::ui_components::components::{Coords, UiComponent, UiComponentStyles};
+use warpui::ui_components::switch::SwitchStateHandle;
 use warpui::{
     AppContext, Element, Entity, FocusContext, SingletonEntity, TypedActionView, View, ViewContext,
     ViewHandle, WeakViewHandle,
@@ -49,7 +50,9 @@ use crate::server::telemetry::{
 use crate::terminal::shared_session::permissions_manager::{
     SessionPermissionsEvent, SessionPermissionsManager,
 };
-use crate::terminal::shared_session::SharedSessionActionSource;
+use crate::terminal::shared_session::{
+    SharedSessionActionSource, SharedSessionScrollbackType, SharedSessionSource,
+};
 use crate::terminal::TerminalView;
 use crate::ui_components::buttons::icon_button_with_color;
 use crate::ui_components::icons::Icon;
@@ -173,6 +176,14 @@ pub struct SharingDialog {
     self_handle: WeakViewHandle<SharingDialog>,
     target: Option<ShareableObject>,
 
+    /// The terminal pane that can start/stop a live shared session from this
+    /// dialog. Set for session-capable panes even before a session is live, so
+    /// the dialog can render the on/off sharing toggle and drive the share.
+    session_share_source: Option<WeakViewHandle<TerminalView>>,
+    /// Mouse state for the on/off "share this session" toggle. Created once at
+    /// construction (WarpUI requires stable `MouseStateHandle`s).
+    sharing_toggle_state: SwitchStateHandle,
+
     invite_form: EmailInviteForm,
 
     guest_states: Vec<GuestState>,
@@ -212,6 +223,8 @@ pub enum SharingDialogAction {
     SetGuestAccessLevel(SharingAccessLevel),
     SendInvitations,
     SetTeamPermissions(Option<SharingAccessLevel>),
+    /// Start or stop the live shared session from the on/off toggle.
+    ToggleSessionSharing,
 }
 
 pub fn init(app: &mut AppContext) {
@@ -288,6 +301,8 @@ impl SharingDialog {
         Self {
             self_handle: ctx.handle(),
             target,
+            session_share_source: None,
+            sharing_toggle_state: Default::default(),
             invite_form,
             guest_states: vec![],
             guest_menu: Self::build_guest_menu(ctx),
@@ -399,6 +414,68 @@ impl SharingDialog {
         self.target
             .as_ref()
             .is_some_and(|target| matches!(target, ShareableObject::Session { .. }))
+    }
+
+    /// Sets the terminal pane that can start/stop a live shared session from this
+    /// dialog. This lets the dialog render its on/off sharing toggle (and open at
+    /// all) even before a session is live.
+    pub fn set_session_share_source(
+        &mut self,
+        source: Option<WeakViewHandle<TerminalView>>,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        self.session_share_source = source;
+        ctx.notify();
+    }
+
+    /// Whether this dialog is being shown for a terminal session (either a live
+    /// shared session or a session-capable pane that can start one).
+    pub fn is_session_share_context(&self) -> bool {
+        self.has_shared_session_target() || self.session_share_source.is_some()
+    }
+
+    /// Whether a live shared session is currently active for this dialog.
+    fn is_session_live(&self) -> bool {
+        self.has_shared_session_target()
+    }
+
+    /// The terminal handle that drives session sharing from this dialog: prefer
+    /// the live session target, falling back to the configured share source.
+    fn session_share_handle(&self) -> Option<WeakViewHandle<TerminalView>> {
+        if let Some(ShareableObject::Session { handle, .. }) = self.target.as_ref() {
+            return Some(handle.clone());
+        }
+        self.session_share_source.clone()
+    }
+
+    /// Starts or stops the live shared session in response to the on/off toggle.
+    fn toggle_session_sharing(&mut self, ctx: &mut ViewContext<Self>) {
+        let Some(handle) = self.session_share_handle() else {
+            return;
+        };
+        let Some(view) = handle.upgrade(ctx) else {
+            return;
+        };
+
+        if self.is_session_live() {
+            view.update(ctx, |view, ctx| {
+                view.stop_sharing_session(SharedSessionActionSource::SharingDialog, ctx);
+            });
+        } else {
+            // Toggling on shares from the start of the session (full scrollback /
+            // whole conversation), matching the "Share from start of session"
+            // option and the standard agent remote-control chip.
+            view.update(ctx, |view, ctx| {
+                view.attempt_to_share_session(
+                    SharedSessionScrollbackType::All,
+                    Some(SharedSessionActionSource::SharingDialog),
+                    SharedSessionSource::user(None),
+                    true,
+                    ctx,
+                );
+            });
+        }
+        ctx.notify();
     }
 
     pub fn show_qr_code(&mut self, ctx: &mut ViewContext<Self>) {
@@ -1842,6 +1919,79 @@ impl SharingDialog {
         )
     }
 
+    /// Renders the on/off "share this session live" toggle shown at the top of
+    /// the dialog for session-capable panes. Turning it on starts a live shared
+    /// session (from the start of the session); turning it off tears it down.
+    fn render_sharing_toggle(&self, appearance: &Appearance) -> Option<Box<dyn Element>> {
+        if !self.is_session_share_context() {
+            return None;
+        }
+
+        let is_live = self.is_session_live();
+
+        let label = appearance
+            .ui_builder()
+            .span("Share this session live")
+            .with_style(UiComponentStyles {
+                font_color: Some(style::acl_primary_text_color(appearance)),
+                font_size: Some(style::PRIMARY_TEXT_SIZE),
+                ..Default::default()
+            })
+            .build()
+            .finish();
+
+        let switch = appearance
+            .ui_builder()
+            .switch(self.sharing_toggle_state.clone())
+            .check(is_live)
+            .build()
+            .on_click(|ctx, _, _| {
+                ctx.dispatch_typed_action(SharingDialogAction::ToggleSessionSharing)
+            })
+            .finish();
+
+        let row = Flex::row()
+            .with_main_axis_size(MainAxisSize::Max)
+            .with_main_axis_alignment(MainAxisAlignment::SpaceBetween)
+            .with_cross_axis_alignment(CrossAxisAlignment::Center)
+            .with_child(Shrinkable::new(1., label).finish())
+            .with_child(switch)
+            .finish();
+
+        let mut column = Flex::column().with_child(
+            Container::new(row)
+                .with_horizontal_padding(style::ACL_ITEM_PADDING)
+                .with_padding_top(style::ACL_ITEM_PADDING / 2.)
+                .finish(),
+        );
+
+        // When sharing is off, explain what turning it on does. When it's on,
+        // the live-session header below already provides context.
+        if !is_live {
+            let hint = appearance
+                .ui_builder()
+                .wrappable_text(
+                    "Turn on to start a live session and share this conversation with a link.",
+                    true,
+                )
+                .with_style(UiComponentStyles {
+                    font_color: Some(style::label_text(appearance)),
+                    ..Default::default()
+                })
+                .build()
+                .finish();
+            column.add_child(
+                Container::new(hint)
+                    .with_horizontal_padding(style::ACL_ITEM_PADDING)
+                    .with_padding_top(style::ACL_ITEM_GAP / 2.)
+                    .with_padding_bottom(style::ACL_ITEM_PADDING / 2.)
+                    .finish(),
+            );
+        }
+
+        Some(column.finish())
+    }
+
     /// Renders a clarification label if the user is not allowed to edit permissions.
     fn render_restricted_access_label(
         &self,
@@ -2853,6 +3003,32 @@ impl View for SharingDialog {
         } else {
             let mut contents = Flex::column();
 
+            // Session panes get an on/off sharing toggle at the very top. When
+            // sharing is off, the link / access / QR sections are hidden until
+            // the user turns it on.
+            let sharing_toggle = self.render_sharing_toggle(appearance);
+            let is_session_share_context = sharing_toggle.is_some();
+            if let Some(toggle) = sharing_toggle {
+                contents.add_child(toggle);
+            }
+            if is_session_share_context && !self.is_session_live() {
+                let contents = Container::new(contents.finish())
+                    .with_vertical_padding(style::ACL_ITEM_PADDING)
+                    .finish();
+                let dialog = Container::new(contents)
+                    .with_corner_radius(CornerRadius::with_all(Radius::Pixels(8.)))
+                    .with_border(Border::all(1.).with_border_color(theme.surface_3().into()))
+                    .with_background(style::dialog_background(appearance));
+                return Dismiss::new(
+                    ConstrainedBox::new(dialog.finish())
+                        .with_width(SHARING_DIALOG_WIDTH)
+                        .finish(),
+                )
+                .on_dismiss(|ctx, _app| ctx.dispatch_typed_action(SharingDialogAction::Close))
+                .prevent_interaction_with_other_elements()
+                .finish();
+            }
+
             contents.extend(self.render_session_header(appearance, app));
 
             if self.can_edit_access(app) && self.can_direct_link_share(app) {
@@ -2998,6 +3174,7 @@ impl TypedActionView for SharingDialog {
                 self.set_targeted_guest_access(*level, ctx)
             }
             SharingDialogAction::RemoveGuest => self.remove_targeted_guest(ctx),
+            SharingDialogAction::ToggleSessionSharing => self.toggle_session_sharing(ctx),
         }
     }
 }

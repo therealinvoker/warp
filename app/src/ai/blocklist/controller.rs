@@ -2097,6 +2097,7 @@ impl BlocklistAIController {
                 // separate, read-only requests.
                 ambient_agent_task_id: None,
                 existing_suggestions: None,
+                active_todo_list: vec![],
             };
             (conversation_id, task_id, conversation_data)
         } else if !matches!(
@@ -2115,6 +2116,7 @@ impl BlocklistAIController {
                 // separate, read-only requests.
                 ambient_agent_task_id: None,
                 existing_suggestions: None,
+                active_todo_list: vec![],
             };
             (conversation_id, task_id, conversation_data)
         } else {
@@ -2287,6 +2289,7 @@ impl BlocklistAIController {
             active_tasks,
             parent_agent_id,
             agent_name,
+            active_todo_list,
         ) = {
             let Some(conversation) = history_model
                 .as_ref(ctx)
@@ -2299,6 +2302,7 @@ impl BlocklistAIController {
             };
 
             let active_tasks = conversation.compute_active_tasks();
+            let active_todo_list = todo_context_items(conversation.active_todo_list());
 
             (
                 conversation.id(),
@@ -2309,6 +2313,7 @@ impl BlocklistAIController {
                 active_tasks,
                 conversation.parent_agent_id().map(str::to_string),
                 conversation.agent_name().map(str::to_string),
+                active_todo_list,
             )
         };
 
@@ -2363,6 +2368,7 @@ impl BlocklistAIController {
                 .as_ref(ctx)
                 .existing_suggestions_for_conversation(conversation_id)
                 .cloned(),
+            active_todo_list,
         };
 
         // Log an error if tool call results do not have corresponding tool calls in task context
@@ -3235,6 +3241,28 @@ pub struct ClientIdentifiers {
     pub client_exchange_id: AIAgentExchangeId,
     /// Not populated for restored AI blocks.
     pub response_stream_id: Option<ResponseStreamId>,
+}
+
+/// Flattens a conversation's active todo checklist into the transport form sent
+/// to the backend (completed items first, then pending). Empty when there's no
+/// list, so the backend can distinguish "no plan" from "plan with all steps
+/// pending".
+fn todo_context_items(
+    todo_list: Option<&crate::ai::agent::todos::AIAgentTodoList>,
+) -> Vec<api::TodoContextItem> {
+    let Some(list) = todo_list else {
+        return vec![];
+    };
+    list.completed_items()
+        .iter()
+        .map(|todo| (todo, true))
+        .chain(list.pending_items().iter().map(|todo| (todo, false)))
+        .map(|(todo, completed)| api::TodoContextItem {
+            id: todo.id.to_string(),
+            title: todo.title.clone(),
+            completed,
+        })
+        .collect()
 }
 
 #[allow(clippy::too_many_arguments)]

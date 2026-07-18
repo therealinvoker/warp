@@ -108,6 +108,46 @@ fn strip_command_prefix_matches_orchestrate() {
 }
 
 #[test]
+fn multitask_is_registered_as_orchestrate_alias() {
+    let multitask = COMMAND_REGISTRY
+        .get_command_with_name(MULTITASK_NAME)
+        .expect("expected /multitask to be registered");
+
+    // /multitask is an alias for /orchestrate: identical availability, icon, and
+    // AI-mode behavior so both route through the same orchestrate query mode.
+    assert_eq!(multitask.name, "/multitask");
+    assert_eq!(multitask.icon_path, ORCHESTRATE.icon_path);
+    assert_eq!(multitask.availability, ORCHESTRATE.availability);
+    assert_eq!(multitask.auto_enter_ai_mode, ORCHESTRATE.auto_enter_ai_mode);
+    assert!(multitask.argument.as_ref().is_some_and(|a| a.is_optional));
+}
+
+#[test]
+fn strip_command_prefix_matches_multitask() {
+    let result = strip_command_prefix("/multitask deploy services", "/multitask");
+    assert_eq!(result, Some("deploy services".to_string()));
+}
+
+#[test]
+fn steer_command_sends_now_and_requires_argument() {
+    // /steer is the mid-run sibling of /queue: same conversation scoping, but it
+    // delivers the message to the running agent immediately (via the mailbox)
+    // rather than queuing it for after the turn. Registration is feature-gated
+    // (SteerSlashCommand), so assert the static definition directly.
+    assert_eq!(STEER.name, "/steer");
+    assert_eq!(STEER.name, STEER_NAME);
+    assert_eq!(STEER.icon_path, "bundled/svg/navigation.svg");
+    assert!(STEER.auto_enter_ai_mode);
+    assert_eq!(STEER.availability, QUEUE.availability);
+
+    let argument = STEER
+        .argument
+        .as_ref()
+        .expect("expected /steer to require an argument");
+    assert!(!argument.is_optional);
+}
+
+#[test]
 fn strip_command_prefix_no_match() {
     let result = strip_command_prefix("just a normal query", "/plan");
     assert_eq!(result, None);

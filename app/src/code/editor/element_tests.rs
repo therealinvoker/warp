@@ -13,6 +13,8 @@ fn config(
         mode,
         active_line_number,
         active_cursor_is_visible: true,
+        gutter_width: super::GUTTER_WIDTH,
+        left_align: false,
     }
 }
 

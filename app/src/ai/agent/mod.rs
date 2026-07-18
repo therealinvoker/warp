@@ -2539,6 +2539,10 @@ pub fn extract_user_query_mode(query: String) -> (String, UserQueryMode) {
         (query, UserQueryMode::Plan)
     } else if let Some(query) = commands::strip_command_prefix(&query, commands::ORCHESTRATE_NAME) {
         (query, UserQueryMode::Orchestrate)
+    } else if let Some(query) = commands::strip_command_prefix(&query, commands::MULTITASK_NAME) {
+        // /multitask is an alias for /orchestrate (parallel multi-agent fan-out);
+        // there is no separate proto marker, so it resolves to the same mode.
+        (query, UserQueryMode::Orchestrate)
     } else {
         (query, UserQueryMode::Normal)
     }
@@ -2924,6 +2928,40 @@ impl AIAgentInput {
 
     pub fn is_user_query(&self) -> bool {
         matches!(self, AIAgentInput::UserQuery { .. })
+    }
+
+    /// Whether this input represents a prompt the *user themselves* initiated — a
+    /// typed query or slash command, a skill invocation, or an explicit UI action
+    /// like creating a project, cloning a repo, or requesting a review — as opposed
+    /// to an agent/system-generated input (tool/action results, agent-suggested or
+    /// passive-suggestion prompts, inter-agent messages, etc.).
+    ///
+    /// Broader than [`Self::is_user_query`] (which strictly matches `UserQuery`) but
+    /// narrower than [`Self::display_query`] (which also returns `Some` for
+    /// agent-suggested prompts). Used to decide which blocks may own the
+    /// sticky/pinned query header: only a genuine user turn should pin or displace
+    /// it, never an agent continuation block that happens to carry query-like text.
+    pub fn is_user_authored_prompt(&self) -> bool {
+        match self {
+            Self::UserQuery { .. }
+            | Self::CreateNewProject { .. }
+            | Self::CloneRepository { .. }
+            | Self::InitProjectRules { .. }
+            | Self::CreateEnvironment { .. }
+            | Self::CodeReview { .. }
+            | Self::FetchReviewComments { .. }
+            | Self::InvokeSkill { .. } => true,
+            Self::AutoCodeDiffQuery { .. }
+            | Self::ResumeConversation { .. }
+            | Self::TriggerPassiveSuggestion { .. }
+            | Self::SummarizeConversation { .. }
+            | Self::StartFromAmbientRunPrompt { .. }
+            | Self::ActionResult { .. }
+            | Self::MessagesReceivedFromAgents { .. }
+            | Self::EventsFromAgents { .. }
+            | Self::PassiveSuggestionResult { .. }
+            | Self::OrchestrationConfigUpdate { .. } => false,
+        }
     }
 
     pub fn prompt_suggestion_result(&self) -> Option<&String> {

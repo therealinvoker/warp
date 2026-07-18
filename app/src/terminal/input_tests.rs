@@ -258,6 +258,10 @@ pub fn initialize_app(app: &mut App) {
         crate::ai::blocklist::orchestration_event_streamer::OrchestrationEventStreamer::new,
     );
     app.add_singleton_model(|_| ActiveAgentViewsModel::new());
+    // The agent composer touches the overlay controller (voice/screenshot paths) when
+    // focusing the input and switching modes; register the stubbed singleton like production
+    // (`crate::initialize_app`) does so agent-view input tests don't panic on a missing model.
+    app.add_singleton_model(crate::overlay::OverlayController::new_singleton);
     app.add_singleton_model(AgentNotificationsModel::new);
     app.add_singleton_model(BlocklistAIPermissions::new);
     app.add_singleton_model(|_| AuthStateProvider::new_for_test());
@@ -4150,6 +4154,115 @@ fn test_new_conversation_input_trigger_remains_single_step_in_non_empty_agent_vi
                 .active_conversation_id()
                 .expect("agent view should still be active");
             assert_ne!(active_conversation_id, conversation_id);
+        });
+    });
+}
+
+/// Regression: in a fullscreen agent view, typing `/terminal` (shell mode) and then `/agent`
+/// must RESUME the same conversation rather than exiting it and starting a new one. `/terminal`
+/// only flips the composer's input config to shell — the agent view stays active — so returning
+/// via `/agent` should just switch the input back to AI mode and keep the original conversation.
+/// Previously `/agent` emitted `EnterAgentView { conversation_id: None }`, which made the
+/// controller exit the active view and `start_new_conversation`, surfacing a spurious new
+/// "Untitled" conversation.
+#[test]
+fn test_agent_after_terminal_resumes_active_conversation() {
+    App::test((), |mut app| async move {
+        let _am_flag = FeatureFlag::AgentMode.override_enabled(true);
+        let _agent_view_flag = FeatureFlag::AgentView.override_enabled(true);
+        initialize_app(&mut app);
+
+        let terminal = add_window_with_bootstrapped_terminal(&mut app, None, None).await;
+        let input = terminal.read(&app, |terminal, _| terminal.input().clone());
+
+        // Enter fullscreen agent view and send a query so the conversation is non-empty
+        // (mirrors a real, identifiable conversation the user was working in).
+        let conversation_id = terminal.update(&mut app, |view, ctx| {
+            view.agent_view_controller().update(ctx, |controller, ctx| {
+                controller
+                    .try_enter_agent_view(
+                        None,
+                        AgentViewEntryOrigin::Input {
+                            was_prompt_autodetected: false,
+                        },
+                        ctx,
+                    )
+                    .expect("Should be able to enter agent view")
+            })
+        });
+        terminal.update(&mut app, |view, ctx| {
+            view.ai_controller().update(ctx, |controller, ctx| {
+                controller.send_user_query_in_conversation(
+                    "hello".to_owned(),
+                    conversation_id,
+                    None,
+                    ctx,
+                );
+            });
+        });
+
+        // `/terminal`: drops the composer into shell mode. The agent view stays active.
+        input.update(&mut app, |input, ctx| {
+            let handled = input.execute_slash_command(
+                &commands::TERMINAL,
+                None,
+                SlashCommandTrigger::input(),
+                /*is_queued_prompt*/ false,
+                ctx,
+            );
+            assert!(handled);
+        });
+        input.read(&app, |input, ctx| {
+            assert_eq!(
+                input.input_type(ctx),
+                InputType::Shell,
+                "/terminal should switch the composer to shell mode"
+            );
+        });
+        terminal.read(&app, |view, ctx| {
+            assert_eq!(
+                view.agent_view_controller()
+                    .as_ref(ctx)
+                    .agent_view_state()
+                    .active_conversation_id(),
+                Some(conversation_id),
+                "/terminal must leave the original agent conversation active"
+            );
+        });
+
+        // `/agent`: return to agent mode. Must RESUME the same conversation, not start a new one.
+        let agent_command = COMMAND_REGISTRY
+            .get_command_with_name(commands::AGENT.name)
+            .expect("/agent command should exist");
+        input.update(&mut app, |input, ctx| {
+            let handled = input.execute_slash_command(
+                agent_command,
+                None,
+                SlashCommandTrigger::input(),
+                /*is_queued_prompt*/ false,
+                ctx,
+            );
+            assert!(handled);
+        });
+
+        input.read(&app, |input, ctx| {
+            assert_eq!(
+                input.input_type(ctx),
+                InputType::AI,
+                "/agent should switch the composer back to agent (AI) mode"
+            );
+        });
+        terminal.read(&app, |view, ctx| {
+            let active_conversation_id = view
+                .agent_view_controller()
+                .as_ref(ctx)
+                .agent_view_state()
+                .active_conversation_id()
+                .expect("agent view should still be active");
+            assert_eq!(
+                active_conversation_id, conversation_id,
+                "/agent after /terminal must resume the original conversation, not start a new one"
+            );
         });
     });
 }
@@ -8059,8 +8172,14 @@ fn test_terminal_only_ai_enter_enters_agent_view_and_clears_buffer() {
     });
 }
 
+/// Regression: pressing Escape in the agent composer must NOT switch the input to terminal (shell)
+/// mode. In the redesigned composer, terminal mode is only reachable via the `/terminal` slash
+/// command or the `!` prefix. Previously the final `editor_escape` branch called
+/// `set_input_mode_terminal` (classic composer) / `set_input_mode_natural_language_detection`
+/// (which resolved an empty buffer to `InputType::default()`, i.e. `Shell`), producing the
+/// agent->terminal flip users were seeing.
 #[test]
-fn test_terminal_only_escape_locks_shell_mode() {
+fn test_terminal_only_escape_keeps_agent_mode() {
     use crate::ai::blocklist::InputConfig;
 
     App::test((), |mut app| async move {
@@ -8069,7 +8188,7 @@ fn test_terminal_only_escape_locks_shell_mode() {
 
         initialize_app(&mut app);
 
-        // Autodetection on; we still expect Esc to explicitly lock to shell.
+        // Autodetection on; Escape must NOT flip the composer to terminal (shell) mode.
         AISettings::handle(&app).update(&mut app, |ai_settings, ctx| {
             let _ = ai_settings
                 .ai_autodetection_enabled_internal
@@ -8081,7 +8200,7 @@ fn test_terminal_only_escape_locks_shell_mode() {
         let input = terminal.read(&app, |terminal, _| terminal.input().clone());
         let editor = input.read(&app, |input, _| input.editor().clone());
 
-        // Start in AI mode (unlocked) while agent view is inactive.
+        // Start in AI (agent) mode, unlocked, while the agent view is inactive.
         input.update(&mut app, |input, ctx| {
             input.ai_input_model().update(ctx, |ai_input, ctx| {
                 ai_input.set_input_config(
@@ -8096,7 +8215,7 @@ fn test_terminal_only_escape_locks_shell_mode() {
             });
         });
 
-        // Hit Esc (via editor) and ensure we end up locked to shell.
+        // Hit Esc (via editor); the input must stay in AGENT (AI) mode, not lock to shell.
         editor.update(&mut app, |editor, ctx| {
             editor.escape(ctx);
         });
@@ -8106,14 +8225,15 @@ fn test_terminal_only_escape_locks_shell_mode() {
                 ai_input.input_config()
             })
         });
-        assert_eq!(config.input_type, InputType::Shell);
-        assert!(config.is_locked);
-        let source = input.read(&app, |input, _| {
-            app.read_model(input.ai_input_model(), |ai_input, _| {
-                ai_input.last_ai_autodetection_source()
-            })
-        });
-        assert_eq!(source, Some(InputTypeAutoDetectionSource::ManualToggle));
+        assert_eq!(
+            config.input_type,
+            InputType::AI,
+            "Escape must not switch the agent composer to terminal (shell) mode"
+        );
+        assert!(
+            !config.is_locked,
+            "Escape must not lock the input to shell mode"
+        );
     });
 }
 

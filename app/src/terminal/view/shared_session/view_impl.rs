@@ -643,8 +643,14 @@ impl TerminalView {
             started_at,
             ctx,
         );
-        let skip_sharing_dialog =
-            matches!(share_source, Some(SharedSessionActionSource::FooterChip));
+        // The footer remote-control chip shares silently. The sharing dialog's
+        // on/off toggle already has the dialog open, so re-toggling it here would
+        // close it right after the user turned sharing on.
+        let skip_sharing_dialog = matches!(
+            share_source,
+            Some(SharedSessionActionSource::FooterChip)
+                | Some(SharedSessionActionSource::SharingDialog)
+        );
 
         self.pane_configuration.update(ctx, |pane_config, ctx| {
             pane_config.refresh_pane_header_overflow_menu_items(ctx);
@@ -661,6 +667,7 @@ impl TerminalView {
             }
             pane_config.notify_header_content_changed(ctx);
         });
+        self.refresh_session_share_source(ctx);
 
         ctx.emit(Event::EstablishedSharedSession { session_id });
     }
@@ -900,6 +907,9 @@ impl TerminalView {
             pane_config.notify_header_content_changed(ctx);
             ctx.notify();
         });
+        // Keep the persistent share button / toggle available after the session
+        // ends so the user can restart sharing from the dialog.
+        self.refresh_session_share_source(ctx);
     }
 
     pub fn on_ambient_agent_execution_ended(&mut self, ctx: &mut ViewContext<Self>) {

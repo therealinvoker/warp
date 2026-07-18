@@ -62,6 +62,22 @@ pub async fn generate_multi_agent_output(
         },
     );
 
+    // Forward the conversation's active todo checklist as a JSON string under
+    // this `logging` key (same no-proto-change channel as response_verbosity).
+    // The harness injects it into the system prompt so the agent can always see
+    // the plan the user has on screen, even when server-side history no longer
+    // holds the update_todos that produced it. Omitted when there's no list.
+    if !params.active_todo_list.is_empty() {
+        if let Ok(json) = serde_json::to_string(&params.active_todo_list) {
+            logging_metadata.insert(
+                "active_todo_list".to_owned(),
+                prost_types::Value {
+                    kind: Some(prost_types::value::Kind::StringValue(json)),
+                },
+            );
+        }
+    }
+
     if params.should_redact_secrets {
         redaction::redact_inputs(&mut params.input);
     }

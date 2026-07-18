@@ -93,7 +93,6 @@ use crate::terminal::grid_renderer::{FOCUSED_MATCH_COLOR, MATCH_COLOR};
 use crate::terminal::safe_mode_settings::get_secret_obfuscation_mode;
 use crate::terminal::view::TerminalAction;
 use crate::terminal::{self, ShellLaunchData, TerminalModel};
-use crate::ui_components::avatar::{Avatar, AvatarContent};
 use crate::ui_components::blended_colors;
 use crate::ui_components::buttons::icon_button;
 use crate::ui_components::icons::Icon;
@@ -1577,7 +1576,11 @@ pub(super) fn render_rich_text_output_text_section(
     let line_count = props.formatted_text.lines.len();
     let mut rich_text_element = FormattedTextElement::new_arc(
         props.formatted_text,
-        appearance.monospace_font_size(),
+        appearance.ui_font_size(),
+        // Prose runs render in the configurable "Agent font" (Settings → Custom
+        // → Appearance), which defaults to the proportional system UI sans
+        // (Roboto), while fenced/inline code runs stay on the monospace family
+        // so code reads as fixed-width.
         appearance.ai_font_family(),
         appearance.monospace_font_family(),
         props.text_color,
@@ -1670,7 +1673,7 @@ fn render_text_section_with_options(
     let mut text_element = Text::new(
         props.text.to_owned(),
         appearance.ai_font_family(),
-        appearance.monospace_font_size(),
+        appearance.ui_font_size(),
     )
     .with_style(Properties::default().weight(appearance.monospace_font_weight()))
     .with_color(props.text_color)
@@ -2212,7 +2215,7 @@ fn render_visual_markdown_fallback(
     Text::new(
         markdown_source.to_owned(),
         appearance.ai_font_family(),
-        appearance.monospace_font_size(),
+        appearance.ui_font_size(),
     )
     .with_style(Properties::default().weight(appearance.monospace_font_weight()))
     .with_color(text_color)
@@ -2457,7 +2460,7 @@ fn render_table_section(
     let table_appearance = markdown_table_appearance(appearance);
     let notebook_styles = rich_text_styles(appearance, FontSettings::as_ref(app));
     let table_font_family = appearance.ai_font_family();
-    let table_font_size = appearance.monospace_font_size();
+    let table_font_size = appearance.ui_font_size();
     let body_font_weight = appearance.monospace_font_weight();
     let header_text_color = table_appearance.header_text_color;
     let body_text_color = table_appearance.text_color;
@@ -3476,37 +3479,6 @@ pub struct FindContext<'a> {
     pub state: &'a FindState,
 }
 
-/// Renders a user avatar with profile image or display name.
-pub fn render_user_avatar(
-    user_display_name: &str,
-    profile_image_path: Option<&String>,
-    avatar_color: Option<ColorU>,
-    app: &AppContext,
-) -> Box<dyn Element> {
-    let appearance = Appearance::as_ref(app);
-    let theme = appearance.theme();
-    let background = avatar_color.unwrap_or_else(|| blended_colors::accent(theme).into());
-    let avatar = Avatar::new(
-        profile_image_path
-            .map(|url| AvatarContent::Image {
-                url: url.to_owned(),
-                display_name: user_display_name.to_owned(),
-            })
-            .unwrap_or(AvatarContent::DisplayName(user_display_name.to_owned())),
-        UiComponentStyles {
-            width: Some(icon_size(app)),
-            height: Some(icon_size(app)),
-            font_family_id: Some(appearance.ui_font_family()),
-            font_size: Some(appearance.monospace_font_size() - 2.),
-            background: Some(background.into()),
-            font_color: Some(blended_colors::text_main(theme, background)),
-            border_radius: Some(CornerRadius::with_all(Radius::Percentage(50.))),
-            ..Default::default()
-        },
-    );
-    avatar.build().finish()
-}
-
 pub struct UserQueryProps<'a> {
     pub text: String,
     pub query_prefix_highlight_len: Option<usize>,
@@ -3581,8 +3553,8 @@ pub fn render_query_text(props: UserQueryProps<'_>, app: &AppContext) -> Text {
 
     let mut text_element = Text::new(
         props.text,
-        appearance.monospace_font_family(),
-        appearance.monospace_font_size(),
+        appearance.ai_font_family(),
+        appearance.ui_font_size(),
     )
     .with_style(*props.font_properties)
     .with_color(blended_colors::text_main(theme, theme.surface_1()))

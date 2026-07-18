@@ -23,8 +23,8 @@ use crate::ai::agent::conversation::{AIAgentHarness, AIConversationId, Conversat
 use crate::ai::agent::{AIAgentExchangeId, AIAgentOutputMessageType, ReceivedMessageInput};
 use crate::ai::agent_events::{
     run_agent_event_driver, AgentEventConsumer, AgentEventConsumerControlFlow,
-    AgentEventDriverConfig, AgentEventFilter, AgentMessageEventMetadata, MessageHydrator,
-    ServerApiAgentEventSource,
+    AgentEventDriverConfig, AgentEventDriverStop, AgentEventFilter, AgentMessageEventMetadata,
+    MessageHydrator, ServerApiAgentEventSource,
 };
 use crate::ai::ambient_agents::AmbientAgentTaskId;
 use crate::server::retry_strategies::is_transient_http_error;
@@ -1682,8 +1682,8 @@ impl OrchestrationEventStreamer {
                     since_sequence,
                 );
                 let mut consumer = DormantClaudeWakeConsumer::new(task_run_id);
-                run_agent_event_driver(source, config, &mut consumer).await?;
-                Ok::<_, anyhow::Error>(consumer.wake_message)
+                let stop = run_agent_event_driver(source, config, &mut consumer).await?;
+                Ok::<_, anyhow::Error>((consumer.wake_message, stop))
             },
             move |me, result, ctx| {
                 let is_current = me
@@ -1710,7 +1710,7 @@ impl OrchestrationEventStreamer {
         &mut self,
         conversation_id: AIConversationId,
         generation: u64,
-        result: anyhow::Result<Option<AgentMessageEventMetadata>>,
+        result: anyhow::Result<(Option<AgentMessageEventMetadata>, AgentEventDriverStop)>,
         ctx: &mut ModelContext<Self>,
     ) {
         if let Some(stream) = self.streams.get_mut(&conversation_id) {
@@ -1718,7 +1718,7 @@ impl OrchestrationEventStreamer {
         }
 
         match result {
-            Ok(Some(wake_message)) => {
+            Ok((Some(wake_message), _)) => {
                 log::info!(
                     "Dormant Claude wake listener observed wake message for \
                      {conversation_id:?} at sequence {} message_id={}",
@@ -1734,7 +1734,16 @@ impl OrchestrationEventStreamer {
                     wake_message,
                 });
             }
-            Ok(None) => {
+            // The run is gone server-side (terminal 404). Retrying can never
+            // observe a wake event, so drop the listener instead of respawning
+            // it into a tight reconnect loop.
+            Ok((None, AgentEventDriverStop::RunGone)) => {
+                log::info!(
+                    "Dormant Claude wake listener stopped for {conversation_id:?}: \
+                     run is gone / no longer accessible; not restarting"
+                );
+            }
+            Ok((None, AgentEventDriverStop::ConsumerRequested)) => {
                 log::warn!(
                     "Dormant Claude wake listener stopped for {conversation_id:?} \
                      without observing an event"

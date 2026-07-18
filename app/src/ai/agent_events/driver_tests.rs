@@ -367,6 +367,89 @@ fn make_http_status_error(status: u16) -> anyhow::Error {
     .context("SSE stream error")
 }
 
+fn make_run_gone_error() -> anyhow::Error {
+    anyhow::Error::new(HttpStatusError {
+        status: 404,
+        body: r#"{"error":"no accessible runs for the requested filter"}"#.to_string(),
+    })
+    .context("SSE stream error: invalid status code 404 Not Found")
+}
+
+#[test]
+fn run_gone_error_is_terminal_only_for_marker_404() {
+    assert!(is_terminal_run_gone_error(&make_run_gone_error()));
+    // A 404 without the marker body is not treated as terminal (may recover).
+    assert!(!is_terminal_run_gone_error(&make_http_status_error(404)));
+    // The marker on a non-404 status is not terminal either.
+    let marker_500 = anyhow::Error::new(HttpStatusError {
+        status: 500,
+        body: "no accessible runs for the requested filter".to_string(),
+    })
+    .context("SSE stream error");
+    assert!(!is_terminal_run_gone_error(&marker_500));
+    // Errors with no HTTP status in the chain are not terminal.
+    assert!(!is_terminal_run_gone_error(&anyhow!("connection reset")));
+}
+
+#[tokio::test]
+async fn driver_stops_and_drops_subscription_on_run_gone_404() {
+    // A single response is enqueued: if the driver retried after the terminal
+    // 404 it would pop a missing response and panic, so completing proves the
+    // reconnect loop was stopped rather than spinning forever.
+    let source = FakeAgentEventSource::new(vec![ok_stream(vec![
+        Ok(AgentEventSourceItem::Open),
+        Err(make_run_gone_error()),
+    ])]);
+    let mut consumer = RecordingConsumer::default();
+
+    // Transient backoff is huge so a stray retry would visibly hang; the
+    // terminal path must bypass backoff entirely.
+    let config = AgentEventDriverConfig {
+        filter: AgentEventFilter::RunIds(vec!["gone-run".to_string()]),
+        since_sequence: 0,
+        reconnect_backoff_steps: &[9999],
+        permanent_error_backoff_steps: &[9999],
+        proactive_reconnect_after: None,
+        failures_before_error_log: DEFAULT_AGENT_EVENT_FAILURES_BEFORE_ERROR_LOG,
+    };
+
+    let stop = run_agent_event_driver(source, config, &mut consumer)
+        .await
+        .unwrap();
+
+    assert_eq!(stop, AgentEventDriverStop::RunGone);
+    assert!(consumer.handled_sequences.is_empty());
+    // No retry was scheduled — the driver dropped the dead subscription.
+    assert!(!consumer
+        .driver_states
+        .iter()
+        .any(|state| matches!(state, AgentEventDriverState::RetryScheduled { .. })));
+}
+
+#[tokio::test]
+async fn driver_stops_on_run_gone_when_open_stream_fails() {
+    // The 404 can also surface as an eager open_stream error; the driver must
+    // classify it as terminal there too.
+    let source = FakeAgentEventSource::new(vec![Err(make_run_gone_error())]);
+    let mut consumer = RecordingConsumer::default();
+
+    let config = AgentEventDriverConfig {
+        filter: AgentEventFilter::RunIds(vec!["gone-run".to_string()]),
+        since_sequence: 0,
+        reconnect_backoff_steps: &[9999],
+        permanent_error_backoff_steps: &[9999],
+        proactive_reconnect_after: None,
+        failures_before_error_log: DEFAULT_AGENT_EVENT_FAILURES_BEFORE_ERROR_LOG,
+    };
+
+    let stop = run_agent_event_driver(source, config, &mut consumer)
+        .await
+        .unwrap();
+
+    assert_eq!(stop, AgentEventDriverStop::RunGone);
+    assert!(consumer.handled_sequences.is_empty());
+}
+
 #[test]
 fn actionable_stream_status_reports_only_at_threshold_crossing() {
     let err = make_http_status_error(400);

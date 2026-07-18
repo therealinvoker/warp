@@ -862,12 +862,12 @@ pub enum PromptSuggestionFallbackReason {
 pub enum AgentModeSetupProjectScopedRulesActionType {
     #[serde(rename = "link_from_existing")]
     LinkFromExisting(String),
-    #[serde(rename = "generate_warp_md")]
-    GenerateWarpMd,
+    #[serde(rename = "generate_bang_md")]
+    GenerateBangMd,
     #[serde(rename = "skip_rules")]
     SkipRules,
-    #[serde(rename = "regenerate_warp_md")]
-    RegenerateWarpMd,
+    #[serde(rename = "regenerate_bang_md")]
+    RegenerateBangMd,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

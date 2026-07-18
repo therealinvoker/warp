@@ -179,6 +179,7 @@ pub struct ProfileModelSelector {
     input_model: ModelHandle<BlocklistAIInputModel>,
     ambient_agent_view_model: Option<ModelHandle<AmbientAgentViewModel>>,
     render_compact: bool,
+    sections: SelectorSections,
     hovered_llm_info: Option<LLMInfo>,
     manage_api_key_button: ViewHandle<ActionButton>,
     terminal_model: Arc<FairMutex<TerminalModel>>,
@@ -189,6 +190,31 @@ pub enum ProfileModelSelectorEvent {
     OpenSettings(SettingsSection),
     MenuVisibilityChanged { open: bool },
     ToggleInlineModelSelector,
+}
+
+/// Controls which of the two selector sections (profile + model) a
+/// [`ProfileModelSelector`] instance renders. The standard agent composer
+/// splits the two so the model/agent picker stays on the row with the editor
+/// while the profile picker moves to the controls row below it, using one
+/// instance per section.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SelectorSections {
+    /// Render both the profile and model sections (the default combined chip).
+    Both,
+    /// Render only the model/agent section.
+    ModelOnly,
+    /// Render only the profile section.
+    ProfileOnly,
+}
+
+impl SelectorSections {
+    fn includes_profile(self) -> bool {
+        matches!(self, SelectorSections::Both | SelectorSections::ProfileOnly)
+    }
+
+    fn includes_model(self) -> bool {
+        matches!(self, SelectorSections::Both | SelectorSections::ModelOnly)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -575,6 +601,7 @@ impl ProfileModelSelector {
             input_model,
             ambient_agent_view_model,
             render_compact: false,
+            sections: SelectorSections::Both,
             hovered_llm_info: None,
             manage_api_key_button,
             terminal_model,
@@ -750,6 +777,29 @@ impl ProfileModelSelector {
             self.render_compact = render_compact;
             ctx.notify();
         }
+    }
+
+    pub fn set_sections(&mut self, sections: SelectorSections, ctx: &mut ViewContext<Self>) {
+        if self.sections != sections {
+            self.sections = sections;
+            ctx.notify();
+        }
+    }
+
+    /// Whether this instance would render any visible content given its section
+    /// mode and the current profile/session state. Lets callers omit the child
+    /// (and its surrounding spacing) entirely when the profile-only instance has
+    /// nothing to show. `is_viewer` is threaded in by callers that already hold
+    /// the terminal-model lock to avoid re-locking it here.
+    pub fn will_render(&self, is_viewer: bool, app: &AppContext) -> bool {
+        if self.sections.includes_model() {
+            return true;
+        }
+        // Profile-only: mirror the profile-section visibility gate in `render`.
+        self.sections.includes_profile()
+            && AIExecutionProfilesModel::as_ref(app).has_multiple_profiles()
+            && !is_viewer
+            && self.ambient_agent_view_model.is_none()
     }
 
     fn handle_appearance_change(&mut self, ctx: &mut ViewContext<Self>) {
@@ -2204,8 +2254,13 @@ impl View for ProfileModelSelector {
         // Only add profile button to compact layout if there are multiple profiles
         // and the user is not a viewer (we currently don't support profiles in shared sessions).
         let is_ambient_agent = self.ambient_agent_view_model.is_some();
-        let should_show_profile_section = has_multiple_profiles && !is_viewer && !is_ambient_agent;
-        if should_show_profile_section {
+        let profile_available = has_multiple_profiles && !is_viewer && !is_ambient_agent;
+        // Split the chip by section mode: a `ModelOnly` instance renders just the
+        // model/agent picker, a `ProfileOnly` instance renders just the profile
+        // picker, and `Both` renders the combined chip.
+        let show_profile_section = profile_available && self.sections.includes_profile();
+        let show_model_section = self.sections.includes_model();
+        if show_profile_section {
             let profile_button_with_save_position = SavePosition::new(
                 ChildView::new(&self.profile_compact_button).finish(),
                 "profile_model_selector_profile_compact_button",
@@ -2214,12 +2269,14 @@ impl View for ProfileModelSelector {
             compact_row.add_child(profile_button_with_save_position);
         }
 
-        let model_button_with_save_position = SavePosition::new(
-            ChildView::new(&self.model_compact_button).finish(),
-            "profile_model_selector_model_compact_button",
-        )
-        .finish();
-        compact_row.add_child(model_button_with_save_position);
+        if show_model_section {
+            let model_button_with_save_position = SavePosition::new(
+                ChildView::new(&self.model_compact_button).finish(),
+                "profile_model_selector_model_compact_button",
+            )
+            .finish();
+            compact_row.add_child(model_button_with_save_position);
+        }
 
         let compact_layout = compact_row.finish();
 
@@ -2227,17 +2284,21 @@ impl View for ProfileModelSelector {
 
         // Only add profile section and separator if there are multiple profiles
         // and the user is not a viewer
-        if should_show_profile_section {
-            // Don't show separator if either selector is hovered
-            let profile_hovered = self.profile_mouse_state.lock().unwrap().is_hovered();
-            let model_hovered = self.model_mouse_state.lock().unwrap().is_hovered();
-
-            let show_separator = !(profile_hovered || model_hovered);
-
+        if show_profile_section {
             chip_content.add_child(self.render_profile_section(app));
-            chip_content.add_child(self.render_separator(app, show_separator));
+            // The separator only makes sense between the two sections.
+            if show_model_section {
+                // Don't show separator if either selector is hovered
+                let profile_hovered = self.profile_mouse_state.lock().unwrap().is_hovered();
+                let model_hovered = self.model_mouse_state.lock().unwrap().is_hovered();
+
+                let show_separator = !(profile_hovered || model_hovered);
+                chip_content.add_child(self.render_separator(app, show_separator));
+            }
         }
-        chip_content.add_child(self.render_model_section(app));
+        if show_model_section {
+            chip_content.add_child(self.render_model_section(app));
+        }
 
         // No resting background/border on the chip: the profile + model selector
         // reads as plain text beside the mic/lightning controls (per design). The
@@ -2259,13 +2320,13 @@ impl View for ProfileModelSelector {
         let mut stack = Stack::new();
         stack.add_child(content);
 
-        if self.is_profile_menu_open && should_show_profile_section {
+        if self.is_profile_menu_open && show_profile_section {
             let profile_menu = ChildView::new(&self.profile_dropdown).finish();
             let positioning = self.get_menu_positioning(app, true);
             stack.add_positioned_overlay_child(profile_menu, positioning);
         }
 
-        if self.is_model_menu_open {
+        if self.is_model_menu_open && show_model_section {
             let model_menu = ChildView::new(&self.model_dropdown).finish();
             let positioning = self.get_menu_positioning(app, false);
             stack.add_positioned_overlay_child(model_menu, positioning);
@@ -2328,7 +2389,8 @@ impl View for ProfileModelSelector {
         // The popup overflows the viewport on wasm mobile.
         let is_wasm_mobile = warpui::platform::is_mobile_device();
 
-        if !is_wasm_mobile
+        if show_model_section
+            && !is_wasm_mobile
             && (is_udi_enabled
                 || self
                     .input_model

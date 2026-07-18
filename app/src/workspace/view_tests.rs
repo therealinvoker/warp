@@ -1152,6 +1152,108 @@ fn test_set_active_tab_name_clears_active_rename_editor_state() {
 }
 
 #[test]
+fn test_tab_rename_propagates_to_active_conversation_title() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        // Exercise the history-model fallback path (agent view inactive) so the
+        // active conversation is resolved via the terminal surface id.
+        let _agent_view = FeatureFlag::AgentView.override_enabled(false);
+
+        let workspace = mock_workspace(&mut app);
+        // The terminal `Input` view subscribes to conversation-title updates and
+        // reaches for the overlay controller; register a stub so the emitted
+        // `UpdatedConversationTitle` event can be handled in the test harness.
+        app.add_singleton_model(|_| crate::overlay::OverlayController::with_stubs());
+
+        workspace.update(&mut app, |workspace, ctx| {
+            let session_view = workspace
+                .active_tab_pane_group()
+                .as_ref(ctx)
+                .active_session_view(ctx)
+                .expect("active tab should have a terminal session");
+            let surface_id = session_view.id();
+
+            // Register a non-empty conversation (one query + response) auto-titled
+            // from its first prompt, and mark it active for the tab's surface.
+            let conversation_id = AIConversationId::new();
+            let conversation = AIConversation::new_restored(
+                conversation_id,
+                vec![warp_multi_agent_api::Task {
+                    id: "root-task".to_string(),
+                    messages: vec![
+                        warp_multi_agent_api::Message {
+                            id: "user-0".to_string(),
+                            task_id: "root-task".to_string(),
+                            server_message_data: String::new(),
+                            citations: vec![],
+                            message: Some(warp_multi_agent_api::message::Message::UserQuery(
+                                warp_multi_agent_api::message::UserQuery {
+                                    query: "hot air baloons".to_string(),
+                                    context: None,
+                                    referenced_attachments: HashMap::new(),
+                                    mode: None,
+                                    intended_agent: Default::default(),
+                                },
+                            )),
+                            request_id: "request-0".to_string(),
+                            timestamp: None,
+                        },
+                        warp_multi_agent_api::Message {
+                            id: "agent-0".to_string(),
+                            task_id: "root-task".to_string(),
+                            server_message_data: String::new(),
+                            citations: vec![],
+                            message: Some(warp_multi_agent_api::message::Message::AgentOutput(
+                                warp_multi_agent_api::message::AgentOutput {
+                                    text: "Here's a quick overview.".to_string(),
+                                },
+                            )),
+                            request_id: "request-0".to_string(),
+                            timestamp: None,
+                        },
+                    ],
+                    dependencies: None,
+                    description: "hi there".to_string(),
+                    summary: String::new(),
+                    server_data: String::new(),
+                }],
+                None,
+            )
+            .expect("conversation should restore");
+
+            BlocklistAIHistoryModel::handle(ctx).update(ctx, |history, ctx| {
+                history.restore_conversations(surface_id, vec![conversation], ctx);
+                history.set_active_conversation_id(conversation_id, surface_id, ctx);
+            });
+
+            // The conversation starts with its auto-generated, first-prompt title.
+            assert_eq!(
+                BlocklistAIHistoryModel::as_ref(ctx)
+                    .conversation(&conversation_id)
+                    .and_then(|conversation| conversation.title())
+                    .as_deref(),
+                Some("hi there"),
+            );
+
+            // Renaming the active tab should retitle its active conversation so the
+            // conversation history list reflects the tab name.
+            workspace.handle_action(
+                &WorkspaceAction::SetActiveTabName("Baloons".to_string()),
+                ctx,
+            );
+
+            assert_eq!(
+                BlocklistAIHistoryModel::as_ref(ctx)
+                    .conversation(&conversation_id)
+                    .and_then(|conversation| conversation.title())
+                    .as_deref(),
+                Some("Baloons"),
+            );
+        });
+    });
+}
+
+#[test]
 fn test_set_active_tab_color() {
     App::test((), |mut app| async move {
         initialize_app(&mut app);

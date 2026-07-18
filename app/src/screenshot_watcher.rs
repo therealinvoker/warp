@@ -64,6 +64,12 @@ pub struct ScreenshotWatcher;
 #[cfg(not(target_family = "wasm"))]
 impl ScreenshotWatcher {
     pub fn new(ctx: &mut ModelContext<Self>) -> Self {
+        // Escape hatch for dev/UI-review launches: skip the watcher entirely so
+        // the startup Desktop-folder TCC prompt (from `prime_directory_access`)
+        // never appears. `script/dev` sets this; production snapshots do not.
+        if screenshot_watcher_disabled_by_env() {
+            return Self::disabled();
+        }
         if !FeatureFlag::ScreenshotAutoAttach.is_enabled() {
             return Self::disabled();
         }
@@ -299,6 +305,21 @@ fn screenshot_directory() -> Option<PathBuf> {
     // Other platforms save screenshots in varied, harder-to-detect locations, so
     // the feature is opt-in there via `WARP_SCREENSHOT_DIR`.
     screenshot_dir_override()
+}
+
+/// Whether `WARP_DISABLE_SCREENSHOT_WATCHER` is set to a truthy value. When set,
+/// the screenshot watcher is fully disabled (no filesystem watch, and — on macOS
+/// — no startup Desktop-access priming), so dev/automation launches aren't
+/// interrupted by the "would like to access files in your Desktop folder"
+/// prompt.
+#[cfg(not(target_family = "wasm"))]
+fn screenshot_watcher_disabled_by_env() -> bool {
+    std::env::var("WARP_DISABLE_SCREENSHOT_WATCHER")
+        .map(|value| {
+            let value = value.trim();
+            !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
+        })
+        .unwrap_or(false)
 }
 
 /// Opt-in override for the watched screenshot directory. Lets users point the

@@ -152,17 +152,17 @@ impl View for WebSearchView {
         match &self.status {
             WebSearchStatus::Searching { query } => self
                 .render_loading(query, app)
-                .with_agent_output_item_spacing(app)
+                .with_agent_output_item_spacing()
                 .finish(),
             WebSearchStatus::Success { query, pages } => self
                 .render_success(query, pages, app)
-                .with_agent_output_item_spacing(app)
+                .with_agent_output_item_spacing()
                 .finish(),
             WebSearchStatus::Error { query } => {
                 // For now, render as if search completed with no results
                 // TODO(advait): Add proper error rendering
                 self.render_success(query, &[], app)
-                    .with_agent_output_item_spacing(app)
+                    .with_agent_output_item_spacing()
                     .finish()
             }
         }

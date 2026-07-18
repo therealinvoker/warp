@@ -187,6 +187,7 @@ use crate::ai::ambient_agents::telemetry::{CloudAgentTelemetryEvent, CloudModeEn
 use crate::ai::ambient_agents::telemetry::{HandoffEntryPoint, HandoffInjectionPath};
 use crate::ai::ambient_agents::AmbientAgentTaskId;
 use crate::ai::blocklist::agent_view::agent_input_footer::editor::AgentToolbarEditorMode;
+use crate::ai::blocklist::agent_view::agent_progress_modal::AgentProgressModalBody;
 use crate::ai::blocklist::agent_view::editor::{AgentToolbarEditorEvent, AgentToolbarEditorModal};
 use crate::ai::blocklist::agent_view::AgentViewEntryOrigin;
 #[cfg(all(feature = "local_fs", not(target_family = "wasm")))]
@@ -197,6 +198,7 @@ use crate::ai::blocklist::handoff::touched_repos::extract_paths_from_conversatio
 use crate::ai::blocklist::handoff::{HandoffLaunchAttachments, PendingCloudLaunch};
 use crate::ai::blocklist::history_model::{load_conversation_from_server, CloudConversationData};
 use crate::ai::blocklist::inline_action::code_diff_view::CodeDiffView;
+use crate::ai::blocklist::orchestration_topology::orchestration_worker_label;
 use crate::ai::blocklist::suggested_agent_mode_workflow_modal::{
     SuggestedAgentModeWorkflowAndId, SuggestedAgentModeWorkflowModal,
     SuggestedAgentModeWorkflowModalEvent,
@@ -211,6 +213,7 @@ use crate::ai::blocklist::{
 use crate::ai::cloud_agent_settings::CloudAgentSettings;
 #[cfg(target_family = "wasm")]
 use crate::ai::conversation_details_panel::ConversationDetailsPanel;
+use crate::ai::conversation_rename::propagate_tab_rename_to_conversation;
 use crate::ai::document::ai_document_model::{AIDocumentId, AIDocumentModel};
 use crate::ai::execution_profiles::editor::ExecutionProfileEditorManager;
 use crate::ai::execution_profiles::profiles::{AIExecutionProfilesModel, ClientProfileId};
@@ -1049,6 +1052,8 @@ pub struct Workspace {
     model_event_sender: Option<mpsc::SyncSender<ModelEvent>>,
     launch_config_save_modal: ModalViewState<LaunchConfigSaveModal>,
     tab_config_params_modal: ModalViewState<Modal<TabConfigParamsModal>>,
+    /// Read-only live per-agent progress modal for orchestration workers.
+    agent_progress_modal: ModalViewState<Modal<AgentProgressModalBody>>,
     session_config_modal: ModalViewState<Modal<SessionConfigModal>>,
     pending_session_config_replacement: Option<PendingSessionConfigReplacement>,
     /// When set, the guided onboarding tutorial will start after the session
@@ -1486,8 +1491,9 @@ impl Workspace {
         if let Some(tab_index) = self.current_workspace_state.tab_being_renamed() {
             self.current_workspace_state.clear_tab_being_renamed();
             let title = self.tab_rename_editor.as_ref(ctx).buffer_text(ctx);
-            let tab = &self.tabs[tab_index];
-            tab.pane_group.update(ctx, |view, ctx| {
+            let pane_group = self.tabs[tab_index].pane_group.clone();
+            let mut title_changed = false;
+            pane_group.update(ctx, |view, ctx| {
                 // Only update the title if it was actually changed. Otherwise, lets assume
                 // user's intend was to cancel the operation.
                 if view.display_title(ctx) != title {
@@ -1496,8 +1502,15 @@ impl Workspace {
                         ctx
                     );
                     view.set_title(&title, ctx);
+                    title_changed = true;
                 }
             });
+            // Mirror the tab's new name onto its active agent conversation so the
+            // conversation history list reflects the rename rather than keeping the
+            // first-prompt auto-title.
+            if title_changed {
+                self.propagate_tab_title_to_conversation(&pane_group, &title, ctx);
+            }
             self.clear_tab_name_editor(ctx);
             self.update_window_title(ctx);
             ctx.notify();
@@ -2081,6 +2094,31 @@ impl Workspace {
         });
         ctx.subscribe_to_view(&modal, |me, _, event, ctx| {
             me.handle_tab_config_params_modal_event(event, ctx);
+        });
+        ModalViewState::new(modal)
+    }
+
+    fn build_agent_progress_modal(
+        ctx: &mut ViewContext<Self>,
+    ) -> ModalViewState<Modal<AgentProgressModalBody>> {
+        let body = ctx.add_typed_action_view(AgentProgressModalBody::new);
+        let modal = ctx.add_typed_action_view(|ctx| {
+            Modal::new(Some("Agent".to_string()), body, ctx)
+                .with_modal_style(UiComponentStyles {
+                    width: Some(560.),
+                    height: Some(520.),
+                    ..Default::default()
+                })
+                .with_body_style(UiComponentStyles {
+                    padding: Some(Coords::uniform(0.)),
+                    height: Some(450.),
+                    background: Some(ElementFill::None),
+                    ..Default::default()
+                })
+                .with_dismiss_on_click()
+        });
+        ctx.subscribe_to_view(&modal, |me, _, event, ctx| {
+            me.handle_agent_progress_modal_event(event, ctx);
         });
         ModalViewState::new(modal)
     }
@@ -2988,6 +3026,7 @@ impl Workspace {
         let launch_config_save_modal = Self::build_launch_config_save_modal(ctx);
 
         let tab_config_params_modal = Self::build_tab_config_params_modal(ctx);
+        let agent_progress_modal = Self::build_agent_progress_modal(ctx);
         let new_worktree_modal = Self::build_new_worktree_modal(ctx);
 
         let session_config_modal = Self::build_session_config_modal(ctx);
@@ -3371,6 +3410,7 @@ impl Workspace {
             model_event_sender,
             launch_config_save_modal,
             tab_config_params_modal,
+            agent_progress_modal,
             session_config_modal,
             pending_session_config_replacement: None,
             pending_onboarding_intention: None,
@@ -5630,6 +5670,7 @@ impl Workspace {
             ctx.notify();
             return;
         }
+        let mut title_changed = false;
         pane_group.update(ctx, |pane_group, ctx| {
             if pane_group.display_title(ctx) != title {
                 pane_group.set_title(title, ctx);
@@ -5637,9 +5678,40 @@ impl Workspace {
                     TelemetryEvent::TabRenamed(TabRenameEvent::CustomNameSet),
                     ctx
                 );
+                title_changed = true;
             }
         });
+        if title_changed {
+            self.propagate_tab_title_to_conversation(&pane_group, title, ctx);
+        }
         ctx.notify();
+    }
+
+    /// Mirrors a tab's new custom title onto its active agent conversation so the
+    /// conversation history list ("ACTIVE" / "PAST") reflects the rename instead of
+    /// the auto-generated, first-prompt title. No-ops when the tab's active session
+    /// has no conversation yet (e.g. a freshly created tab).
+    fn propagate_tab_title_to_conversation(
+        &self,
+        pane_group: &ViewHandle<PaneGroup>,
+        title: &str,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let active_conversation_id = pane_group
+            .read(ctx, |pane_group, ctx| pane_group.active_session_view(ctx))
+            .and_then(|session_view| {
+                let surface_id = session_view.id();
+                // Prefer the agent-view's active conversation; fall back to the
+                // history model keyed by terminal surface when agent view is inactive.
+                session_view
+                    .read(ctx, |session, ctx| session.active_conversation_id(ctx))
+                    .or_else(|| {
+                        BlocklistAIHistoryModel::as_ref(ctx).active_conversation_id(surface_id)
+                    })
+            });
+        if let Some(conversation_id) = active_conversation_id {
+            propagate_tab_rename_to_conversation(conversation_id, title.to_owned(), ctx);
+        }
     }
 
     /// Programmatically sets the manual color override for a tab.
@@ -8213,8 +8285,15 @@ impl Workspace {
         ctx: &mut ViewContext<Self>,
     ) {
         self.current_workspace_state.is_suggested_rule_modal_open = true;
+        // Seed the modal with the active terminal's cwd so "Save to project" can
+        // resolve the repo root for a local `.bang/memory.md` write.
+        let working_directory = self
+            .active_session_view(ctx)
+            .and_then(|view| view.as_ref(ctx).pwd())
+            .map(PathBuf::from);
         self.suggested_rule_modal
             .update(ctx, |suggested_rule_modal, ctx| {
+                suggested_rule_modal.set_working_directory(working_directory, ctx);
                 suggested_rule_modal.set_rule_and_id(rule_and_id, ctx);
                 ctx.notify();
             });
@@ -10616,6 +10695,44 @@ impl Workspace {
         match event {
             ModalEvent::Close => {
                 self.cancel_tab_config_params_modal(ctx);
+            }
+        }
+    }
+
+    /// Opens the read-only live progress modal for the given orchestration
+    /// worker conversation, titling it with the worker's task label and
+    /// pointing the body at that conversation.
+    pub fn open_agent_progress_modal(
+        &mut self,
+        conversation_id: AIConversationId,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let title = BlocklistAIHistoryModel::as_ref(ctx)
+            .conversation(&conversation_id)
+            .map(orchestration_worker_label)
+            .unwrap_or_else(|| "Agent".to_string());
+
+        let modal_handle = self.agent_progress_modal.view.clone();
+        let body = modal_handle.as_ref(ctx).body().clone();
+        modal_handle.update(ctx, |modal, _ctx| modal.set_title(Some(title)));
+        body.update(ctx, |body, ctx| {
+            body.set_conversation(Some(conversation_id), ctx);
+        });
+
+        self.agent_progress_modal.open();
+        ctx.focus(&self.agent_progress_modal.view);
+        ctx.notify();
+    }
+
+    fn handle_agent_progress_modal_event(
+        &mut self,
+        event: &ModalEvent,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        match event {
+            ModalEvent::Close => {
+                self.agent_progress_modal.close();
+                ctx.notify();
             }
         }
     }
@@ -23605,6 +23722,9 @@ impl TypedActionView for Workspace {
             ActivateTabByNumber(num) => self.activate_tab(num.saturating_sub(1), ctx),
             ActivatePrevTab => self.activate_prev_tab(ctx),
             OpenLaunchConfigSaveModal => self.open_launch_config_save_modal(ctx),
+            OpenAgentProgressModal { conversation_id } => {
+                self.open_agent_progress_modal(*conversation_id, ctx)
+            }
             ActivateNextTab => self.activate_next_tab(ctx),
             ActivateLastTab => self.activate_last_tab(ctx),
             CyclePrevSession => self.cycle_prev_session(ctx),
@@ -26893,6 +27013,10 @@ impl View for Workspace {
 
         if self.tab_config_params_modal.is_open() {
             stack.add_child(self.tab_config_params_modal.render());
+        }
+
+        if self.agent_progress_modal.is_open() {
+            stack.add_child(self.agent_progress_modal.render());
         }
 
         if self.session_config_modal.is_open() {

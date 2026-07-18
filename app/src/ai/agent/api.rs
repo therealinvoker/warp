@@ -114,6 +114,9 @@ pub struct RequestParams {
     /// thorough). Forwarded to the backend in request metadata, where it becomes
     /// a system-prompt directive.
     pub response_verbosity: u8,
+    /// The active todo checklist for this conversation, forwarded to the backend
+    /// in request metadata so the agent can see the plan the user has on screen.
+    pub active_todo_list: Vec<TodoContextItem>,
     should_redact_secrets: bool,
 
     /// User-provided API keys for AI providers (BYO API Key).
@@ -151,6 +154,17 @@ pub type ResponseStream = Pin<Box<dyn Stream<Item = Event> + Send + 'static>>;
 #[cfg(target_family = "wasm")]
 pub type ResponseStream = Pin<Box<dyn Stream<Item = Event>>>;
 
+/// A single entry from the conversation's active todo checklist, flattened for
+/// transport to the backend. Sent in request `logging` metadata (see
+/// `generate_multi_agent_output`) so the agent can always "see" the plan the
+/// user has on screen, independent of what survives in server-side history.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TodoContextItem {
+    pub id: String,
+    pub title: String,
+    pub completed: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct ConversationData {
     pub id: AIConversationId,
@@ -159,6 +173,11 @@ pub struct ConversationData {
     pub forked_from_conversation_token: Option<ServerConversationToken>,
     pub ambient_agent_task_id: Option<AmbientAgentTaskId>,
     pub existing_suggestions: Option<Suggestions>,
+    /// The conversation's active todo checklist (completed items first, then
+    /// pending), or empty when there's no list. Forwarded to the backend so a
+    /// follow-up turn can reference the plan even if the server no longer has
+    /// the `update_todos` history that produced it.
+    pub active_todo_list: Vec<TodoContextItem>,
 }
 
 impl RequestParams {
@@ -183,6 +202,7 @@ impl RequestParams {
             mcp_context: None,
             planning_enabled: false,
             response_verbosity: 5,
+            active_todo_list: vec![],
             should_redact_secrets: false,
             api_keys: None,
             custom_model_providers: None,
@@ -381,6 +401,7 @@ impl RequestParams {
             mcp_context,
             planning_enabled: true,
             response_verbosity,
+            active_todo_list: conversation.active_todo_list,
             should_redact_secrets,
             api_keys,
             custom_model_providers,

@@ -6,9 +6,8 @@ use warpui::{AppContext, Entity, ModelHandle, SingletonEntity, View, ViewContext
 
 use crate::ai::blocklist::agent_view::{AgentViewController, AgentViewControllerEvent};
 use crate::terminal::input::inline_menu::model::InlineMenuModel;
-use crate::terminal::input::inline_menu::styles as inline_styles;
 use crate::terminal::input::inline_menu::{
-    InlineMenuAction, InlineMenuMessageProvider, InlineMenuPositioner,
+    styles as inline_styles, InlineMenuAction, InlineMenuMessageProvider, InlineMenuPositioner,
 };
 use crate::terminal::input::message_bar::common::render_standard_message_bar_with_font;
 use crate::terminal::input::message_bar::{EmptyMessageProducer, MessageProvider};

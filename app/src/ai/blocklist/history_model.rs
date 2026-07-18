@@ -1829,7 +1829,16 @@ impl BlocklistAIHistoryModel {
 
         // If this conversation doesn't have server metadata yet, and it has a server conversation token,
         // fetch the metadata from the server.
+        //
+        // Orchestration child ("worker") agents are excluded: they aren't
+        // persisted as first-class user conversations server-side, so the
+        // `listAIConversations` lookup returns nothing and only produces
+        // "No metadata returned for conversation …" log noise. Their UI labels
+        // come from local state (task title / agent name) anyway.
+        let is_child_conversation = conversation.parent_conversation_id().is_some()
+            || conversation.parent_agent_id().is_some();
         let should_fetch_metadata = FeatureFlag::CloudConversations.is_enabled()
+            && !is_child_conversation
             && conversation.server_metadata().is_none()
             && conversation.server_conversation_token().is_some();
 

@@ -1324,7 +1324,6 @@ impl AskUserQuestionView {
             HeaderConfig::new("Questions unavailable".to_string(), app)
                 .with_icon(inline_action_icons::reverted_icon(appearance))
                 .render(app),
-            app,
         )
         .finish()
     }
@@ -1420,9 +1419,9 @@ impl AskUserQuestionView {
                     Flex::column().with_cross_axis_alignment(CrossAxisAlignment::Stretch);
                 wrapper.add_child(header);
                 wrapper.add_child(footer);
-                return wrap_with_agent_output_item_spacing(wrapper.finish(), app).finish();
+                return wrap_with_agent_output_item_spacing(wrapper.finish()).finish();
             }
-            return wrap_with_agent_output_item_spacing(header, app).finish();
+            return wrap_with_agent_output_item_spacing(header).finish();
         }
 
         let mut wrapper = Flex::column().with_cross_axis_alignment(CrossAxisAlignment::Stretch);
@@ -1435,9 +1434,9 @@ impl AskUserQuestionView {
         ));
         if let Some(footer) = speedbump_footer {
             wrapper.add_child(footer);
-            return wrap_with_agent_output_item_spacing(wrapper.finish(), app).finish();
+            return wrap_with_agent_output_item_spacing(wrapper.finish()).finish();
         }
-        wrap_with_agent_output_item_spacing(wrapper.finish(), app)
+        wrap_with_agent_output_item_spacing(wrapper.finish())
             .with_corner_radius(CornerRadius::with_all(Radius::Pixels(8.)))
             .finish()
     }
@@ -1894,11 +1893,9 @@ fn wrap_with_content_item_spacing(element: Box<dyn Element>) -> Container {
         .with_margin_bottom(CONTENT_ITEM_VERTICAL_MARGIN)
 }
 
-fn wrap_with_agent_output_item_spacing(element: Box<dyn Element>, app: &AppContext) -> Container {
-    let left_margin = CONTENT_HORIZONTAL_PADDING + icon_size(app) + 16.;
+fn wrap_with_agent_output_item_spacing(element: Box<dyn Element>) -> Container {
     Container::new(element)
-        .with_margin_left(left_margin)
-        .with_margin_right(CONTENT_HORIZONTAL_PADDING)
+        .with_horizontal_margin(CONTENT_HORIZONTAL_PADDING)
         .with_margin_bottom(CONTENT_ITEM_VERTICAL_MARGIN)
 }
 

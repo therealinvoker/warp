@@ -85,10 +85,7 @@ pub(super) fn render_todos(
         );
     }
 
-    container
-        .finish()
-        .with_agent_output_item_spacing(app)
-        .finish()
+    container.finish().with_agent_output_item_spacing().finish()
 }
 
 fn render_todo(todo: &AIAgentTodo, status: TodoStatus, app: &AppContext) -> Box<dyn Element> {
@@ -241,5 +238,5 @@ pub(super) fn render_completed_todo_items(
         .with_child(divider)
         .finish();
 
-    Some(complete_item.with_agent_output_item_spacing(app).finish())
+    Some(complete_item.with_agent_output_item_spacing().finish())
 }

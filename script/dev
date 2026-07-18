@@ -48,6 +48,13 @@ export WARP_APP_DISPLAY_NAME="bang-dev"
 export WARP_APP_BUNDLE_ID="dev.warp.WarpOssDev"
 # Distinct black icon so the dev build stands out from the stable snapshot.
 export WARP_APP_ICON="$ROOT/app/channels/oss/icon/bang-dev.icns"
+# Disable the screenshot auto-attach watcher for dev/UI-review launches. It
+# otherwise reads the (TCC-protected) Desktop folder at startup to prime access,
+# which pops the macOS "would like to access files in your Desktop folder"
+# prompt on every rebuild (re-signing invalidates the prior grant) and blocks
+# unattended UI iteration. Production snapshots don't set this, so the feature
+# stays available there.
+export WARP_DISABLE_SCREENSHOT_WATCHER=1
 if [ "$TARGET" = prod ]; then
   export WARP_SERVER_ROOT_URL="https://api.trybang.ai"
   # Keep RTC-served HTTP endpoints (agent-event SSE) on the harness too:

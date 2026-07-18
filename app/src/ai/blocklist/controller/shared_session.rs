@@ -643,6 +643,22 @@ impl BlocklistAIController {
         }
     }
 
+    /// Resolves which local conversation a remote agent prompt should target.
+    ///
+    /// Prefers the conversation the viewer explicitly addressed via its
+    /// `server_conversation_token`. When that is absent or does not map to a
+    /// known local conversation (e.g. the mobile web viewer sends prompts with
+    /// no token), fall back to the sharer's currently active conversation so
+    /// remote control continues the on-screen conversation instead of starting
+    /// a new one. `None` from both inputs means there is no conversation to
+    /// continue, leaving the caller to create one.
+    fn resolve_remote_prompt_conversation_id(
+        conversation_id_from_token: Option<AIConversationId>,
+        active_conversation_id: Option<AIConversationId>,
+    ) -> Option<AIConversationId> {
+        conversation_id_from_token.or(active_conversation_id)
+    }
+
     /// Execute an agent prompt on behalf of the viewer.
     pub fn execute_agent_prompt_for_shared_session(
         &mut self,
@@ -652,8 +668,8 @@ impl BlocklistAIController {
         participant_id: ParticipantId,
         ctx: &mut ModelContext<Self>,
     ) {
-        // Map server token to sharer's local conversation ID
-        let conversation_id = server_conversation_token
+        // Map server token to sharer's local conversation ID.
+        let conversation_id_from_token = server_conversation_token
             .and_then(|id| self.find_existing_conversation_by_server_token(&id.to_string(), ctx))
             .and_then(
                 |id| match BlocklistAIHistoryModel::as_ref(ctx).conversation(&id) {
@@ -667,6 +683,19 @@ impl BlocklistAIController {
                 },
             )
             .map(|conversation| conversation.id());
+
+        // Remote controllers (notably the mobile web viewer) can send an agent
+        // prompt without a server conversation token. When no token resolves to
+        // a known local conversation, continue the sharer's currently active
+        // conversation instead of spawning a brand-new one, so remote control
+        // operates on the conversation that is on screen rather than opening a
+        // fresh one.
+        let active_conversation_id =
+            BlocklistAIHistoryModel::as_ref(ctx).active_conversation_id(self.terminal_surface_id);
+        let conversation_id = Self::resolve_remote_prompt_conversation_id(
+            conversation_id_from_token,
+            active_conversation_id,
+        );
 
         // Process attachments and set them in the context model
         let mut block_ids = Vec::new();
@@ -886,3 +915,7 @@ impl BlocklistAIController {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "shared_session_tests.rs"]
+mod tests;

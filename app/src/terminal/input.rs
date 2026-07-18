@@ -160,6 +160,7 @@ use crate::ai::block_context::BlockContext;
 use crate::ai::blocklist::agent_view::agent_input_footer::sort_environments_by_recency;
 use crate::ai::blocklist::agent_view::agent_input_footer::PlusButtonTheme;
 use crate::ai::blocklist::agent_view::shortcuts::AgentShortcutViewModel;
+use crate::ai::blocklist::agent_view::working_agents_indicator::WorkingAgentsIndicator;
 use crate::ai::blocklist::agent_view::{
     is_in_cloud_context, AgentInputFooter, AgentInputFooterEvent, AgentViewController,
     AgentViewEntryOrigin, EphemeralMessageModel,
@@ -1893,6 +1894,10 @@ pub struct Input {
 
     buy_credits_banner: ViewHandle<BuyCreditsBanner>,
     agent_status_view: ViewHandle<BlocklistAIStatusBar>,
+    /// Composer-anchored "N Working" indicator for orchestration workers,
+    /// rendered directly above the input box. Gated behind
+    /// [`FeatureFlag::AgentProgressUI`] (renders empty otherwise).
+    working_agents_indicator: ViewHandle<WorkingAgentsIndicator>,
     /// Optional queued-prompts panel rendered between `agent_status_view` and the input editor.
     /// Constructed in [`Input::new`] when [`FeatureFlag::QueueSlashCommand`] is enabled.
     queued_prompts_panel: Option<ViewHandle<QueuedPromptsPanelView>>,
@@ -2368,8 +2373,18 @@ impl Input {
             me.handle_prompt_event(event, ctx);
         });
         ctx.subscribe_to_model(&Appearance::handle(ctx), move |me, _, event, ctx| {
-            if let AppearanceEvent::ThemeChanged = event {
-                me.handle_theme_change(ctx);
+            match event {
+                AppearanceEvent::ThemeChanged => {
+                    me.handle_theme_change(ctx);
+                }
+                // `set_ai_font_family` (and `set_monospace_font_family`) both emit
+                // `MonospaceFontFamilyChanged`, so re-derive the input editor's
+                // family here to keep the composer live-synced with the "Agent
+                // font" / terminal font settings without a restart.
+                AppearanceEvent::MonospaceFontFamilyChanged { .. } => {
+                    me.update_input_editor_font_family(ctx);
+                }
+                _ => {}
             }
         });
         // Keep the rich input editor's text colors legible against alt-screen
@@ -2742,10 +2757,6 @@ impl Input {
                 AgentInputFooterEvent::ToggleOverlay => {
                     me.toggle_overlay(ctx);
                 }
-                AgentInputFooterEvent::StartRemoteControl
-                | AgentInputFooterEvent::StopRemoteControl => {
-                    // Handled by UseAgentToolbar's subscription, not here.
-                }
                 // These events are handled by UseAgentToolbar's subscription.
                 // The UseAgentToolbar shares this same AgentInputFooter instance,
                 // so its subscriber always fires alongside ours for every chip click.
@@ -2932,6 +2943,7 @@ impl Input {
                 me.update_voice_transcription_options(ctx);
                 me.update_image_context_options(ctx);
                 me.update_ai_context_menu(ctx);
+                me.update_input_editor_font_family(ctx);
                 me.check_slash_menu_disabled_state(ctx);
             });
 
@@ -3864,6 +3876,11 @@ impl Input {
             )
         });
 
+        let working_agents_indicator = {
+            let agent_view_controller = agent_view_controller.clone();
+            ctx.add_typed_action_view(|ctx| WorkingAgentsIndicator::new(agent_view_controller, ctx))
+        };
+
         let queued_prompts_panel = FeatureFlag::QueueSlashCommand.is_enabled().then(|| {
             let cli_subagent_controller = cli_subagent_controller.clone();
             let host_editor = editor.clone();
@@ -3980,6 +3997,7 @@ impl Input {
             weak_view_handle: ctx.handle(),
             buy_credits_banner,
             agent_status_view,
+            working_agents_indicator,
             queued_prompts_panel,
             agent_view_controller,
             agent_input_footer,
@@ -4011,6 +4029,7 @@ impl Input {
         input.update_voice_transcription_options(ctx);
         input.update_image_context_options(ctx);
         input.update_ai_context_menu(ctx);
+        input.update_input_editor_font_family(ctx);
         input
     }
 
@@ -4047,6 +4066,30 @@ impl Input {
         self.editor.update(ctx, move |editor, ctx| {
             editor.set_is_ai_input(is_ai_input, ctx);
             ctx.notify();
+        });
+    }
+
+    /// Scopes the agent composer font to the input's AI/agent mode. The command
+    /// input and the agent composer share one editor, so we switch its font family
+    /// per `InputType`: AI input uses the configurable "Agent font"
+    /// (`ai_font_family()`, defaulting to the proportional system UI sans) so it
+    /// matches the agent conversation prose, while shell command input stays on the
+    /// configured `monospace_font_family()` (Hack) so the terminal input keeps
+    /// tracking the terminal grid font. Driven by
+    /// `BlocklistAIInputEvent::InputTypeChanged` via the `ai_input_model`
+    /// subscription, plus once at construction.
+    fn update_input_editor_font_family(&mut self, ctx: &mut ViewContext<Self>) {
+        let is_ai_input = self.ai_input_model.as_ref(ctx).input_type().is_ai();
+        let font_family = {
+            let appearance = Appearance::as_ref(ctx);
+            if is_ai_input {
+                appearance.ai_font_family()
+            } else {
+                appearance.monospace_font_family()
+            }
+        };
+        self.editor.update(ctx, move |editor, ctx| {
+            editor.set_font_family(font_family, ctx);
         });
     }
 
@@ -10317,16 +10360,21 @@ impl Input {
         {
             self.clear_attached_context(ctx);
         } else {
-            if FeatureFlag::AgentView.is_enabled()
-                && !self.agent_view_controller.as_ref(ctx).is_fullscreen()
-            {
-                if self.ai_input_model.as_ref(ctx).is_ai_input_enabled() {
-                    // This implies the contents of the terminal input are autodetected as an agent
-                    // prompt; overrides the autodetection by explicitly setting input mode back to
-                    // terminal.
-                    self.set_input_mode_terminal(false, ctx);
+            if FeatureFlag::AgentView.is_enabled() {
+                // Escape must never switch an agent-mode prompt to terminal (shell) mode — terminal
+                // mode is now only reachable via the `/terminal` slash command or the `!` prefix.
+                // In the fullscreen agent composer we additionally re-assert AGENT mode via
+                // `set_input_mode_agent` (which unlocks/re-enables autodetection on an empty buffer,
+                // and locks AI when there is a pending attachment) so an empty buffer can never fall
+                // back to the Shell default (`InputType::default()` is `Shell`) — the agent->terminal
+                // flip users were seeing. Outside fullscreen we leave the (already agent) input mode
+                // untouched rather than toggling back to shell.
+                if self.agent_view_controller.as_ref(ctx).is_fullscreen() {
+                    self.set_input_mode_agent(/* ensure_input_is_focused */ false, ctx);
                 }
             } else {
+                // Legacy terminal (AgentView disabled): preserve the historical behavior of
+                // re-enabling natural-language autodetection on Escape.
                 self.set_input_mode_natural_language_detection(ctx);
             }
             ctx.emit(Event::Escape);
@@ -16790,8 +16838,9 @@ impl Input {
         base64_data: &str,
         ctx: &mut ViewContext<Self>,
     ) -> Option<(AssetSource, f32)> {
-        use image::GenericImageView;
         use std::hash::{Hash, Hasher};
+
+        use image::GenericImageView;
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(base64_data)
             .ok()?;
@@ -17232,6 +17281,11 @@ impl Input {
     /// Returns the position ID for the input editor
     pub fn editor_save_position_id(&self) -> String {
         format!("input_editor_{}", self.view_id)
+    }
+
+    /// Returns the position ID for the agent status/hints bar.
+    pub fn agent_status_hints_save_position_id(&self) -> String {
+        format!("agent_status_hints_{}", self.view_id)
     }
 
     /// Returns the position ID for the (left) prompt.

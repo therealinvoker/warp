@@ -7,6 +7,7 @@ mod ansi_handler;
 mod filtering;
 #[path = "image.rs"]
 mod image;
+pub use image::InlineImagePlacement;
 #[path = "resize.rs"]
 mod resize;
 #[path = "secrets.rs"]

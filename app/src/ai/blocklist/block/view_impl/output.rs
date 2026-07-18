@@ -48,8 +48,8 @@ use super::imported_comments::render_imported_comments;
 use super::todos::{render_completed_todo_items, render_todos};
 use super::{
     add_highlights_to_rich_text, orchestration, render_autonomy_checkbox_setting_speedbump_footer,
-    render_citation_chips, WithContentItemSpacing, CONTENT_HORIZONTAL_PADDING,
-    CONTENT_ITEM_VERTICAL_MARGIN,
+    render_citation_chips, WithContentItemSpacing, AGENT_TOOL_BLOCK_BOTTOM_MARGIN,
+    CONTENT_HORIZONTAL_PADDING, CONTENT_ITEM_VERTICAL_MARGIN,
 };
 use crate::ai::agent::api::ServerConversationToken;
 use crate::ai::agent::comment::ReviewComment;
@@ -80,6 +80,7 @@ use crate::ai::blocklist::block::{
 use crate::ai::blocklist::history_model::BlocklistAIHistoryModel;
 use crate::ai::blocklist::inline_action::ask_user_question_view::AskUserQuestionView;
 use crate::ai::blocklist::inline_action::aws_bedrock_credentials_error::AwsBedrockCredentialsErrorView;
+use crate::ai::blocklist::inline_action::build_plan_card_view::BuildPlanCardView;
 use crate::ai::blocklist::inline_action::create_or_edit_document::CreateOrEditDocumentAction;
 use crate::ai::blocklist::inline_action::inline_action_header::{
     ExpandedConfig, HeaderConfig, InteractionMode, INLINE_ACTION_HEADER_VERTICAL_PADDING,
@@ -186,6 +187,9 @@ pub(crate) struct Props<'a> {
     /// `AIAgentActionId` and embeds it via `ChildView` when the action
     /// is rendered. Multi-card lifecycle = AIBlock lifecycle.
     pub(crate) run_agents_card_views: &'a HashMap<AIAgentActionId, ViewHandle<RunAgentsCardView>>,
+    /// Per-`create_documents`-action end-of-plan card. Embedded via `ChildView`
+    /// under a completed plan document so the user can build the plan.
+    pub(crate) build_plan_card_views: &'a HashMap<AIAgentActionId, ViewHandle<BuildPlanCardView>>,
     #[cfg(feature = "local_fs")]
     pub(crate) resolved_code_block_paths:
         &'a HashMap<std::path::PathBuf, Option<std::path::PathBuf>>,
@@ -343,9 +347,8 @@ pub(super) fn render(props: Props, app: &AppContext) -> Box<dyn Element> {
                                 },
                                 app,
                             );
-                            output_items.add_child(
-                                text_sections.with_agent_output_item_spacing(app).finish(),
-                            );
+                            output_items
+                                .add_child(text_sections.with_agent_output_item_spacing().finish());
                             has_rendered_first_text_section = true;
                         }
                         AIAgentOutputMessageType::Reasoning {
@@ -517,6 +520,7 @@ pub(super) fn render(props: Props, app: &AppContext) -> Box<dyn Element> {
                                     app,
                                     skill,
                                     action_index,
+                                    true,
                                 );
                                 output_items.add_child(maybe_collapse_action_summary(
                                     &agent_action.action,
@@ -804,6 +808,11 @@ pub(super) fn render(props: Props, app: &AppContext) -> Box<dyn Element> {
                                     props,
                                     app,
                                 ));
+                                // The plan document is complete: offer the
+                                // end-of-plan build card right beneath it.
+                                if let Some(card_view) = props.build_plan_card_views.get(id) {
+                                    output_items.add_child(ChildView::new(card_view).finish());
+                                }
                             }
                         }
                         AIAgentOutputMessageType::Action(
@@ -966,7 +975,7 @@ pub(super) fn render(props: Props, app: &AppContext) -> Box<dyn Element> {
                             if let Some(group) = props.imported_comments.get(id) {
                                 output_items.add_child(
                                     render_imported_comments(group, app)
-                                        .with_agent_output_item_spacing(app)
+                                        .with_agent_output_item_spacing()
                                         .finish(),
                                 );
                             }
@@ -1207,6 +1216,50 @@ pub(super) fn render(props: Props, app: &AppContext) -> Box<dyn Element> {
 
                             output_items.add_child(action.render(app).finish());
                         }
+                        // In-turn research sub-agent (run_subagent): render its
+                        // streamed steps as an expandable "Sub-agent" thread the
+                        // user can peek into. The harness parents a subtask to
+                        // this delegation and streams one agent_output message per
+                        // live step into it; we pull those here and render them in
+                        // a collapsible block (collapsed by default). The report is
+                        // the last step in the thread and is also returned to the
+                        // lead agent as the tool result.
+                        AIAgentOutputMessageType::Subagent(SubagentCall {
+                            subagent_type: SubagentType::Research,
+                            task_id: subagent_task_id,
+                        }) => {
+                            should_render_footer = false;
+                            should_render_suggestions = false;
+                            let subagent_task_id = TaskId::new(subagent_task_id.clone());
+                            let conversation = props.model.conversation(app);
+                            let is_finished = conversation
+                                .and_then(|c| c.is_subagent_task_finished(&subagent_task_id).ok())
+                                .unwrap_or(false);
+                            let header_text = if is_finished {
+                                "Sub-agent · researched".to_string()
+                            } else {
+                                "Sub-agent · researching…".to_string()
+                            };
+                            let thread_text = conversation
+                                .and_then(|c| c.subagent_thread_text(&subagent_task_id));
+                            let sections: &[AIAgentTextSection] = thread_text
+                                .as_ref()
+                                .map(|text| text.sections.as_slice())
+                                .unwrap_or(&[]);
+                            if let Some(element) = render_collapsible_block(
+                                output_message,
+                                header_text,
+                                sections,
+                                true,
+                                props,
+                                &mut has_rendered_first_text_section,
+                                &mut text_section_index,
+                                &mut code_section_index,
+                                app,
+                            ) {
+                                output_items.add_child(element);
+                            }
+                        }
                         _ => (),
                     };
                     if let AIAgentOutputMessageType::Action(..) = output_message.message {
@@ -1246,7 +1299,7 @@ pub(super) fn render(props: Props, app: &AppContext) -> Box<dyn Element> {
                                     "Sorry you had a bad experience with this interaction. We've refunded you 1 credit. We appreciate your feedback!"
                                         .to_string(),
                                 )
-                                .with_agent_output_item_spacing(app)
+                                .with_agent_output_item_spacing()
                                 .finish(),
                             );
                         }
@@ -1258,7 +1311,7 @@ pub(super) fn render(props: Props, app: &AppContext) -> Box<dyn Element> {
                                         "Sorry you had a bad experience with this interaction. We've refunded you {request_refunded_count} credits. We appreciate your feedback!"
                                     ),
                                 )
-                                .with_agent_output_item_spacing(app)
+                                .with_agent_output_item_spacing()
                                 .finish(),
                             );
                         }
@@ -1304,7 +1357,7 @@ pub(super) fn render(props: Props, app: &AppContext) -> Box<dyn Element> {
                             app,
                             "This response won't count towards your usage.".to_string(),
                         )
-                        .with_agent_output_item_spacing(app)
+                        .with_agent_output_item_spacing()
                         .finish(),
                     );
 
@@ -1329,7 +1382,7 @@ pub(super) fn render(props: Props, app: &AppContext) -> Box<dyn Element> {
                             |ctx| ctx.dispatch_typed_action(AIBlockAction::OpenFeedbackDocs),
                             app,
                         )
-                        .with_agent_output_item_spacing(app)
+                        .with_agent_output_item_spacing()
                         .finish(),
                     );
                 }
@@ -1654,6 +1707,7 @@ fn render_search_codebase(
                                     app,
                                     skill,
                                     0,
+                                    false,
                                 ));
                             }
                         }
@@ -1932,6 +1986,7 @@ fn render_read_files(
     app: &AppContext,
     parsed_skill: Option<&ai::skills::ParsedSkill>,
     action_index: usize,
+    flat: bool,
 ) -> Box<dyn Element> {
     let status = props.action_model.as_ref(app).get_action_status(id);
     let appearance = Appearance::as_ref(app);
@@ -1970,6 +2025,11 @@ fn render_read_files(
         }
         renderable_action = renderable_action
             .with_icon(action_icon(id, props.action_model, props.model, app).finish());
+        // When shown as the detail of a flat collapsible summary, render the file list
+        // flush (no fill box, no leading icon) so it matches the "Ran command" style.
+        if flat {
+            renderable_action = renderable_action.with_flat();
+        }
     }
 
     match props.autonomy_setting_speedbump {
@@ -2319,7 +2379,7 @@ fn render_requested_edits_output_message(
             )
             .top_center()
             .finish()
-            .with_agent_output_item_spacing(app)
+            .with_agent_output_item_spacing()
             .with_corner_radius(CornerRadius::with_all(Radius::Pixels(8.)))
             .with_background_color(theme.background().into_solid())
             .with_border(Border::all(1.).with_border_fill(border_color))
@@ -2341,10 +2401,7 @@ fn render_requested_edits_output_message(
                 {
                     container.finish().with_content_item_spacing().finish()
                 } else {
-                    container
-                        .finish()
-                        .with_agent_output_item_spacing(app)
-                        .finish()
+                    container.finish().with_agent_output_item_spacing().finish()
                 }
             }
             DisplayMode::InlineBanner { is_expanded, .. } => {
@@ -2446,7 +2503,7 @@ fn render_suggest_new_conversation(
                 false,
                 app,
             )
-            .with_agent_output_item_spacing(app)
+            .with_agent_output_item_spacing()
             .with_background_color(blended_colors::neutral_2(theme))
             .with_corner_radius(CornerRadius::with_all(Radius::Pixels(8.)))
             .finish(),
@@ -2460,7 +2517,7 @@ fn render_suggest_new_conversation(
 
         return Some(
             header_element
-                .with_agent_output_item_spacing(app)
+                .with_agent_output_item_spacing()
                 .with_corner_radius(CornerRadius::with_all(Radius::Pixels(8.)))
                 .with_background_color(blended_colors::neutral_2(theme))
                 .finish(),
@@ -3122,7 +3179,7 @@ fn render_references_footer(
         column.add_child(citations_row);
     }
 
-    Some(column.finish().with_agent_output_item_spacing(app).finish())
+    Some(column.finish().with_agent_output_item_spacing().finish())
 }
 
 /// Renders the suggested rules footer at the bottom of the block.
@@ -3218,7 +3275,7 @@ fn render_suggested_rules_and_prompts_footer(
             .with_child(title)
             .with_child(prompts_row.finish())
             .finish()
-            .with_agent_output_item_spacing(app)
+            .with_agent_output_item_spacing()
             .finish(),
     )
 }
@@ -3689,7 +3746,7 @@ fn render_collapsible_header(
                 Text::new(
                     header_text.clone(),
                     appearance.ai_font_family(),
-                    appearance.monospace_font_size(),
+                    appearance.ui_font_size(),
                 )
                 .with_color(text_color)
                 .with_selectable(false)
@@ -3808,7 +3865,12 @@ fn render_collapsible_action_summary(
 
     let id = action_id.clone();
     let is_expanded = state.is_expanded;
+    // Render as a minimal flat "command line" row so read-files / tool-usage
+    // summaries match the "Ran command" treatment: no fill box, no leading status
+    // glyph, dimmer text, flush-left with the shared agent margin, and an expand
+    // chevron beside the label that only appears on hover.
     let header_element = HeaderConfig::new(label, app)
+        .with_flat()
         .with_interaction_mode(InteractionMode::ManuallyExpandable(
             ExpandedConfig::new(is_expanded, state.header_toggle_mouse_state.clone())
                 .with_toggle_callback(move |ctx| {
@@ -3828,7 +3890,8 @@ fn render_collapsible_action_summary(
     }
     container
         .finish()
-        .with_agent_output_item_spacing(app)
+        .with_agent_output_item_spacing()
+        .with_margin_bottom(AGENT_TOOL_BLOCK_BOTTOM_MARGIN)
         .finish()
 }
 
@@ -3962,9 +4025,7 @@ fn render_collapsible_text_block_section(
         },
         app,
     );
-    let rendered_sections = rendered_sections
-        .with_agent_output_item_spacing(app)
-        .finish();
+    let rendered_sections = rendered_sections.with_agent_output_item_spacing().finish();
 
     // Use a larger height more amenable to reading once streaming is complete.
     // When thinking_display_mode is AlwaysShow, always use the larger height so the
@@ -4118,12 +4179,7 @@ fn render_collapsible_debug_output(
         );
     }
 
-    Some(
-        container
-            .finish()
-            .with_agent_output_item_spacing(app)
-            .finish(),
-    )
+    Some(container.finish().with_agent_output_item_spacing().finish())
 }
 
 // --- Conversation search phase detection ---

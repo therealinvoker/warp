@@ -470,6 +470,18 @@ pub enum TerminalAction {
     /// Triggered by Ctrl-G when a CLI agent is detected, or from the footer button.
     ToggleCLIAgentRichInput,
 
+    /// Start remote control (one-click session share) from the agent composer
+    /// footer's "/remote-control" chip. Dispatched as a `TerminalAction` (rather
+    /// than an `AgentInputFooterAction`) because the footer's "outside controls"
+    /// row is rendered inside `Input`'s element tree in the standard agent
+    /// composer, so a footer-scoped action would be dropped. `TerminalView` is a
+    /// guaranteed render-ancestor in every footer layout (standard, CLI, and
+    /// `UseAgentToolbar`).
+    StartRemoteControlChip,
+    /// Stop the shared session started from the footer's remote-control chip.
+    /// Counterpart to `StartRemoteControlChip`.
+    StopRemoteControlChip,
+
     /// Allow the blocked clipboard operation by adjusting the OSC 52 clipboard access setting.
     Osc52AllowBlockedClipboardOperation,
 }
@@ -759,6 +771,8 @@ impl fmt::Debug for TerminalAction {
             CycleNextOrchestrationChildAgent => write!(f, "CycleNextOrchestrationChildAgent"),
             ToggleSessionRecording => write!(f, "ToggleSessionRecording"),
             ToggleCLIAgentRichInput => write!(f, "ToggleCLIAgentRichInput"),
+            StartRemoteControlChip => f.write_str("StartRemoteControlChip"),
+            StopRemoteControlChip => f.write_str("StopRemoteControlChip"),
             Osc52AllowBlockedClipboardOperation => {
                 write!(f, "Osc52AllowBlockedClipboardOperation")
             }

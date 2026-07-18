@@ -688,6 +688,7 @@ default = [
     "pending_user_query_indicator",
     "queue_slash_command",
     "queued_prompts_v2",
+    "steer_slash_command",
     "cloud_mode_input_v2",
     "cloud_mode_setup_v2",
     "handoff_cloud_cloud",
@@ -1004,6 +1005,7 @@ owner_orchestration_ancestor_streamer = []
 pending_user_query_indicator = []
 queue_slash_command = []
 queued_prompts_v2 = ["queue_slash_command"]
+steer_slash_command = []
 inline_menu_headers = []
 directory_tab_colors = []
 open_warp_new_settings_modes = []

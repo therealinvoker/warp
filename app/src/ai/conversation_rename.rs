@@ -122,6 +122,79 @@ pub(crate) fn rename_conversation<T: View>(
     );
 }
 
+/// Propagates a tab rename to the tab's active agent conversation title.
+///
+/// Unlike [`rename_conversation`], this is a *silent*, client-authoritative side
+/// effect of renaming a session tab (not an explicit conversation rename), so it
+/// never surfaces toasts. The tab's custom name is always applied locally — so
+/// the conversation history list ("ACTIVE" / "PAST") reflects the tab name
+/// immediately and durably (the update also persists locally). The server is
+/// then notified best-effort; a sync failure is only logged and never reverts
+/// the local title, since the tab name is the source of truth here (and the
+/// harness backend may not support conversation renames at all).
+pub(crate) fn propagate_tab_rename_to_conversation<T: View>(
+    conversation_id: AIConversationId,
+    title: String,
+    ctx: &mut ViewContext<T>,
+) {
+    let title = title.trim();
+    if title.is_empty() {
+        return;
+    }
+    let title = title.to_owned();
+
+    // Don't label an empty conversation, and skip when the title already matches.
+    let history_ref = BlocklistAIHistoryModel::as_ref(ctx);
+    let conversation = history_ref.conversation(&conversation_id);
+    let should_skip = conversation.is_none_or(|conversation| {
+        conversation.is_empty() || conversation.title().as_deref() == Some(title.as_str())
+    });
+    if should_skip {
+        return;
+    }
+
+    // Apply locally first (and capture the server token, if any). This updates
+    // the history model and emits `UpdatedConversationTitle`, which refreshes the
+    // ACTIVE/PAST list; it also persists the new title to local storage.
+    let history = BlocklistAIHistoryModel::handle(ctx);
+    let server_conversation_id = history.update(ctx, |history, ctx| {
+        history.apply_conversation_title(conversation_id, title.clone(), ctx);
+        history
+            .conversation(&conversation_id)
+            .and_then(|conversation| conversation.server_conversation_token())
+            .map(|token| token.as_str().to_owned())
+    });
+
+    // Nothing to sync until the conversation has a server token; the local title
+    // already reflects the rename.
+    let Some(server_conversation_id) = server_conversation_id else {
+        return;
+    };
+
+    let server_api = ServerApiProvider::as_ref(ctx).get_ai_client();
+    ctx.spawn(
+        async move {
+            server_api
+                .rename_conversation(server_conversation_id, title)
+                .await
+        },
+        move |_, result, ctx| match result {
+            // Adopt any server-normalized title, but only as a further local
+            // update — never a revert.
+            Ok(response) => {
+                BlocklistAIHistoryModel::handle(ctx).update(ctx, |history, ctx| {
+                    history.apply_conversation_title(conversation_id, response.title, ctx);
+                });
+            }
+            Err(e) => {
+                log::warn!(
+                    "Tab-driven conversation rename not synced to server (keeping local title): {e}"
+                );
+            }
+        },
+    );
+}
+
 /// Returns whether the conversation's current local title already matches `title`,
 /// making the rename a no-op.
 fn conversation_already_has_title<T: View>(

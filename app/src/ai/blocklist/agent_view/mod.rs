@@ -1,5 +1,6 @@
 pub(crate) mod agent_input_footer;
 mod agent_message_bar;
+pub(crate) mod agent_progress_modal;
 mod agent_view_block;
 mod controller;
 mod conversation_selection;
@@ -11,6 +12,7 @@ pub(crate) mod orchestration_conversation_links;
 pub mod orchestration_pill_bar;
 pub mod orchestration_pill_bar_model;
 pub mod shortcuts;
+pub(crate) mod working_agents_indicator;
 mod zero_state_block;
 
 use std::sync::LazyLock;

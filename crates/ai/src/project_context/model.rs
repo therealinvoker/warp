@@ -19,6 +19,13 @@ cfg_if::cfg_if! {
     }
 }
 
+/// Directory (relative to a repo root) that holds Bang's per-repo state, and
+/// the auto-discovered memory file within it. Kept in sync with the same
+/// constants in `repo_metadata::standing_queries` (duplicated here to avoid
+/// coupling this non-`local_fs` code path to that feature-gated crate).
+const PROJECT_MEMORY_DIR: &str = ".bang";
+const PROJECT_MEMORY_FILE_NAME: &str = "memory.md";
+
 pub type ProjectRuleContents = Vec<(LocalOrRemotePath, String)>;
 /// App-provided transport for reading the exact rule paths discovered by repository metadata.
 ///
@@ -56,13 +63,26 @@ pub struct ProjectRule {
 #[derive(Debug, Clone)]
 struct RuleAtPath {
     parent_path: LocalOrRemotePath,
+    /// Bang's native project-rules file (`BANG.md`). Takes precedence over the
+    /// legacy `warp_md` and over `agents_md`.
+    bang_md: Option<ProjectRule>,
+    /// Legacy project-rules file (`WARP.md`), still read for backward
+    /// compatibility. Shadowed by `bang_md` when both exist in a directory.
     warp_md: Option<ProjectRule>,
     agents_md: Option<ProjectRule>,
+    /// Auto-discovered per-repo memory (`<parent>/.bang/memory.md`). Unlike
+    /// `bang_md`/`warp_md`/`agents_md` (which shadow each other), memory is
+    /// always active alongside the respected rule so its facts reach every
+    /// request.
+    memory_md: Option<ProjectRule>,
 }
 
 impl RuleAtPath {
     fn respected_rule(&self) -> Option<&ProjectRule> {
-        self.warp_md.as_ref().or(self.agents_md.as_ref())
+        self.bang_md
+            .as_ref()
+            .or(self.warp_md.as_ref())
+            .or(self.agents_md.as_ref())
     }
 }
 
@@ -96,9 +116,11 @@ impl ProjectRules {
     #[cfg_attr(not(feature = "local_fs"), allow(dead_code))]
     fn rule_paths(&self) -> impl Iterator<Item = &LocalOrRemotePath> {
         self.rules.iter().flat_map(|rule| {
-            rule.warp_md
+            rule.bang_md
                 .iter()
+                .chain(rule.warp_md.iter())
                 .chain(rule.agents_md.iter())
+                .chain(rule.memory_md.iter())
                 .map(|rule| &rule.path)
         })
     }
@@ -110,6 +132,13 @@ impl ProjectRules {
     #[cfg_attr(not(feature = "local_fs"), allow(dead_code))]
     fn retain_rule_paths(&mut self, retained_paths: &HashSet<LocalOrRemotePath>) {
         self.rules.retain_mut(|rule| {
+            if rule
+                .bang_md
+                .as_ref()
+                .is_some_and(|rule| !retained_paths.contains(&rule.path))
+            {
+                rule.bang_md = None;
+            }
             if rule
                 .warp_md
                 .as_ref()
@@ -124,7 +153,17 @@ impl ProjectRules {
             {
                 rule.agents_md = None;
             }
-            rule.warp_md.is_some() || rule.agents_md.is_some()
+            if rule
+                .memory_md
+                .as_ref()
+                .is_some_and(|rule| !retained_paths.contains(&rule.path))
+            {
+                rule.memory_md = None;
+            }
+            rule.bang_md.is_some()
+                || rule.warp_md.is_some()
+                || rule.agents_md.is_some()
+                || rule.memory_md.is_some()
         });
     }
     /// Finds the set of rules that are active in the given path and the set that are available to be applied.
@@ -134,12 +173,22 @@ impl ProjectRules {
 
         // Collect all applicable rules (rules in directories that are ancestors of the target path)
         for rule in &self.rules {
+            // Check if the rule's directory is an ancestor of or equal to the target path
+            let is_ancestor = path.starts_with(&rule.parent_path);
             if let Some(respected_rule) = rule.respected_rule() {
-                // Check if the rule's directory is an ancestor of or equal to the target path
-                if path.starts_with(&rule.parent_path) {
+                if is_ancestor {
                     active_rules.push(respected_rule.clone());
                 } else {
                     available_rule_paths.push(respected_rule.path.display_path());
+                }
+            }
+            // Memory is independent of the BANG.md/WARP.md/AGENTS.md shadow:
+            // include it whenever its scope covers the target path.
+            if let Some(memory_rule) = rule.memory_md.as_ref() {
+                if is_ancestor {
+                    active_rules.push(memory_rule.clone());
+                } else {
+                    available_rule_paths.push(memory_rule.path.display_path());
                 }
             }
         }
@@ -154,10 +203,26 @@ impl ProjectRules {
     /// otherwise.
     #[cfg_attr(not(feature = "local_fs"), allow(dead_code))]
     fn upsert_rule(&mut self, path: &LocalOrRemotePath, content: String) {
-        let Some(parent) = path.parent() else {
+        let Some(file_name) = path.file_name() else {
             return;
         };
-        let Some(file_name) = path.file_name() else {
+        let file_name = file_name.to_lowercase();
+
+        // `.bang/memory.md` is scoped to the directory that CONTAINS `.bang`
+        // (its grandparent) so it applies repo-wide like a root AGENTS.md,
+        // rather than only to paths under `.bang/`.
+        let is_memory = file_name == PROJECT_MEMORY_FILE_NAME
+            && path
+                .parent()
+                .and_then(|dir| dir.file_name().map(str::to_owned))
+                .is_some_and(|name| name.eq_ignore_ascii_case(PROJECT_MEMORY_DIR));
+
+        let parent = if is_memory {
+            path.parent().and_then(|dir| dir.parent())
+        } else {
+            path.parent()
+        };
+        let Some(parent) = parent else {
             return;
         };
 
@@ -166,38 +231,38 @@ impl ProjectRules {
             .iter_mut()
             .find(|rule| rule.parent_path == parent);
 
-        let rule_file = Some(ProjectRule {
+        let mut rule_file = Some(ProjectRule {
             path: path.clone(),
             content,
         });
 
-        match existing_rule {
-            Some(rule) => {
-                if file_name.to_lowercase() == "warp.md" {
-                    rule.warp_md = rule_file;
-                } else if file_name.to_lowercase() == "agents.md" {
-                    rule.agents_md = rule_file;
-                }
-            }
+        let rule = match existing_rule {
+            Some(rule) => rule,
             None => {
-                let mut rule = RuleAtPath {
+                self.rules.push(RuleAtPath {
                     parent_path: parent,
+                    bang_md: None,
                     warp_md: None,
                     agents_md: None,
-                };
-                if file_name.to_lowercase() == "warp.md" {
-                    rule.warp_md = rule_file;
-                } else if file_name.to_lowercase() == "agents.md" {
-                    rule.agents_md = rule_file;
-                }
-                self.rules.push(rule);
+                    memory_md: None,
+                });
+                self.rules.last_mut().expect("just pushed")
             }
         };
+        if is_memory {
+            rule.memory_md = rule_file.take();
+        } else if file_name == "bang.md" {
+            rule.bang_md = rule_file.take();
+        } else if file_name == "warp.md" {
+            rule.warp_md = rule_file.take();
+        } else if file_name == "agents.md" {
+            rule.agents_md = rule_file.take();
+        }
     }
 }
 
 /// Singleton model that keeps track of mapping between paths and rule files
-/// Currently supports WARP.md files, but designed to be extensible
+/// Currently supports BANG.md (and legacy WARP.md) files, but designed to be extensible
 #[cfg_attr(not(feature = "local_fs"), allow(dead_code))]
 #[derive(Default)]
 pub struct ProjectContextModel {
@@ -530,10 +595,11 @@ impl ProjectContextModel {
     /// Returns the rules applicable to `path`, layering global rules on top of
     /// any project rules discovered up the directory tree.
     ///
-    /// Precedence is `global > project WARP.md > project AGENTS.md`. Globals
-    /// are always included (when present) regardless of project state; the
-    /// existing in-directory `WARP.md > AGENTS.md` shadow inside
-    /// [`RuleAtPath::respected_rule`] still applies to project rules.
+    /// Precedence is `global > project BANG.md > project WARP.md > project
+    /// AGENTS.md`. Globals are always included (when present) regardless of
+    /// project state; the existing in-directory `BANG.md > WARP.md > AGENTS.md`
+    /// shadow inside [`RuleAtPath::respected_rule`] still applies to project
+    /// rules.
     ///
     /// This is the entry point used by `BlocklistAIContextModel` when packing
     /// `AIAgentContext::ProjectRules` for an agent query. Callers that need

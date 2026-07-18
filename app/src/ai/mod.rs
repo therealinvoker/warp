@@ -42,6 +42,8 @@ pub(crate) mod metadata_project_rules;
 pub mod onboarding;
 pub(crate) mod persisted_workspace;
 pub(crate) mod predict;
+#[cfg(all(feature = "local_fs", not(target_family = "wasm")))]
+pub(crate) mod project_memory;
 #[cfg(all(not(target_family = "wasm"), feature = "local_fs"))]
 pub(crate) mod remote_agent_context;
 pub(crate) mod remote_context_files;

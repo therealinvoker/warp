@@ -170,6 +170,11 @@ struct CodeEditorViewDisplayOptions {
     can_show_diff_ui: bool,
     collapsible_diffs: bool,
     show_line_numbers: bool,
+    /// When `true`, the line-number gutter shrinks to fit the widest line number
+    /// (left-aligned) instead of the fixed [`GUTTER_WIDTH`]. Used by read-only
+    /// snippet editors (e.g. agent-message code blocks) so the code has symmetric
+    /// left/right padding rather than being pushed right by the full gutter.
+    compact_gutter: bool,
     scroll_wheel_behavior: ScrollWheelBehavior,
     horizontal_scrollbar_appearance: ScrollableAppearance,
     vertical_scrollbar_appearance: ScrollableAppearance,
@@ -394,6 +399,7 @@ impl CodeEditorView {
                 can_show_diff_ui: true,
                 collapsible_diffs: true,
                 show_line_numbers: true,
+                compact_gutter: false,
                 starting_line_number: None,
                 show_nav_bar: true,
                 diff_hunk_as_context: Default::default(),
@@ -846,7 +852,7 @@ impl CodeEditorView {
         // CodeEditorView also includes a gutter (line numbers). We need to offset
         // the bounds by the gutter width when line numbers are shown.
         let gutter_offset = if self.display_options.show_line_numbers {
-            super::element::GUTTER_WIDTH
+            self.gutter_width(app)
         } else {
             0.0
         };
@@ -911,6 +917,33 @@ impl CodeEditorView {
     pub(crate) fn with_show_line_numbers(mut self, show_line_numbers: bool) -> Self {
         self.display_options.show_line_numbers = show_line_numbers;
         self
+    }
+
+    /// Shrinks the line-number gutter to fit the widest line number (left-aligned)
+    /// so the code has symmetric left/right padding. Intended for read-only snippet
+    /// editors such as agent-message code blocks.
+    pub(crate) fn with_compact_gutter(mut self) -> Self {
+        self.display_options.compact_gutter = true;
+        self
+    }
+
+    /// The width of the line-number gutter for this editor. Defaults to
+    /// [`super::element::GUTTER_WIDTH`]; a compact-gutter editor uses a narrower
+    /// width sized to fit the widest displayed line number.
+    fn gutter_width(&self, ctx: &AppContext) -> f32 {
+        if !self.display_options.compact_gutter {
+            return super::element::GUTTER_WIDTH;
+        }
+
+        let appearance = Appearance::as_ref(ctx);
+        let line_count = self.model.as_ref(ctx).line_count(ctx);
+        let max_line_number = line_count + self.display_options.starting_line_number.unwrap_or(1);
+        let digits = max_line_number.to_string().len().max(2);
+        let em_width = ctx.font_cache().em_width(
+            appearance.monospace_font_family(),
+            appearance.monospace_font_size(),
+        );
+        (digits as f32 * em_width + super::element::COMPACT_GUTTER_TRAILING_GAP).ceil()
     }
 
     pub(crate) fn with_horizontal_scrollbar_appearance(
@@ -1217,6 +1250,8 @@ impl CodeEditorView {
                 mode: *editor_settings.code_editor_line_number_mode.value(),
                 active_line_number: self.active_cursor_line_for_line_numbers(ctx),
                 active_cursor_is_visible: self.is_focused(ctx) && self.is_editable(ctx),
+                gutter_width: self.gutter_width(ctx),
+                left_align: self.display_options.compact_gutter,
             })
         } else {
             None

@@ -686,7 +686,7 @@ const DEFAULT_AI_BLOCK_HEIGHT: f32 = 96.;
 
 pub const DEFAULT_ASK_AI_AUTOSUGGESTION_TEXT: &str = "What happened here?";
 
-const WARP_MD_PATH: &str = "WARP.md";
+const BANG_MD_PATH: &str = "BANG.md";
 
 pub const LONG_RUNNING_AGENT_REQUESTED_COMMAND_CONTEXT_KEY: &str = "LongRunningRequestedCommand";
 pub const LONG_RUNNING_AGENT_REQUESTED_COMMAND_USER_TOOK_OVER_CONTEXT_KEY: &str =
@@ -2311,6 +2311,11 @@ pub struct TerminalViewRenderContext {
     pub link_tool_tip: Option<GridHighlightedLink>,
     pub is_terminal_focused: bool,
     pub is_terminal_selecting: bool,
+    /// True while a text selection is actively being dragged inside a rich
+    /// content (AI) block's `SelectableArea`. These selections are owned by the
+    /// block, not the point-based grid selection, so the block list needs this
+    /// signal to drive autoscroll-on-drag toward the viewport edges.
+    pub is_rich_content_selecting: bool,
     pub is_context_menu_open: bool,
     pub is_waterfall_gap_mode: bool,
     pub pane_state: SplitPaneState,
@@ -3253,6 +3258,13 @@ impl TerminalView {
                                 ScrollPositionUpdate::AfterEnterAgentView,
                                 ctx,
                             );
+                            // Seed the prompt context from the current active block so the
+                            // agent footer's context chips (notably the working-directory
+                            // chip) render at rest, without requiring a first interaction.
+                            // `refresh_warp_prompt` calls `CurrentPrompt::update_context`,
+                            // which resolves the `WorkingDirectory` contextual generator
+                            // from the active block's CWD.
+                            me.refresh_warp_prompt(ctx);
                             ctx.notify();
                         }
                     }
@@ -6822,6 +6834,74 @@ impl TerminalView {
         });
     }
 
+    /// Prompt used to lift `/plan` mode's research-only restriction and start
+    /// implementing the plan the agent just wrote.
+    const BUILD_PLAN_PROMPT: &'static str =
+        "Implement the plan you just wrote. You may now edit files and run commands.";
+
+    /// Handle [`AIBlockEvent::BuildPlanLocally`]: start a Normal-mode turn in the
+    /// same conversation so the harness resets plan mode (full tools return) and
+    /// the agent implements the plan in this session.
+    fn handle_build_plan_locally(
+        &mut self,
+        conversation_id: AIConversationId,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        self.ai_controller.update(ctx, |controller, ctx| {
+            controller.send_user_query_in_conversation(
+                Self::BUILD_PLAN_PROMPT.to_string(),
+                conversation_id,
+                None,
+                ctx,
+            );
+        });
+    }
+
+    /// Handle [`AIBlockEvent::BuildPlanInCloud`]: seed a local→cloud handoff with
+    /// the plan document so a fresh cloud agent implements it.
+    fn handle_build_plan_in_cloud(
+        &mut self,
+        conversation_id: AIConversationId,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let document_id =
+            AIDocumentModel::as_ref(ctx).get_document_id_by_conversation_id(conversation_id);
+        let plan_text = document_id.and_then(|document_id| {
+            AIDocumentModel::as_ref(ctx).get_document_content(&document_id, ctx)
+        });
+        let prompt = match plan_text {
+            Some(plan) if !plan.trim().is_empty() => {
+                format!("Implement this plan:\n\n{plan}")
+            }
+            _ => Self::BUILD_PLAN_PROMPT.to_string(),
+        };
+
+        #[cfg(all(feature = "local_fs", not(target_family = "wasm")))]
+        {
+            use crate::ai::ambient_agents::telemetry::HandoffEntryPoint;
+            use crate::ai::blocklist::handoff::{HandoffLaunchAttachments, PendingCloudLaunch};
+
+            let launch = PendingCloudLaunch {
+                prompt,
+                attachments: HandoffLaunchAttachments::default(),
+            };
+            ctx.dispatch_typed_action_deferred(WorkspaceAction::OpenLocalToCloudHandoffPane {
+                launch: Some(launch),
+                environment_id: None,
+                entry_point: HandoffEntryPoint::FooterChip,
+            });
+        }
+
+        #[cfg(not(all(feature = "local_fs", not(target_family = "wasm"))))]
+        {
+            let _ = prompt;
+            self.show_error_toast(
+                "Building in the cloud isn't available in this build.".to_string(),
+                ctx,
+            );
+        }
+    }
+
     /// Handle the opening and closing of the usage footer.
     /// We insert the usage footer as a rich content view into the blocklist
     /// below the block that triggered the toggle event.
@@ -8761,6 +8841,21 @@ impl TerminalView {
             rich_content
                 .ai_block_metadata()
                 .is_some_and(|metadata| metadata.ai_block_handle.is_self_or_child_focused(ctx))
+        })
+    }
+
+    /// Returns `true` while a text selection is actively being dragged inside any
+    /// AI block's own `SelectableArea`. These block-owned selections don't set
+    /// `is_selecting` (the point-based grid selection flag), so the block list
+    /// relies on this signal to drive autoscroll-on-drag toward the viewport edges.
+    fn is_rich_content_selecting(&self, ctx: &AppContext) -> bool {
+        self.rich_content_views.iter().any(|rich_content| {
+            rich_content.ai_block_metadata().is_some_and(|metadata| {
+                metadata
+                    .ai_block_handle
+                    .as_ref(ctx)
+                    .is_block_level_selecting()
+            })
         })
     }
 
@@ -20325,6 +20420,12 @@ impl TerminalView {
                     is_auto_open: *is_auto_open,
                 });
             }
+            AIBlockEvent::BuildPlanLocally { conversation_id } => {
+                self.handle_build_plan_locally(*conversation_id, ctx);
+            }
+            AIBlockEvent::BuildPlanInCloud { conversation_id } => {
+                self.handle_build_plan_in_cloud(*conversation_id, ctx);
+            }
             AIBlockEvent::OpenActiveAgentProfileEditor => {
                 let profiles_model = AIExecutionProfilesModel::as_ref(ctx);
                 let active_profile = profiles_model.active_profile(Some(self.view_id), ctx);
@@ -21420,15 +21521,26 @@ impl TerminalView {
                             .ambient_agent_view_model
                             .as_ref()
                             .is_some_and(|model| model.as_ref(ctx).is_in_setup());
-                        if !is_in_setup && !self.input.as_ref(ctx).buffer_text(ctx).is_empty() {
-                            self.agent_view_controller.update(ctx, |session, ctx| {
-                                session.exit_agent_view_with_required_confirmation(
-                                    ExitConfirmationTrigger::Escape,
-                                    ctx,
-                                );
-                            });
-                        } else {
+                        // In the fullscreen agent composer, Escape must no longer drop the user back
+                        // to the terminal — leaving to terminal mode is now reachable only via the
+                        // `/terminal` slash command (or the `!` prefix). We therefore only exit on
+                        // Escape during first-time setup or from the inline agent view; a plain
+                        // Escape in the fullscreen composer keeps the user in agent mode. Other exit
+                        // affordances (the back button / `ExitAgentView` action) remain available.
+                        let is_fullscreen = self.agent_view_controller.as_ref(ctx).is_fullscreen();
+                        if is_in_setup {
                             self.exit_agent_view(ctx);
+                        } else if !is_fullscreen {
+                            if !self.input.as_ref(ctx).buffer_text(ctx).is_empty() {
+                                self.agent_view_controller.update(ctx, |session, ctx| {
+                                    session.exit_agent_view_with_required_confirmation(
+                                        ExitConfirmationTrigger::Escape,
+                                        ctx,
+                                    );
+                                });
+                            } else {
+                                self.exit_agent_view(ctx);
+                            }
                         }
                     }
                 }
@@ -23206,6 +23318,7 @@ impl TerminalView {
                 .expect("terminal should upgrade")
                 .is_focused(app),
             is_terminal_selecting: self.is_selecting(),
+            is_rich_content_selecting: self.is_rich_content_selecting(app),
             is_context_menu_open: self.is_context_menu_open(),
             is_waterfall_gap_mode: self.is_waterfall_gap_mode(model, app),
             pane_state,
@@ -26315,6 +26428,8 @@ impl TypedActionView for TerminalView {
             | CycleNextOrchestrationChildAgent
             | ToggleCLIAgentRichInput
             | ToggleSessionRecording
+            | StartRemoteControlChip
+            | StopRemoteControlChip
             | Osc52AllowBlockedClipboardOperation => Empty,
         }
     }
@@ -27206,12 +27321,12 @@ impl TypedActionView for TerminalView {
             }
             OpenProjectRulesPane => {
                 if let Some(current_dir) = self.pwd() {
-                    let mut warp_md_path = PathBuf::from(&current_dir);
-                    warp_md_path.push(WARP_MD_PATH);
+                    let mut bang_md_path = PathBuf::from(&current_dir);
+                    bang_md_path.push(BANG_MD_PATH);
                     #[cfg(feature = "local_fs")]
                     ctx.emit(Event::OpenCodeInWarp {
                         source: CodeSource::ProjectRules {
-                            location: LocalOrRemotePath::Local(warp_md_path),
+                            location: LocalOrRemotePath::Local(bang_md_path),
                         },
                         layout: *crate::util::file::external_editor::EditorSettings::as_ref(ctx)
                             .open_file_layout
@@ -27527,6 +27642,32 @@ impl TypedActionView for TerminalView {
                     ctx.notify();
                 }
             }
+            StartRemoteControlChip => {
+                // Match the CLI footer chip behavior: CLI agent sessions share
+                // without scrollback (and auto-stop when the agent ends), while
+                // the standard agent composer shares with full scrollback.
+                let scrollback_type = if self.active_cli_agent(ctx).is_some() {
+                    SharedSessionScrollbackType::None
+                } else {
+                    SharedSessionScrollbackType::All
+                };
+                self.auto_stop_sharing_on_cli_end =
+                    scrollback_type == SharedSessionScrollbackType::None;
+                let source = SharedSessionSource::user(
+                    self.active_conversation_task_id(ctx).map(|t| t.to_string()),
+                );
+                self.attempt_to_share_session(
+                    scrollback_type,
+                    Some(SharedSessionActionSource::FooterChip),
+                    source,
+                    true,
+                    ctx,
+                );
+            }
+            StopRemoteControlChip => {
+                self.auto_stop_sharing_on_cli_end = false;
+                self.stop_sharing_session(SharedSessionActionSource::FooterChip, ctx);
+            }
         }
     }
 }
@@ -27643,6 +27784,22 @@ impl View for TerminalView {
                         && self.is_input_box_visible(&model, app)
                         && model.is_block_list_empty();
 
+                    // In fullscreen Agent View, render the composer as a floating
+                    // overlay pinned to the bottom of the pane (added to the stack
+                    // below) instead of as a flow sibling beneath the block list. As
+                    // a flow sibling it could be clipped or overlaid while the agent
+                    // streamed multiple tool blocks; as a pinned overlay it always
+                    // stays put on top. The block list keeps a bottom spacer equal to
+                    // the composer's measured height so the newest content clears the
+                    // pinned composer rather than rendering behind it.
+                    let use_floating_pinned_input = !is_empty_first_run
+                        && matches!(input_mode, InputMode::PinnedToBottom)
+                        && FeatureFlag::AgentView.is_enabled()
+                        && self.agent_view_controller.as_ref(app).is_fullscreen()
+                        && !is_alt_screen_active
+                        && !should_show_loading
+                        && self.is_input_box_visible(&model, app);
+
                     if is_empty_first_run {
                         is_centered_empty_state = true;
                         column.add_child(
@@ -27673,7 +27830,24 @@ impl View for TerminalView {
                             column.add_child(ChildView::new(&self.use_agent_footer).finish());
                         }
 
-                        if self.is_input_box_visible(&model, app) {
+                        if use_floating_pinned_input {
+                            // Reserve space equal to the composer's measured height so
+                            // the latest content settles just above the floating
+                            // composer instead of underneath it. The composer itself
+                            // is rendered as a bottom-pinned overlay on the stack.
+                            let input_height_px = crate::terminal::element_size_at_last_frame(
+                                self.input.as_ref(app).save_position_id().as_str(),
+                                self.window_id,
+                                app,
+                            )
+                            .map_or(0., |size| size.y());
+
+                            column.add_child(
+                                ConstrainedBox::new(Empty::new().finish())
+                                    .with_height(input_height_px)
+                                    .finish(),
+                            );
+                        } else if self.is_input_box_visible(&model, app) {
                             column.add_child(self.render_input());
                         } else if self
                             .should_render_legacy_ambient_agent_loading_footer(&model, app)
@@ -27686,9 +27860,22 @@ impl View for TerminalView {
                         }
                     }
 
-                    let stack = Stack::new()
+                    let mut stack = Stack::new()
                         .with_constrain_absolute_children()
                         .with_child(Clipped::new(column.finish()).finish());
+
+                    if use_floating_pinned_input {
+                        stack.add_positioned_overlay_child(
+                            self.render_input(),
+                            OffsetPositioning::offset_from_parent(
+                                Vector2F::zero(),
+                                ParentOffsetBounds::ParentBySize,
+                                ParentAnchor::BottomLeft,
+                                ChildAnchor::BottomLeft,
+                            ),
+                        );
+                    }
+
                     if matches!(input_mode, InputMode::Waterfall) && !is_alt_screen_active {
                         self.render_waterfall_mode_background(&model, stack, app)
                     } else {

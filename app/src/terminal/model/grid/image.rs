@@ -57,6 +57,32 @@ impl GridHandler {
     ) -> Option<&ImagePlacementData> {
         self.images.get_image_placement_data(image_id, placement_id)
     }
+
+    /// Returns the inline images present in this grid (image id + logical size),
+    /// ordered top to bottom. Used to render a block's images declaratively
+    /// (outside the grid paint path) — e.g. inline command output in the agent
+    /// conversation view. Skips zero-height placements, matching the grid paint
+    /// path's guard in [`ImageMap::get_image_ids_by_rectangle`].
+    pub fn output_image_placements(&self) -> Vec<InlineImagePlacement> {
+        if self.has_displayed_output() {
+            return vec![];
+        }
+        self.images
+            .all_placements_top_to_bottom()
+            .into_iter()
+            .filter(|(_, _, data)| data.height_cells != 0)
+            .map(|(image_id, _placement_id, data)| InlineImagePlacement {
+                image_id,
+                image_size: data.image_size,
+            })
+            .collect()
+    }
+}
+
+/// A single inline image within a grid, resolved for declarative rendering.
+pub struct InlineImagePlacement {
+    pub image_id: u32,
+    pub image_size: pathfinder_geometry::vector::Vector2F,
 }
 
 pub struct ImagePlacement {

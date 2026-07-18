@@ -40,6 +40,24 @@ impl ImageMap {
         self.image_placement_data.get(&(image_id, placement_id))
     }
 
+    /// Returns every image placement currently held in the map, ordered from
+    /// top to bottom by the placement's primary point (its top-left cell). This
+    /// is used to surface a block's inline images outside of the coordinate-based
+    /// grid paint path (e.g. when rendering a middle command's output inline in
+    /// the agent conversation view, where images are laid out declaratively
+    /// rather than composited by grid position).
+    pub fn all_placements_top_to_bottom(&self) -> Vec<(u32, u32, ImagePlacementData)> {
+        self.image_ids_by_point
+            .values()
+            .flat_map(|image_ids| image_ids.iter().copied())
+            .filter_map(|(image_id, placement_id)| {
+                self.image_placement_data
+                    .get(&(image_id, placement_id))
+                    .map(|data| (image_id, placement_id, data.clone()))
+            })
+            .collect()
+    }
+
     pub fn add_image_placement_data(
         &mut self,
         image_id: u32,

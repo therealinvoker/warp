@@ -3,18 +3,20 @@
 //! Each card is a `View` keyed by `AIAgentActionId`, embedded by
 //! `AIBlock` via `ChildView`. Keybindings and Accept dispatch live on
 //! the view; only `RejectRequested` flows back to the parent.
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
 use ai::agent::action::{RunAgentsAgentRunConfig, RunAgentsExecutionMode, RunAgentsRequest};
-use ai::agent::action_result::{RunAgentsAgentOutcomeKind, RunAgentsResult};
+use ai::agent::action_result::{RunAgentsAgentOutcome, RunAgentsAgentOutcomeKind, RunAgentsResult};
 use ai::agent::orchestration_config::{OrchestrationConfig, OrchestrationConfigStatus};
 use ai::skills::SkillReference;
 use pathfinder_geometry::vector::vec2f;
 use warp_core::send_telemetry_from_ctx;
 use warpui::elements::{
     Border, ChildAnchor, ChildView, Container, CornerRadius, CrossAxisAlignment, Empty, Flex,
-    OffsetPositioning, ParentAnchor, ParentElement, ParentOffsetBounds, Radius, Stack, Text, Wrap,
+    MouseStateHandle, OffsetPositioning, ParentAnchor, ParentElement, ParentOffsetBounds, Radius,
+    Stack, Text, Wrap,
 };
 use warpui::keymap::FixedBinding;
 use warpui::{
@@ -22,11 +24,14 @@ use warpui::{
     ViewHandle,
 };
 
-use crate::ai::agent::conversation::AIConversationId;
+use crate::ai::agent::conversation::{AIConversationId, StatusColorStyle};
 use crate::ai::agent::{icons, AIAgentActionId, AIAgentActionResultType};
 use crate::ai::blocklist::action_model::{
     AIActionStatus, BlocklistAIActionEvent, BlocklistAIActionModel, RunAgentsExecutor,
     RunAgentsExecutorEvent, RunAgentsSpawningSnapshot,
+};
+use crate::ai::blocklist::agent_view::orchestration_conversation_links::{
+    conversation_id_for_agent_id, conversation_navigation_card_with_icon,
 };
 use crate::ai::blocklist::agent_view::orchestration_pill_bar::render_static_agent_pill;
 use crate::ai::blocklist::block::model::AIBlockModel;
@@ -37,19 +42,17 @@ use crate::ai::blocklist::inline_action::create_environment_modal::{
 };
 use crate::ai::blocklist::inline_action::host_picker::{HostPicker, HostPickerEvent};
 use crate::ai::blocklist::inline_action::inline_action_header::{HeaderConfig, InteractionMode};
-use crate::ai::blocklist::inline_action::inline_action_icons;
 use crate::ai::blocklist::inline_action::orchestration_controls::{
     self as oc, AuthSecretSelection, OrchestrationControlAction, OrchestrationPickerHandles,
 };
-use crate::ai::blocklist::inline_action::requested_action::{
-    render_requested_action_row_for_text, CTRL_C_KEYSTROKE, ENTER_KEYSTROKE,
-};
+use crate::ai::blocklist::inline_action::requested_action::{CTRL_C_KEYSTROKE, ENTER_KEYSTROKE};
 use crate::ai::blocklist::telemetry::{
     orchestration_modified_field, BlocklistOrchestrationTelemetryEvent,
     OrchestrationApprovalStatus, OrchestrationEnteredEvent, OrchestrationEntrySource,
     OrchestrationExecutionModeKind, OrchestrationHarnessKind, RunAgentsCardDecision,
     RunAgentsCardDecisionEvent,
 };
+use crate::ai::blocklist::BlocklistAIHistoryModel;
 use crate::ai::connected_self_hosted_workers::{
     ConnectedSelfHostedWorkersEvent, ConnectedSelfHostedWorkersModel,
 };
@@ -58,6 +61,7 @@ use crate::ai::harness_availability::{
 };
 use crate::ai::llms::{LLMPreferences, LLMPreferencesEvent};
 use crate::appearance::Appearance;
+use crate::features::FeatureFlag;
 use crate::menu::{Event as MenuEvent, Menu, MenuItemFields, MenuVariant};
 use crate::ui_components::blended_colors;
 use crate::ui_components::icons::Icon;
@@ -68,6 +72,7 @@ use crate::view_components::compactible_action_button::{
 use crate::view_components::compactible_split_action_button::CompactibleSplitActionButton;
 use crate::view_components::dropdown::DropdownEvent;
 use crate::view_components::{FilterableDropdownEvent, FilterableDropdownOrientation};
+use crate::workspace::WorkspaceAction;
 
 const RUN_AGENTS_CARD_TITLE: &str = "Can I start additional agents for this task?";
 
@@ -244,6 +249,11 @@ pub struct RunAgentsCardView {
     /// One-shot guard: cancelling the auto-popped modal must not re-pop.
     /// Reset on harness / execution-mode change.
     has_auto_opened_create_modal: bool,
+    /// Persisted hover state for the in-stream "launched agent" links shown in
+    /// the terminal-state card once agents have spawned, keyed by agent id.
+    /// Gated behind [`FeatureFlag::AgentProgressUI`]; each link opens the
+    /// read-only progress modal for that worker.
+    launched_link_mouse_states: RefCell<HashMap<String, MouseStateHandle>>,
 }
 
 /// Resolves UI-only interactive defaults on edit state that has
@@ -493,6 +503,7 @@ impl RunAgentsCardView {
             entered_event_emitted: false,
             decision_event_emitted: false,
             has_auto_opened_create_modal: false,
+            launched_link_mouse_states: Default::default(),
         };
 
         view.ensure_pickers(ctx);
@@ -937,6 +948,72 @@ impl RunAgentsCardView {
     fn get_position_id_for_accept_split_button(prefix: &str) -> String {
         format!("RunAgentsCardView-{prefix}-accept-split")
     }
+
+    /// Renders a clickable in-stream link per successfully-launched worker.
+    /// Each link opens the read-only live progress modal for that worker. Only
+    /// shown when [`FeatureFlag::AgentProgressUI`] is enabled and at least one
+    /// agent launched; returns `None` otherwise so the terminal-state card
+    /// renders on its own.
+    fn render_launched_agent_links(
+        &self,
+        result: &RunAgentsResult,
+        app: &AppContext,
+    ) -> Option<Box<dyn Element>> {
+        if !FeatureFlag::AgentProgressUI.is_enabled() {
+            return None;
+        }
+        let RunAgentsResult::Launched { agents, .. } = result else {
+            return None;
+        };
+        let theme = Appearance::as_ref(app).theme();
+        let history = BlocklistAIHistoryModel::as_ref(app);
+
+        let mut column = Flex::column()
+            .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
+            .with_main_axis_size(warpui::elements::MainAxisSize::Min);
+        let mut rendered_any = false;
+        for agent in agents {
+            let RunAgentsAgentOutcome {
+                name,
+                kind: RunAgentsAgentOutcomeKind::Launched { agent_id },
+            } = agent
+            else {
+                continue;
+            };
+            let Some(conversation_id) = conversation_id_for_agent_id(agent_id, app) else {
+                continue;
+            };
+            let icon = history.conversation(&conversation_id).map(|conversation| {
+                conversation
+                    .status()
+                    .status_icon_and_color(theme, StatusColorStyle::Standard)
+            });
+            let mouse_state = self
+                .launched_link_mouse_states
+                .borrow_mut()
+                .entry(agent_id.clone())
+                .or_default()
+                .clone();
+            let card = conversation_navigation_card_with_icon(
+                icon,
+                name.clone(),
+                None,
+                move |ctx, _, _| {
+                    ctx.dispatch_typed_action(WorkspaceAction::OpenAgentProgressModal {
+                        conversation_id,
+                    });
+                },
+                mouse_state,
+                true,
+                None,
+                app,
+            );
+            column.add_child(Container::new(card).with_margin_top(6.).finish());
+            rendered_any = true;
+        }
+
+        rendered_any.then(|| column.finish())
+    }
 }
 
 impl Entity for RunAgentsCardView {
@@ -949,7 +1026,6 @@ impl View for RunAgentsCardView {
     }
 
     fn render(&self, app: &AppContext) -> Box<dyn Element> {
-        let appearance = Appearance::as_ref(app);
         let status = self
             .action_model
             .as_ref(app)
@@ -957,7 +1033,15 @@ impl View for RunAgentsCardView {
 
         if let Some(AIActionStatus::Finished(result)) = &status {
             if let AIAgentActionResultType::RunAgents(orchestrate_result) = &result.result {
-                return render_terminal_state(orchestrate_result, appearance, app);
+                let card = render_terminal_state(orchestrate_result, app);
+                let Some(links) = self.render_launched_agent_links(orchestrate_result, app) else {
+                    return card;
+                };
+                return Flex::column()
+                    .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
+                    .with_child(card)
+                    .with_child(links)
+                    .finish();
             }
             log::error!(
                 "Unexpected action result type for orchestrate: {:?}",
@@ -969,37 +1053,27 @@ impl View for RunAgentsCardView {
         // In-flight dispatch: check both spawning snapshot and action
         // status because the event arrives one tick after the status.
         if let Some(snapshot) = &self.spawning {
-            return render_spawning_card(snapshot, appearance, app);
+            return render_spawning_card(snapshot, app);
         }
         if matches!(status, Some(AIActionStatus::RunningAsync)) {
             let snapshot = RunAgentsSpawningSnapshot {
                 agent_count: self.state.agent_run_configs.len(),
             };
-            return render_spawning_card(&snapshot, appearance, app);
+            return render_spawning_card(&snapshot, app);
         }
 
         // Restored-from-history: dispatch state is lost, render as
         // Cancelled. Must be checked before the streaming gate below,
         // because restored blocks have no pending action status.
         if self.block_model.is_restored() {
-            return render_status_only_card(
-                "Spawn agents cancelled".to_string(),
-                appearance,
-                StatusKind::Cancelled,
-                app,
-            );
+            return render_status_only_card("Spawn agents cancelled".to_string(), app);
         }
 
         // Still streaming: show "Configuring agents..." placeholder until
         // the action reaches Blocked status (i.e., streaming is complete
         // and the action is queued for user confirmation).
         if !matches!(status, Some(AIActionStatus::Blocked)) {
-            return render_status_only_card(
-                "Configuring agents\u{2026}".to_string(),
-                appearance,
-                StatusKind::Spawning,
-                app,
-            );
+            return render_status_only_card("Configuring agents\u{2026}".to_string(), app);
         }
 
         let is_blocked = matches!(status, Some(AIActionStatus::Blocked));
@@ -1350,13 +1424,9 @@ fn render_agents_section(state: &RunAgentsEditState, app: &AppContext) -> Box<dy
         .finish()
 }
 
-fn render_terminal_state(
-    result: &RunAgentsResult,
-    appearance: &Appearance,
-    app: &AppContext,
-) -> Box<dyn Element> {
-    let (label, kind) = format_terminal_state(result);
-    render_status_only_card(label, appearance, kind, app)
+fn render_terminal_state(result: &RunAgentsResult, app: &AppContext) -> Box<dyn Element> {
+    let (label, _) = format_terminal_state(result);
+    render_status_only_card(label, app)
 }
 
 pub(crate) fn format_terminal_state(result: &RunAgentsResult) -> (String, StatusKind) {
@@ -1415,7 +1485,6 @@ pub(crate) fn format_terminal_state(result: &RunAgentsResult) -> (String, Status
 
 #[derive(Clone, Copy)]
 pub(crate) enum StatusKind {
-    Spawning,
     Success,
     Mixed,
     Failure,
@@ -1424,7 +1493,6 @@ pub(crate) enum StatusKind {
 
 fn render_spawning_card(
     snapshot: &RunAgentsSpawningSnapshot,
-    appearance: &Appearance,
     app: &AppContext,
 ) -> Box<dyn Element> {
     let total = snapshot.agent_count;
@@ -1433,39 +1501,18 @@ fn render_spawning_card(
     } else {
         format!("Spawning {total} agents\u{2026}")
     };
-    render_status_only_card(label, appearance, StatusKind::Spawning, app)
+    render_status_only_card(label, app)
 }
 
-fn render_status_only_card(
-    label: String,
-    appearance: &Appearance,
-    kind: StatusKind,
-    app: &AppContext,
-) -> Box<dyn Element> {
-    let theme = appearance.theme();
-    let icon = match kind {
-        StatusKind::Spawning => icons::yellow_running_icon(appearance).finish(),
-        // Partial success is terminal, so use a static warning glyph rather
-        // than the in-progress-looking running circle.
-        StatusKind::Mixed => inline_action_icons::warning_icon(appearance).finish(),
-        StatusKind::Success => inline_action_icons::green_check_icon(appearance).finish(),
-        StatusKind::Failure => inline_action_icons::red_x_icon(appearance).finish(),
-        StatusKind::Cancelled => inline_action_icons::cancelled_icon(appearance).finish(),
-    };
-    let row = render_requested_action_row_for_text(
-        label.into(),
-        appearance.ui_font_family(),
-        Some(icon),
-        None,
-        false,
-        false,
-        app,
-    );
-    Container::new(row)
-        .with_background_color(blended_colors::neutral_2(theme))
-        .with_corner_radius(CornerRadius::with_all(Radius::Pixels(8.)))
-        .finish()
-        .with_agent_output_item_spacing(app)
+/// Renders an orchestrate status row (spawning / spawned / cancelled / failed)
+/// using the same flat "Ran command" title treatment: a dim-grey label with no
+/// filled background box and no leading status glyph, flush with the shared agent
+/// content margin. These rows have no expandable detail, so there is no chevron.
+fn render_status_only_card(label: String, app: &AppContext) -> Box<dyn Element> {
+    HeaderConfig::new(label, app)
+        .with_flat()
+        .render(app)
+        .with_agent_output_item_spacing()
         .finish()
 }
 

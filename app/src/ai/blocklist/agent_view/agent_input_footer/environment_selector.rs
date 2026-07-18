@@ -15,7 +15,7 @@ use warpui::{
     ViewHandle,
 };
 
-use super::{AgentInputButtonTheme, AmbientAgentViewModel};
+use super::{AgentInputButtonTheme, AmbientAgentViewModel, CloudGhostChipTheme};
 use crate::ai::ambient_agents::telemetry::CloudAgentTelemetryEvent;
 use crate::ai::cloud_agent_settings::CloudAgentSettings;
 use crate::ai::cloud_environments::CloudAmbientAgentEnvironment;
@@ -202,12 +202,19 @@ impl EnvironmentSelector {
         target: EnvironmentSelectorTarget,
         ctx: &mut ViewContext<Self>,
     ) -> Self {
-        let button = ctx.add_typed_action_view(|_ctx| {
-            ActionButton::new("", AgentInputButtonTheme)
+        // The cloud-agent kickoff composer renders this selector flat (no
+        // surface "box"); the handoff composer keeps the boxed chip treatment.
+        let is_cloud_pane = matches!(target, EnvironmentSelectorTarget::CloudPane(_));
+        let button = ctx.add_typed_action_view(move |_ctx| {
+            let button = if is_cloud_pane {
+                ActionButton::new("", CloudGhostChipTheme).with_disabled_theme(CloudGhostChipTheme)
+            } else {
+                ActionButton::new("", AgentInputButtonTheme).with_disabled_theme(DisabledTheme)
+            };
+            button
                 .with_icon(Icon::Globe4)
                 .with_tooltip("Choose an environment")
                 .with_size(ButtonSize::AgentInputButton)
-                .with_disabled_theme(DisabledTheme)
                 .on_click(|ctx| {
                     ctx.dispatch_typed_action(EnvironmentSelectorAction::ToggleMenu);
                 })

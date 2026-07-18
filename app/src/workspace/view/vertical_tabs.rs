@@ -38,7 +38,6 @@ use warpui::ui_components::text_input::TextInput;
 use warpui::{AppContext, EntityId, SingletonEntity, ViewHandle, WindowId};
 
 use super::shimmering_bolt::ShimmeringBoltElement;
-
 use super::{render_group_member_icon_collage, select_unique_pane_kinds};
 use crate::ai::agent::conversation::{ConversationStatus, StatusColorStyle};
 use crate::ai::agent_management::AgentNotificationsModel;
@@ -124,6 +123,19 @@ const TAB_GROUP_ICON_SIZE: f32 = 16.;
 /// icons so the open/closed folder cue stays subtle rather than dominating the
 /// row.
 const FOLDER_HEADER_ICON_SIZE: f32 = 14.;
+/// Vertical padding for Workspace-view folder headers and singleton nav rows.
+/// Matches the compact pane row's hover-pill height (its 3px vertical padding
+/// plus a 1px layout border) so a folder header and a child tab row light up to
+/// the same height on hover.
+const FOLDER_HEADER_VERTICAL_PADDING: f32 = 3.;
+/// Left padding for Workspace-view folder headers and singleton nav rows so the
+/// leading glyph gets a little breathing room from the panel's left gutter
+/// rather than sitting flush against it.
+const FOLDER_HEADER_LEFT_PADDING: f32 = 4.;
+/// Extra left inset added to compact pane rows in Workspace view (on top of the
+/// shared 8px) so child tab rows stay indented under their folder header once
+/// the header itself is nudged in by `FOLDER_HEADER_LEFT_PADDING`.
+const WORKSPACE_PANE_ROW_EXTRA_LEFT_PADDING: f32 = 4.;
 const TAB_GROUP_CONTENT_INSET: f32 = 4.;
 const BADGE_ICON_SIZE: f32 = 12.;
 const DETAIL_SIDECAR_DEFAULT_WIDTH: f32 = 320.;
@@ -499,12 +511,11 @@ fn render_pane_row_element(
             container = container.with_background(background);
         }
 
+        // No border box around tab rows (selected or not); the selected row is
+        // still indicated by its background fill from `pane_row_background`. We
+        // keep a zero-fill 1px border so row heights match the previous layout.
         let pane: Box<dyn Element> = container
-            .with_border(Border::all(1.).with_border_fill(if is_selected {
-                internal_colors::fg_overlay_3(theme).into()
-            } else {
-                ElementFill::None
-            }))
+            .with_border(Border::all(1.).with_border_fill(ElementFill::None))
             .finish();
 
         // Pin indicator anchored at the visible pane's top-right corner. Pin
@@ -3052,13 +3063,16 @@ fn render_workspace_folder_header(
             .with_child(new_tab_button)
             .finish();
 
-        // The groups list is already wrapped in an 8px (`GROUP_HORIZONTAL_PADDING`)
-        // left gutter, so drop this header's own left padding; otherwise the folder
-        // icon sits at 16px while the New tab/Customize buttons (which render flush
-        // against that same gutter) sit at 8px. Left = 0 lines the folder glyph up
-        // horizontally with those control-bar buttons.
+        // Vertical padding is tightened to `FOLDER_HEADER_VERTICAL_PADDING` so the
+        // header's hover pill matches the child tab rows' height. A small left
+        // padding (`FOLDER_HEADER_LEFT_PADDING`) keeps the folder glyph off the
+        // panel's left gutter so it reads as padded rather than flush.
         let mut container = Container::new(row)
-            .with_padding(Padding::uniform(GROUP_HORIZONTAL_PADDING).with_left(0.))
+            .with_padding(
+                Padding::uniform(GROUP_HORIZONTAL_PADDING)
+                    .with_vertical(FOLDER_HEADER_VERTICAL_PADDING)
+                    .with_left(FOLDER_HEADER_LEFT_PADDING),
+            )
             .with_corner_radius(CornerRadius::with_all(Radius::Pixels(ROW_CORNER_RADIUS)));
         if hover_state.is_hovered() {
             container = container.with_background(internal_colors::fg_overlay_2(theme));
@@ -3136,10 +3150,14 @@ fn render_singleton_nav_row(
             .with_child(close_button)
             .finish();
 
-        // Match the folder-header gutter so the glyph lines up with the
-        // control-bar buttons above (left = 0 against the list's 8px gutter).
+        // Match the folder-header row metrics so singleton nav rows line up with
+        // the folder glyphs and share the same hover-pill height.
         let mut container = Container::new(row)
-            .with_padding(Padding::uniform(GROUP_HORIZONTAL_PADDING).with_left(0.))
+            .with_padding(
+                Padding::uniform(GROUP_HORIZONTAL_PADDING)
+                    .with_vertical(FOLDER_HEADER_VERTICAL_PADDING)
+                    .with_left(FOLDER_HEADER_LEFT_PADDING),
+            )
             .with_corner_radius(CornerRadius::with_all(Radius::Pixels(ROW_CORNER_RADIUS)));
         // Selected rows keep a persistent highlight (matching pane rows); hover
         // shows the lighter overlay when not selected.
@@ -9158,10 +9176,19 @@ fn render_compact_pane_row(
         .finish();
 
     // Compact density uses tighter vertical padding (~3px) than the shared 8px so rows
-    // pack more densely; horizontal padding stays at 8px.
+    // pack more densely; horizontal padding stays at 8px. In Workspace view the rows
+    // get a little extra left inset so they stay indented under their (now slightly
+    // padded) folder header.
+    let left_padding = if in_workspace_view(app) {
+        8. + WORKSPACE_PANE_ROW_EXTRA_LEFT_PADDING
+    } else {
+        8.
+    };
     render_pane_row_element(
         props,
-        Padding::uniform(8.).with_vertical(3.),
+        Padding::uniform(8.)
+            .with_vertical(3.)
+            .with_left(left_padding),
         true,
         content,
         trailing,

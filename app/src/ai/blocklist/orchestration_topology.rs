@@ -271,6 +271,113 @@ pub fn orchestration_aware_conversation_status(
     }
 }
 
+/// A single orchestration child ("worker") agent, distilled to the fields the
+/// composer-anchored working-agents indicator and the per-agent progress modal
+/// need: its conversation id (for navigation / cancellation), a task-oriented
+/// label, and its current status.
+#[derive(Clone, Debug)]
+pub struct OrchestrationWorker {
+    pub conversation_id: AIConversationId,
+    pub label: String,
+    pub status: ConversationStatus,
+}
+
+/// The ordered set of child agents under the active conversation's
+/// orchestrator.
+#[derive(Clone, Debug)]
+pub struct OrchestrationWorkers {
+    pub workers: Vec<OrchestrationWorker>,
+}
+
+impl OrchestrationWorkers {
+    /// Number of workers that are still actively running (running, recovering,
+    /// or yielded and listening) — the count surfaced by the "N Working" pill.
+    pub fn working_count(&self) -> usize {
+        self.workers
+            .iter()
+            .filter(|worker| worker_status_is_active(&worker.status))
+            .count()
+    }
+
+    /// Conversation ids of workers that are still running — used to fan a
+    /// "Stop All" out across the tree.
+    pub fn active_worker_ids(&self) -> Vec<AIConversationId> {
+        self.workers
+            .iter()
+            .filter(|worker| worker_status_is_active(&worker.status))
+            .map(|worker| worker.conversation_id)
+            .collect()
+    }
+}
+
+/// True while a worker should be counted as actively working. Mirrors the
+/// aggregation in [`aggregated_orchestrator_status`]: running and recovering
+/// nodes count, and a node that yielded via `wait_for_events` is still live
+/// (its driver stays up until something resumes it).
+pub fn worker_status_is_active(status: &ConversationStatus) -> bool {
+    matches!(
+        status,
+        ConversationStatus::InProgress
+            | ConversationStatus::TransientError
+            | ConversationStatus::WaitingForEvents
+    )
+}
+
+/// A task-oriented label for a worker. Prefers the orchestrator-assigned agent
+/// name (a short role like "researcher" / "python-cheatsheet"), which is the
+/// same label the in-stream delegation cards use, then falls back to the
+/// conversation title, then a generic "Agent".
+///
+/// Agent name comes first because a child's title is derived server-side from
+/// the first turn's context and can resolve to noise like
+/// "Working directory: /…" rather than the task.
+pub fn orchestration_worker_label(conversation: &AIConversation) -> String {
+    conversation
+        .agent_name()
+        .map(str::to_owned)
+        .filter(|label| !label.trim().is_empty())
+        .or_else(|| {
+            conversation
+                .title()
+                .filter(|title| !title.trim().is_empty())
+        })
+        .filter(|label| !label.trim().is_empty())
+        .unwrap_or_else(|| "Agent".to_string())
+}
+
+/// Enumerates the child ("worker") agents under the active conversation's
+/// orchestrator in canonical pill order. Resolves the orchestrator root the
+/// same way the pill bar and keyboard navigation do so every surface agrees on
+/// the same tree, then distills each child into an [`OrchestrationWorker`].
+///
+/// Returns `None` when the active conversation is unknown or the orchestrator
+/// has no children yet (nothing to show).
+pub fn orchestration_workers(
+    history: &BlocklistAIHistoryModel,
+    active_conversation_id: AIConversationId,
+) -> Option<OrchestrationWorkers> {
+    let active_conversation = history.conversation(&active_conversation_id)?;
+    let orchestrator_id = history
+        .resolved_parent_conversation_id_for_conversation(active_conversation)
+        .unwrap_or(active_conversation_id);
+    let workers: Vec<OrchestrationWorker> =
+        descendant_conversation_ids_in_pill_order(history, orchestrator_id)
+            .into_iter()
+            .filter_map(|conversation_id| {
+                let conversation = history.conversation(&conversation_id)?;
+                Some(OrchestrationWorker {
+                    conversation_id,
+                    label: orchestration_worker_label(conversation),
+                    status: conversation.status().clone(),
+                })
+            })
+            .collect();
+    if workers.is_empty() {
+        return None;
+    }
+    Some(OrchestrationWorkers { workers })
+}
+
 #[cfg(test)]
 #[path = "orchestration_topology_tests.rs"]
 mod tests;

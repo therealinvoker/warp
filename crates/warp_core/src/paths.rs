@@ -158,7 +158,14 @@ pub fn state_dir() -> PathBuf {
 /// On macOS, this will use the App Group container directory if available.
 pub fn secure_state_dir() -> Option<PathBuf> {
     // Do not use the secure state directory in integration tests, which have a temporary home directory instead.
-    if ChannelState::channel() == Channel::Integration {
+    //
+    // The OSS/Bang build is re-signed (dev builds re-sign on every rebuild)
+    // without Warp's App Group entitlement, so it is never actually a member of
+    // the `<team>.dev.warp` group. Touching that group container only surfaces
+    // macOS Sequoia's "<app> would like to access data from other apps" prompt
+    // and then fails the write probe anyway — so skip it entirely and fall back
+    // to the regular (unsandboxed) state dir.
+    if matches!(ChannelState::channel(), Channel::Integration | Channel::Oss) {
         return None;
     }
 

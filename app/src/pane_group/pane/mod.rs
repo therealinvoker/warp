@@ -40,7 +40,7 @@ use warpui::elements::{DispatchEventResult, EventHandler, MouseInBehavior};
 use warpui::presenter::ChildView;
 use warpui::{
     Action, AppContext, Element, Entity, EntityId, ModelContext, ModelHandle, SingletonEntity,
-    View, ViewContext, ViewHandle, WeakModelHandle,
+    View, ViewContext, ViewHandle, WeakModelHandle, WeakViewHandle,
 };
 
 pub use self::view::{PaneHeaderAction, PaneHeaderCustomAction, PaneView, PaneViewEvent};
@@ -854,6 +854,19 @@ impl PaneConfiguration {
         ctx.emit(PaneConfigurationEvent::ToggleSharingDialog(source));
     }
 
+    /// Sets the terminal pane that can start/stop a live shared session from the
+    /// sharing dialog. Set for session-capable panes so the dialog's on/off
+    /// toggle (and the persistent share button) work even before a session is
+    /// live. Pass `None` to clear it.
+    pub fn set_session_share_source(
+        &mut self,
+        source: Option<WeakViewHandle<TerminalView>>,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        ctx.emit(PaneConfigurationEvent::SessionShareSourceChanged(source));
+        ctx.emit(PaneConfigurationEvent::HeaderContentChanged);
+    }
+
     pub fn open_sharing_qr_code(
         &mut self,
         source: SharingDialogSource,
@@ -885,6 +898,7 @@ pub enum PaneConfigurationEvent {
     OpenModalUpdated,
     RefreshPaneHeaderOverflowMenuItems,
     ShareableObjectChanged(Option<ShareableObject>),
+    SessionShareSourceChanged(Option<WeakViewHandle<TerminalView>>),
     ToggleSharingDialog(SharingDialogSource),
     OpenSharingQrCode(SharingDialogSource),
     DimEvenIfFocusedUpdated,

@@ -4,14 +4,13 @@ use lazy_static::lazy_static;
 use pathfinder_geometry::vector::vec2f;
 use warp_core::ui::theme::Fill;
 use warpui::elements::{
-    Border, ChildAnchor, ChildView, ConstrainedBox, Container, CornerRadius, CrossAxisAlignment,
-    Element, Flex, Hoverable, MouseStateHandle, OffsetPositioning, ParentAnchor, ParentElement,
-    ParentOffsetBounds, Radius, Stack, DEFAULT_UI_LINE_HEIGHT_RATIO,
+    Border, ChildAnchor, ChildView, ConstrainedBox, Container, CornerRadius, Element, Hoverable,
+    MouseStateHandle, OffsetPositioning, ParentAnchor, ParentElement, ParentOffsetBounds, Radius,
+    Stack, DEFAULT_UI_LINE_HEIGHT_RATIO,
 };
 use warpui::keymap::Keystroke;
 use warpui::platform::Cursor;
-use warpui::ui_components::components::{UiComponent, UiComponentStyles};
-use warpui::ui_components::keyboard_shortcut::KeyboardShortcut;
+use warpui::ui_components::components::UiComponent;
 use warpui::{AppContext, Entity, SingletonEntity, TypedActionView, View, ViewContext, ViewHandle};
 
 use super::EditorElement;
@@ -244,11 +243,6 @@ impl View for AcceptAutosuggestionKeybinding {
             EditorElement::cursor_height(appearance.monospace_font_size(), line_height_ratio)
                 .max(AUTOSUGGESTION_HINT_MINIMUM_HEIGHT);
         let disabled_color = blended_colors::semantic_text_disabled(appearance.theme());
-        // If there's no keybinding set, right arrow always works.
-        let keystroke = self
-            .accept_autosuggestion_keybinding
-            .clone()
-            .unwrap_or(Keystroke::parse("right").expect("can parse keystroke"));
         let border_width = 1.;
 
         // The stack contains the editable keybinding, tooltip that shows upon mouse hover,
@@ -280,49 +274,22 @@ impl View for AcceptAutosuggestionKeybinding {
                     None,
                 )
             };
-            let font_size = appearance.monospace_font_size() - 2.;
-            // We use UI font family for the keyboard shortcut even though it's in the input
-            // because monospace font family is configurable, and might not handle symbols like
-            // modifiers and arrows well.
-            let keystroke = KeyboardShortcut::new(
-                &keystroke,
-                UiComponentStyles {
-                    font_family_id: Some(appearance.ui_font_family()),
-                    font_size: Some(font_size),
-                    font_color: Some(font_color),
-                    ..Default::default()
-                },
-            )
-            .lowercase_modifier()
-            .text_only()
-            .with_line_height_ratio(line_height_ratio)
-            .build()
-            .finish();
-
             let height_without_border = height - border_width * 2.;
-            let chevron_down = Container::new(
-                ConstrainedBox::new(
-                    Icon::ArrowDropDown
-                        .to_warpui_icon(Fill::Solid(font_color))
-                        .finish(),
-                )
-                .with_height(height_without_border)
-                .with_width(height_without_border)
-                .finish(),
-            )
-            .finish();
-
-            let mut editable_keystroke = Container::new(
-                Flex::row()
-                    .with_children([keystroke, chevron_down])
-                    .with_cross_axis_alignment(CrossAxisAlignment::Center)
+            // Show a single gear icon rather than the keybinding text + chevron.
+            // Clicking it still opens the "change accept-autosuggestion
+            // keybinding" menu.
+            let gear_icon = Container::new(
+                ConstrainedBox::new(Icon::Gear.to_warpui_icon(Fill::Solid(font_color)).finish())
+                    .with_height(height_without_border)
+                    .with_width(height_without_border)
                     .finish(),
             )
-            // Padding on the left for the keyboard shortcut.
-            // The arrow down icon already has its own padding so no need on the right.
-            .with_padding_left(4.)
-            .with_border(Border::all(border_width).with_border_color(disabled_color))
-            .with_corner_radius(CornerRadius::with_all(Radius::Percentage(25.)));
+            .finish();
+
+            let mut editable_keystroke = Container::new(gear_icon)
+                .with_uniform_padding(2.)
+                .with_border(Border::all(border_width).with_border_color(disabled_color))
+                .with_corner_radius(CornerRadius::with_all(Radius::Percentage(25.)));
 
             if let Some(background_color) = background_color {
                 editable_keystroke = editable_keystroke.with_background_color(background_color);

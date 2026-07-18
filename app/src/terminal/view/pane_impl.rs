@@ -3,8 +3,8 @@
 use settings::Setting as _;
 use warp_core::context_flag::ContextFlag;
 use warpui::elements::{
-    ConstrainedBox, CrossAxisAlignment, Empty, Flex, MainAxisAlignment, MainAxisSize,
-    ParentElement, Shrinkable,
+    ConstrainedBox, CrossAxisAlignment, Flex, MainAxisAlignment, MainAxisSize, ParentElement,
+    Shrinkable,
 };
 use warpui::prelude::{ChildView, Container};
 use warpui::text_layout::ClipConfig;
@@ -13,7 +13,7 @@ use warpui::ui_components::components::UiComponent;
 use warpui::ui_components::components::UiComponentStyles;
 use warpui::{
     AppContext, Element, ModelHandle, SingletonEntity, TypedActionView, ViewContext,
-    WeakModelHandle,
+    WeakModelHandle, WeakViewHandle,
 };
 
 use super::ambient_agent::is_cloud_agent_pre_first_exchange;
@@ -86,9 +86,46 @@ impl TerminalView {
         self.pane_configuration = pane_configuration;
     }
 
+    /// The terminal handle that can start/stop a live shared session from the
+    /// sharing dialog toggle, or `None` when this pane can't initiate a share
+    /// (e.g. a session viewer, or when session creation is disabled).
+    fn session_share_source_handle(
+        &self,
+        ctx: &ViewContext<Self>,
+    ) -> Option<WeakViewHandle<TerminalView>> {
+        // Viewers of someone else's session can't start their own share.
+        if self.shared_session_viewer().is_some() {
+            return None;
+        }
+        // Ambient (cloud) agent panes manage their own sharing lifecycle.
+        if self.is_ambient_agent_session(ctx) {
+            return None;
+        }
+
+        // After the viewer check, an active shared session means we're the sharer.
+        let is_sharer = self.shared_session.is_some();
+        let can_create = FeatureFlag::CreatingSharedSessions.is_enabled()
+            && ContextFlag::CreateSharedSession.is_enabled();
+        if is_sharer || can_create {
+            Some(ctx.handle())
+        } else {
+            None
+        }
+    }
+
+    /// Refreshes the sharing dialog's session-share source so the persistent
+    /// share button and its on/off toggle reflect whether this pane can share.
+    pub(super) fn refresh_session_share_source(&mut self, ctx: &mut ViewContext<Self>) {
+        let source = self.session_share_source_handle(ctx);
+        self.pane_configuration.update(ctx, |pane_config, ctx| {
+            pane_config.set_session_share_source(source, ctx);
+        });
+    }
+
     /// Respond to changes to the active session or split pane states.
     pub fn on_pane_state_change(&mut self, ctx: &mut ViewContext<Self>) {
         self.refresh_pane_header(ctx);
+        self.refresh_session_share_source(ctx);
 
         // Trigger refresh of the pane header overflow menu to reflect the new pane state
         // (e.g., updating the Maximize/Minimize pane menu item)
@@ -217,6 +254,7 @@ impl TerminalView {
                 pane_config.refresh_pane_header_overflow_menu_items(ctx);
             });
         }
+        self.refresh_session_share_source(ctx);
     }
 
     pub(super) fn is_pane_focused(&self, app: &AppContext) -> bool {
@@ -484,22 +522,29 @@ impl TerminalView {
             let pinned_header = ConstrainedBox::new(header)
                 .with_height(PANE_HEADER_HEIGHT)
                 .finish();
-            let secondary_row: Box<dyn Element> = if self.is_orchestration_split_off() {
+            // Split-off panes keep a breadcrumb "back" row. The orchestrator /
+            // swap-target pill bar is replaced by the composer-anchored
+            // working-agents indicator once `AgentProgressUI` is enabled, so we
+            // drop the secondary pill row entirely there.
+            let secondary_row: Option<Box<dyn Element>> = if self.is_orchestration_split_off() {
                 crate::ai::blocklist::agent_view::render_orchestration_breadcrumbs(
                     self.agent_view_controller.as_ref(app),
                     self.mouse_states.parent_conversation_header_link.clone(),
                     self.mouse_states.breadcrumbs_horizontal_scroll.clone(),
                     app,
                 )
-                .unwrap_or_else(|| Empty::new().finish())
+            } else if FeatureFlag::AgentProgressUI.is_enabled() {
+                None
             } else {
-                ChildView::new(&self.orchestration_pill_bar).finish()
+                Some(ChildView::new(&self.orchestration_pill_bar).finish())
             };
-            return Flex::column()
+            let mut column = Flex::column()
                 .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
-                .with_child(pinned_header)
-                .with_child(secondary_row)
-                .finish();
+                .with_child(pinned_header);
+            if let Some(secondary_row) = secondary_row {
+                column.add_child(secondary_row);
+            }
+            return column.finish();
         }
 
         if let Some(parent_card) = parent_conversation_header_card {
@@ -615,45 +660,21 @@ impl BackingView for TerminalView {
         let mut items = vec![];
         let source = SharedSessionActionSource::PaneHeader;
 
-        // Shared-session related items.
+        // Shared-session sharing (start/stop/copy-link) now lives in the sharing
+        // dialog opened by the persistent share button, so it is intentionally no
+        // longer duplicated here. The only session-related overflow entry left is
+        // "Open on Desktop", which the dialog does not provide.
         let shared_session_status = model.shared_session_status();
-        let is_ambient_agent = self.is_ambient_agent_session(ctx);
-        if shared_session_status.is_sharer_or_viewer() {
-            if !is_ambient_agent {
-                items.push(
-                    MenuItemFields::new("Copy link")
-                        .with_on_select_action(TerminalAction::CopySharedSessionLink { source })
-                        .into_item(),
-                );
-            }
-
-            if shared_session_status.is_sharer() {
-                items.push(
-                    MenuItemFields::new("Stop sharing session")
-                        .with_on_select_action(TerminalAction::StopSharingCurrentSession { source })
-                        .into_item(),
-                );
-            }
-            if !ContextFlag::HideOpenOnDesktopButton.is_enabled()
-                && *UserAppInstallDetectionSettings::as_ref(ctx)
-                    .user_app_installation_detected
-                    .value()
-                    == UserAppInstallStatus::Detected
-            {
-                items.push(
-                    MenuItemFields::new("Open on Desktop")
-                        .with_on_select_action(TerminalAction::OpenSharedSessionOnDesktop {
-                            source,
-                        })
-                        .into_item(),
-                );
-            }
-        } else if FeatureFlag::CreatingSharedSessions.is_enabled()
-            && ContextFlag::CreateSharedSession.is_enabled()
+        if shared_session_status.is_sharer_or_viewer()
+            && !ContextFlag::HideOpenOnDesktopButton.is_enabled()
+            && *UserAppInstallDetectionSettings::as_ref(ctx)
+                .user_app_installation_detected
+                .value()
+                == UserAppInstallStatus::Detected
         {
             items.push(
-                MenuItemFields::new("Share session")
-                    .with_on_select_action(TerminalAction::OpenShareSessionModal { source })
+                MenuItemFields::new("Open on Desktop")
+                    .with_on_select_action(TerminalAction::OpenSharedSessionOnDesktop { source })
                     .into_item(),
             );
         }

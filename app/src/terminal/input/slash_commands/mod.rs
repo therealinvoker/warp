@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use ai::skills::SkillReference;
 pub use cloud_mode_v2_view::{CloudModeV2SlashCommandView, Section as CloudModeV2Section};
 pub use data_source::*;
+use settings::ToggleableSetting;
 pub use view::{CloseReason, InlineSlashCommandView, SlashCommandsEvent};
 #[cfg(not(target_family = "wasm"))]
 use warp_cli::agent::Harness;
@@ -45,6 +46,8 @@ use crate::search::slash_command_menu::static_commands::commands::{self, COMMAND
 use crate::search::slash_command_menu::static_commands::Availability;
 use crate::search::slash_command_menu::{SlashCommandId, StaticCommand};
 use crate::server::ids::SyncId;
+use crate::server::server_api::ai::SendAgentMessageRequest;
+use crate::server::server_api::ServerApiProvider;
 use crate::server::telemetry::SlashCommandAcceptedDetails;
 use crate::settings::AISettings;
 use crate::tab::SelectedTabColor;
@@ -449,11 +452,29 @@ impl Input {
                     }
                 });
 
-                ctx.emit(Event::EnterAgentView {
-                    initial_prompt: prompt,
-                    conversation_id: None,
-                    origin: AgentViewEntryOrigin::SlashCommand { trigger },
-                });
+                // `/agent` (unlike `/new`) doubles as a mode toggle back into the current
+                // conversation. When we're already in a fullscreen agent view — e.g. the user
+                // ran `/terminal` to drop the composer into shell mode and now types `/agent` to
+                // return — resume the active conversation instead of exiting it and starting a
+                // brand new one. Emitting `EnterAgentView { conversation_id: None }` here would
+                // make `enter_agent_view_internal` exit the active view and `start_new_conversation`
+                // (see agent_view/controller.rs), which is exactly the "new conversation appears"
+                // bug. Only a bare, typed `/agent` resumes: `/agent <prompt>`, `/new`, and the
+                // keybinding-triggered "new conversation" flow all keep starting fresh.
+                let should_resume_active_conversation = command.name == commands::AGENT.name
+                    && prompt.is_none()
+                    && !trigger.is_keybinding()
+                    && self.agent_view_controller.as_ref(ctx).is_fullscreen();
+
+                if should_resume_active_conversation {
+                    self.set_input_mode_agent(/*ensure_input_is_focused*/ true, ctx);
+                } else {
+                    ctx.emit(Event::EnterAgentView {
+                        initial_prompt: prompt,
+                        conversation_id: None,
+                        origin: AgentViewEntryOrigin::SlashCommand { trigger },
+                    });
+                }
             }
             cloud_agent if command.name == commands::CLOUD_AGENT.name => {
                 let prompt = argument.and_then(|argument| {
@@ -754,6 +775,65 @@ impl Input {
             open_rules if command.name == commands::OPEN_RULES.name => {
                 ctx.dispatch_typed_action(&TerminalAction::OpenRulesPane);
             }
+            remember if command.name == commands::REMEMBER.name => {
+                #[cfg(all(feature = "local_fs", not(target_family = "wasm")))]
+                {
+                    use crate::ai::project_memory;
+
+                    let Some(text) = argument
+                        .map(|arg| arg.trim())
+                        .filter(|text| !text.is_empty())
+                    else {
+                        show_error_toast("Usage: /remember <fact to remember>".to_owned(), ctx);
+                        return true;
+                    };
+
+                    let current_dir = self
+                        .active_block_metadata
+                        .as_ref()
+                        .and_then(|metadata| metadata.current_working_directory())
+                        .map(str::to_owned);
+                    let Some(current_dir) = current_dir else {
+                        show_error_toast(
+                            "Cannot determine the current directory for /remember".to_owned(),
+                            ctx,
+                        );
+                        return true;
+                    };
+
+                    let repo_root =
+                        project_memory::repo_root_for(std::path::Path::new(&current_dir));
+                    let window_id = ctx.window_id();
+                    match project_memory::append_memory_entry(&repo_root, text) {
+                        Ok(path) => {
+                            ToastStack::handle(ctx).update(ctx, |toast_stack, ctx| {
+                                toast_stack.add_ephemeral_toast(
+                                    DismissibleToast::default(format!(
+                                        "Saved to project memory ({})",
+                                        path.display()
+                                    )),
+                                    window_id,
+                                    ctx,
+                                );
+                            });
+                        }
+                        Err(error) => {
+                            show_error_toast(
+                                format!("Failed to save project memory: {error}"),
+                                ctx,
+                            );
+                        }
+                    }
+                }
+                #[cfg(not(all(feature = "local_fs", not(target_family = "wasm"))))]
+                {
+                    show_error_toast(
+                        "The /remember command is not supported in this build".to_owned(),
+                        ctx,
+                    );
+                    return true;
+                }
+            }
             edit_skill if command.name == commands::EDIT_SKILL.name => {
                 if !FeatureFlag::ListSkills.is_enabled() {
                     return false;
@@ -886,6 +966,36 @@ impl Input {
             }
             usage if command.name == commands::USAGE.name => {
                 ctx.dispatch_typed_action(&TerminalAction::OpenBillingAndUsagePane);
+            }
+            terminal if command.name == commands::TERMINAL.name => {
+                self.set_input_mode_terminal(true, ctx);
+            }
+            autoterminal if command.name == commands::AUTOTERMINAL.name => {
+                let mut enabled_now = false;
+                AISettings::handle(ctx).update(ctx, |settings, ctx| {
+                    if let Err(err) = settings
+                        .ai_autodetection_enabled_internal
+                        .toggle_and_save_value(ctx)
+                    {
+                        log::warn!("Failed to toggle AI autodetection: {err}");
+                    }
+                    enabled_now = *settings.ai_autodetection_enabled_internal;
+                });
+                let message = if enabled_now {
+                    "Auto-terminal on — input that looks like a shell command runs in the \
+                     terminal automatically; everything else goes to the agent."
+                } else {
+                    "Auto-terminal off — input always goes to the agent; use /terminal (or \
+                     the ! prefix) to run a shell command."
+                };
+                let window_id = ctx.window_id();
+                ToastStack::handle(ctx).update(ctx, |toast_stack, ctx| {
+                    toast_stack.add_ephemeral_toast(
+                        DismissibleToast::success(message.to_string()),
+                        window_id,
+                        ctx,
+                    );
+                });
             }
             remote_control if command.name == commands::REMOTE_CONTROL.name => {
                 if !FeatureFlag::CreatingSharedSessions.is_enabled()
@@ -1145,6 +1255,84 @@ impl Input {
                     // Not in progress: submit immediately as a regular (non-queued) user query so
                     // the live staging is sent and reset, rather than treated as a queued-row fire.
                     self.submit_user_query_now(prompt, ctx);
+                }
+            }
+            steer if command.name == commands::STEER_NAME => {
+                let Some(conversation_id) = self
+                    .ai_context_model
+                    .as_ref(ctx)
+                    .selected_conversation_id(ctx)
+                else {
+                    show_error_toast("/steer requires an active conversation".to_owned(), ctx);
+                    return true;
+                };
+
+                let Some(prompt) = argument.filter(|a| !a.is_empty()).cloned() else {
+                    show_error_toast("/steer requires a message argument".to_owned(), ctx);
+                    return true;
+                };
+
+                // Resolve the conversation's live state and its server-side
+                // address. The harness mailbox is keyed by the server
+                // conversation token (== the harness's metadata.conversationId),
+                // NOT the client conversation UUID or run id — so a steer message
+                // must target the token to be folded into the running loop.
+                let history = BlocklistAIHistoryModel::handle(ctx);
+                let (is_running, server_token, sender_run_id) = history
+                    .as_ref(ctx)
+                    .conversation(&conversation_id)
+                    .map(|c| {
+                        (
+                            !c.is_empty()
+                                && (c.status().is_in_progress() || c.status().is_blocked()),
+                            c.server_conversation_token()
+                                .map(|token| token.as_str().to_string()),
+                            c.run_id().unwrap_or_default(),
+                        )
+                    })
+                    .unwrap_or((false, None, String::new()));
+
+                match (is_running, server_token) {
+                    (true, Some(to)) => {
+                        // Agent is mid-response: deliver the redirection NOW via
+                        // the conversation mailbox. The harness folds it into the
+                        // running loop on its next step. Fire-and-forget — steering
+                        // doesn't mutate client conversation state, so there's
+                        // nothing to keep consistent locally.
+                        let ai_client = ServerApiProvider::as_ref(ctx).get_ai_client();
+                        let request = SendAgentMessageRequest {
+                            to: vec![to],
+                            subject: "steer".to_owned(),
+                            body: prompt,
+                            sender_run_id,
+                        };
+                        let window_id = ctx.window_id();
+                        ctx.spawn(
+                            async move { ai_client.send_agent_message(request).await },
+                            move |_input, result, ctx| {
+                                let toast = match result {
+                                    Ok(_) => DismissibleToast::success(
+                                        "Steering the running agent…".to_owned(),
+                                    ),
+                                    Err(err) => {
+                                        log::error!("Failed to send /steer message: {err:?}");
+                                        DismissibleToast::error(
+                                            "Couldn't reach the running agent to steer it."
+                                                .to_owned(),
+                                        )
+                                    }
+                                };
+                                ToastStack::handle(ctx).update(ctx, |toast_stack, ctx| {
+                                    toast_stack.add_ephemeral_toast(toast, window_id, ctx);
+                                });
+                            },
+                        );
+                    }
+                    _ => {
+                        // Nothing is running (or no server address yet): there's
+                        // nothing to steer, so just submit as a normal query.
+                        self.submit_user_query_now(prompt, ctx);
+                    }
                 }
             }
             open_repo if command.name == commands::OPEN_REPO.name => {

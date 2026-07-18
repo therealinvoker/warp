@@ -527,6 +527,65 @@ fn test_in_dir_warp_shadows_agents_with_global() {
 }
 
 #[test]
+fn test_in_dir_bang_shadows_warp_and_agents() {
+    let mut model = ProjectContextModel::default();
+    // BANG.md is the native rules file and shadows both the legacy WARP.md and
+    // AGENTS.md when all coexist in the same directory.
+    insert_project_rule(
+        &mut model,
+        Path::new("/repo"),
+        Path::new("/repo/BANG.md"),
+        "project_bang",
+    );
+    insert_project_rule(
+        &mut model,
+        Path::new("/repo"),
+        Path::new("/repo/WARP.md"),
+        "project_warp",
+    );
+    insert_project_rule(
+        &mut model,
+        Path::new("/repo"),
+        Path::new("/repo/AGENTS.md"),
+        "project_agents",
+    );
+
+    let result = model
+        .find_applicable_rules(&local_path("/repo/src/main.rs"))
+        .expect("layered rules should produce a result");
+
+    // Only BANG.md is active; WARP.md and AGENTS.md are shadowed.
+    assert_eq!(result.active_rules.len(), 1);
+    assert_eq!(result.active_rules[0].content, "project_bang");
+}
+
+#[test]
+fn test_legacy_warp_still_shadows_agents_without_bang() {
+    let mut model = ProjectContextModel::default();
+    // With no BANG.md present, the legacy WARP.md is still honored and shadows
+    // AGENTS.md, preserving backward compatibility for existing repos.
+    insert_project_rule(
+        &mut model,
+        Path::new("/repo"),
+        Path::new("/repo/WARP.md"),
+        "project_warp",
+    );
+    insert_project_rule(
+        &mut model,
+        Path::new("/repo"),
+        Path::new("/repo/AGENTS.md"),
+        "project_agents",
+    );
+
+    let result = model
+        .find_applicable_rules(&local_path("/repo/src/main.rs"))
+        .expect("layered rules should produce a result");
+
+    assert_eq!(result.active_rules.len(), 1);
+    assert_eq!(result.active_rules[0].content, "project_warp");
+}
+
+#[test]
 fn test_no_rules_returns_none() {
     let model = ProjectContextModel::default();
     let result = model.find_applicable_rules(&local_path("/some/path/file.rs"));

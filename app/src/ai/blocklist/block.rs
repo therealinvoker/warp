@@ -114,6 +114,9 @@ use crate::ai::blocklist::inline_action::ask_user_question_view::{
 use crate::ai::blocklist::inline_action::aws_bedrock_credentials_error::{
     AwsBedrockCredentialsErrorEvent, AwsBedrockCredentialsErrorView,
 };
+use crate::ai::blocklist::inline_action::build_plan_card_view::{
+    BuildPlanCardView, BuildPlanCardViewEvent,
+};
 use crate::ai::blocklist::inline_action::code_diff_view;
 use crate::ai::blocklist::inline_action::code_diff_view::convert_file_edits_to_file_diffs;
 use crate::ai::blocklist::inline_action::requested_command::{
@@ -148,7 +151,6 @@ use crate::ai::get_relevant_files::controller::{
 use crate::ai::skills::SkillOpenOrigin;
 use crate::ai::skills::{SkillManager, SkillTelemetryEvent};
 use crate::ai::{AIRequestUsageModel, AIRequestUsageModelEvent};
-use crate::auth::{AuthStateProvider, UserUid};
 use crate::cloud_object::model::generic_string_model::GenericStringObjectId;
 use crate::cloud_object::model::persistence::CloudModel;
 use crate::code::editor::comment_editor::create_readonly_comment_markdown_editor;
@@ -199,15 +201,11 @@ use crate::view_components::compactible_action_button::CompactibleActionButton;
 use crate::view_components::find::FindEvent;
 use crate::view_components::DismissibleToast;
 use crate::workspace::{ForkAIConversationParams, ForkedConversationDestination, WorkspaceAction};
-use crate::workspaces::user_profiles::{UserProfileWithUID, UserProfiles};
 use crate::workspaces::user_workspaces::UserWorkspaces;
 use crate::{
     report_error, report_if_error, send_telemetry_from_ctx, AIAgentTodoList, Appearance, FileEdit,
     LLMPreferences, PrivacySettings, ToastStack,
 };
-
-/// The default display name used for the user if they have no associated display name.
-const DEFAULT_USER_DISPLAY_NAME: &str = "User";
 
 const HAS_PENDING_ACTION: &str = "HasPendingAction";
 const DISPATCHED_REQUESTED_EDIT_KEYMAP_CONTEXT: &str = "PendingAIRequestedEdits";
@@ -217,79 +215,6 @@ const AUTO_EXPAND_REQUESTED_COMMAND_DELAY: std::time::Duration =
 
 pub const RICH_CONTENT_SECRET_FIRST_CHAR_POSITION_ID: &str =
     "ai_block:rich_content_secret_first_char_position";
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct UserAvatarInfo {
-    display_name: String,
-    profile_image_path: Option<String>,
-}
-
-fn current_user_avatar_info(app: &AppContext) -> UserAvatarInfo {
-    let auth_state = AuthStateProvider::as_ref(app).get().clone();
-    UserAvatarInfo {
-        display_name: auth_state
-            .username_for_display()
-            .unwrap_or_else(|| DEFAULT_USER_DISPLAY_NAME.to_owned()),
-        profile_image_path: auth_state.user_photo_url(),
-    }
-}
-
-fn non_empty_photo_url(photo_url: &str) -> Option<String> {
-    (!photo_url.is_empty()).then(|| photo_url.to_string())
-}
-
-fn display_name_for_user_profile(profile: &UserProfileWithUID) -> String {
-    profile
-        .display_name
-        .as_ref()
-        .filter(|name| !name.is_empty())
-        .or_else(|| (!profile.email.is_empty()).then_some(&profile.email))
-        .cloned()
-        .unwrap_or_else(|| profile.firebase_uid.to_string())
-}
-
-fn user_avatar_info_for_conversation_creator(
-    creator: Option<&UserProfileWithUID>,
-    creator_uid: Option<&str>,
-    fallback: UserAvatarInfo,
-    app: &AppContext,
-) -> UserAvatarInfo {
-    if let Some(creator) = creator {
-        return UserAvatarInfo {
-            display_name: display_name_for_user_profile(creator),
-            profile_image_path: non_empty_photo_url(&creator.photo_url),
-        };
-    }
-
-    if let Some(creator_uid) = creator_uid {
-        if let Some(profile) = UserProfiles::as_ref(app).profile_for_uid(UserUid::new(creator_uid))
-        {
-            return UserAvatarInfo {
-                display_name: profile.displayable_identifier(),
-                profile_image_path: non_empty_photo_url(&profile.photo_url),
-            };
-        }
-    }
-
-    fallback
-}
-
-fn user_avatar_info_for_ai_block(
-    model: &dyn AIBlockModel<View = AIBlock>,
-    app: &AppContext,
-) -> UserAvatarInfo {
-    let fallback = current_user_avatar_info(app);
-    let server_metadata = model
-        .conversation(app)
-        .and_then(|conversation| conversation.server_metadata());
-
-    user_avatar_info_for_conversation_creator(
-        server_metadata.and_then(|metadata| metadata.creator.as_ref()),
-        server_metadata.and_then(|metadata| metadata.metadata.creator_uid.as_deref()),
-        fallback,
-        app,
-    )
-}
 
 pub fn init(app: &mut AppContext) {
     use warpui::keymap::macros::*;
@@ -915,8 +840,6 @@ pub struct AIBlock {
     model: Rc<dyn AIBlockModel<View = AIBlock>>,
     terminal_model: Arc<FairMutex<TerminalModel>>,
     client_ids: ClientIdentifiers,
-    profile_image_path: Option<String>,
-    user_display_name: String,
 
     /// Only applies to text selections made at the `AIBlock` level. Child views of the `AIBlock`
     /// are responsible for managing their own text selection states. We need this in an RwLock so
@@ -927,7 +850,6 @@ pub struct AIBlock {
     controller: ModelHandle<BlocklistAIController>,
     active_session: ModelHandle<ActiveSession>,
     terminal_view_id: EntityId,
-    window_id: warpui::WindowId,
 
     /// The current working directory at the time the AI block was created. Note that this
     /// is different from `directory_context`, which represents the directory-related contexts
@@ -1076,6 +998,11 @@ pub struct AIBlock {
     /// Per-action `RunAgentsCardView`, lazily created.
     run_agents_card_views: HashMap<AIAgentActionId, ViewHandle<RunAgentsCardView>>,
 
+    /// Per-`create_documents`-action `BuildPlanCardView`, lazily created. The
+    /// card renders under a completed plan document (in `/plan` mode) and offers
+    /// "Build locally" / "Build in cloud".
+    build_plan_card_views: HashMap<AIAgentActionId, ViewHandle<BuildPlanCardView>>,
+
     /// Handle for the background link detection task, kept so we can abort a previous
     /// detection when a new one is spawned (e.g. on shell data change).
     link_detection_handle: Option<SpawnedFutureHandle>,
@@ -1126,7 +1053,6 @@ impl AIBlock {
         terminal_view_id: EntityId,
         ctx: &mut ViewContext<Self>,
     ) -> Self {
-        let user_avatar_info = user_avatar_info_for_ai_block(model.as_ref(), ctx);
         let num_attached_context_blocks = num_attached_context_blocks(model.inputs_to_render(ctx));
         let has_attached_context_selected_text =
             has_attached_context_selected_text(model.inputs_to_render(ctx));
@@ -1496,8 +1422,6 @@ impl AIBlock {
             model,
             terminal_model,
             client_ids,
-            profile_image_path: user_avatar_info.profile_image_path,
-            user_display_name: user_avatar_info.display_name,
             controller,
             action_model,
             context_model,
@@ -1506,7 +1430,6 @@ impl AIBlock {
             requested_action_ids: Default::default(),
             auto_expand_requested_command_timer_handle: None,
             selected_text: Arc::new(RwLock::new(None)),
-            window_id: ctx.window_id(),
             state_handles: Default::default(),
             time_to_first_token: OnceCell::new(),
             time_to_last_token: None,
@@ -1557,6 +1480,7 @@ impl AIBlock {
             imported_comments: Default::default(),
             has_imported_comments: false,
             run_agents_card_views: Default::default(),
+            build_plan_card_views: Default::default(),
             link_detection_handle: None,
             #[cfg(feature = "local_fs")]
             resolved_code_block_paths: Default::default(),
@@ -1843,9 +1767,6 @@ impl AIBlock {
 
         self.client_ids.conversation_id = new_conversation_id;
         self.model = new_model;
-        let user_avatar_info = user_avatar_info_for_ai_block(self.model.as_ref(), ctx);
-        self.profile_image_path = user_avatar_info.profile_image_path;
-        self.user_display_name = user_avatar_info.display_name;
         self.run_secret_redaction_on_user_query(new_conversation_id, ctx);
 
         // Re-detect all links for the new conversation.
@@ -2075,6 +1996,10 @@ impl AIBlock {
                 self.ensure_run_agents_card_view(&action.id, req, ctx);
             }
 
+            if matches!(&action.action, AIAgentActionType::CreateDocuments { .. }) {
+                self.ensure_build_plan_card_view(&action.id, ctx);
+            }
+
             // Ensure a button component exists for UseComputer actions.
             if matches!(&action.action, AIAgentActionType::UseComputer(_)) {
                 self.view_screenshot_buttons
@@ -2297,6 +2222,17 @@ impl AIBlock {
                             .entry(collapsible_id)
                             .or_default();
                     }
+                }
+                // Register collapsible state for a research sub-agent thread so
+                // its "Sub-agent" block can expand/collapse. Collapsed by default
+                // — the user opts in to peek at the streamed steps.
+                AIAgentOutputMessageType::Subagent(SubagentCall {
+                    subagent_type: SubagentType::Research,
+                    ..
+                }) => {
+                    self.collapsible_block_states
+                        .entry(message.id.clone())
+                        .or_insert_with(CollapsibleElementState::collapsed);
                 }
                 _ => {}
             }
@@ -3043,6 +2979,7 @@ impl AIBlock {
                         ctx,
                     )
                     .with_can_show_diff_ui(false)
+                    .with_compact_gutter()
                 });
                 view.update(ctx, |view, ctx| {
                     view.set_starting_line_number({
@@ -3553,9 +3490,16 @@ impl AIBlock {
                     self.requested_commands_to_auto_collapse.remove(action_id);
                 }
 
+                // Only reveal the separate terminal command block when it renders connected
+                // directly beneath the row. When several commands are auto-executed within one
+                // exchange, a middle command's block would appear detached at the bottom of the
+                // conversation; in that case the view renders the command output inline instead,
+                // so keep the separate block hidden to avoid a duplicated, misplaced detail.
+                let renders_connected_block =
+                    view.as_ref(ctx).detail_renders_as_connected_block(ctx);
                 ctx.emit(AIBlockEvent::UpdateInlineActionVisibility {
                     action_id: action_id.clone(),
-                    is_visible: *is_expanded,
+                    is_visible: *is_expanded && renders_connected_block,
                 });
                 ctx.notify();
             }
@@ -5027,6 +4971,16 @@ impl AIBlock {
             .filter(|selection| !selection.is_empty())
     }
 
+    /// Whether the block's own (block-level) `SelectableArea` currently has a
+    /// text-selection drag in progress. The block owns this selection state
+    /// independently of the point-based grid selection (`TerminalView::is_selecting`),
+    /// so the terminal view surfaces this to the block list to drive
+    /// autoscroll-on-drag while the user drags a prose selection toward the
+    /// viewport edges.
+    pub fn is_block_level_selecting(&self) -> bool {
+        self.state_handles.selection_handle.is_selecting()
+    }
+
     /// Test-only helper to set the block-level text selection, which is normally
     /// written by the `SelectableArea` selection callback during a drag.
     #[cfg(any(test, feature = "integration_tests"))]
@@ -6184,6 +6138,19 @@ pub enum AIBlockEvent {
     OpenAllImportedCommentsForConversation {
         conversation_id: AIConversationId,
     },
+    /// Emitted from the end-of-plan `BuildPlanCardView` when the user chooses to
+    /// build the just-written plan in this session. The terminal view resolves the
+    /// plan document for the conversation and starts a Normal-mode implementation
+    /// turn (lifting /plan mode's research-only restrictions).
+    BuildPlanLocally {
+        conversation_id: AIConversationId,
+    },
+    /// Emitted from the end-of-plan `BuildPlanCardView` when the user chooses to
+    /// hand the plan off to a cloud agent. The terminal view resolves the plan
+    /// document and seeds a cloud spawn/handoff with it.
+    BuildPlanInCloud {
+        conversation_id: AIConversationId,
+    },
 }
 
 impl Entity for AIBlock {
@@ -7130,6 +7097,32 @@ impl AIBlock {
             }
         });
         self.run_agents_card_views.insert(action_id.clone(), view);
+    }
+
+    /// Lazily create the per-`create_documents`-action `BuildPlanCardView`.
+    /// Idempotent. The card is a dumb button pair; its Build events are
+    /// re-emitted as [`AIBlockEvent::BuildPlanLocally`] /
+    /// [`AIBlockEvent::BuildPlanInCloud`] carrying this block's conversation id
+    /// so the terminal view can resolve the plan document and start the build.
+    fn ensure_build_plan_card_view(
+        &mut self,
+        action_id: &AIAgentActionId,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        if self.build_plan_card_views.contains_key(action_id) {
+            return;
+        }
+        let view = ctx.add_typed_action_view(BuildPlanCardView::new);
+        let conversation_id = self.client_ids.conversation_id;
+        ctx.subscribe_to_view(&view, move |_, _, event, ctx| match event {
+            BuildPlanCardViewEvent::BuildLocallyRequested => {
+                ctx.emit(AIBlockEvent::BuildPlanLocally { conversation_id });
+            }
+            BuildPlanCardViewEvent::BuildInCloudRequested => {
+                ctx.emit(AIBlockEvent::BuildPlanInCloud { conversation_id });
+            }
+        });
+        self.build_plan_card_views.insert(action_id.clone(), view);
     }
 }
 #[cfg(test)]

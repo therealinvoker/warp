@@ -31,6 +31,11 @@ fn main() -> Result<()> {
     // backend at {WARP_SERVER_ROOT_URL}/changelog.json (see
     // app/src/autoupdate/changelog.rs).
     state = state.with_additional_features(&[warp_core::features::FeatureFlag::Changelog]);
+    // Personal-fork: enable the redesigned orchestration agent-progress UI (the
+    // composer-anchored "N Working" indicator, in-stream delegation cards, and
+    // the read-only live progress modal, replacing the top pill bar) in the OSS
+    // build. It otherwise only ships in dogfood via DOGFOOD_FLAGS.
+    state = state.with_additional_features(&[warp_core::features::FeatureFlag::AgentProgressUI]);
     // Personal-fork: surface the embedded browser preview tab (and its toolbelt
     // launcher) in the OSS build, since it otherwise only ships in dogfood.
     #[cfg(target_os = "macos")]

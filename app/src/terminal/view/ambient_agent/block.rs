@@ -34,7 +34,7 @@ pub(super) fn cloud_mode_setup_row_spacing(
             .with_margin_right(*PADDING_LEFT)
             .with_margin_bottom(CONTENT_ITEM_VERTICAL_MARGIN)
     } else {
-        element.with_agent_output_item_spacing(app)
+        element.with_agent_output_item_spacing()
     }
 }
 

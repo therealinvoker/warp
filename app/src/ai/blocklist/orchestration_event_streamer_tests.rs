@@ -397,7 +397,7 @@ fn wake_ready_does_not_advance_cursor_before_wake_preparation() {
     use warpui::App;
 
     use crate::ai::agent::conversation::AIConversation;
-    use crate::ai::agent_events::AgentMessageEventMetadata;
+    use crate::ai::agent_events::{AgentEventDriverStop, AgentMessageEventMetadata};
     use crate::server::server_api::ai::{AIClient, MockAIClient};
     use crate::server::server_api::ServerApiProvider;
 
@@ -425,11 +425,14 @@ fn wake_ready_does_not_advance_cursor_before_wake_preparation() {
             me.finish_dormant_claude_wake_listener(
                 conversation_id,
                 1,
-                Ok(Some(AgentMessageEventMetadata {
-                    sequence: 42,
-                    message_id: "message-123".to_string(),
-                    occurred_at: "2026-01-01T00:00:01Z".to_string(),
-                })),
+                Ok((
+                    Some(AgentMessageEventMetadata {
+                        sequence: 42,
+                        message_id: "message-123".to_string(),
+                        occurred_at: "2026-01-01T00:00:01Z".to_string(),
+                    }),
+                    AgentEventDriverStop::ConsumerRequested,
+                )),
                 ctx,
             );
         });

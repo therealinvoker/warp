@@ -29,14 +29,14 @@ use warp_core::context_flag::ContextFlag;
 use warp_core::report_if_error;
 use warp_core::ui::color::blend::Blend;
 use warp_core::ui::color::contrast::MinimumAllowedContrast;
-use warp_core::ui::color::ContrastingColor;
+use warp_core::ui::color::{coloru_with_opacity, ContrastingColor};
 use warp_core::ui::theme::color::internal_colors;
 use warp_core::ui::theme::{AnsiColorIdentifier, Fill};
 use warpui::elements::{
     ChildAnchor, ChildView, Clipped, ConstrainedBox, Container, CornerRadius, CrossAxisAlignment,
     DispatchEventResult, Element, Empty, EventHandler, Flex, MainAxisAlignment, MainAxisSize,
     OffsetPositioning, ParentAnchor, ParentElement, ParentOffsetBounds, Radius, Shrinkable, Stack,
-    Wrap, WrapFill, WrapFillEntireRun,
+    Text, Wrap, WrapFill, WrapFillEntireRun,
 };
 use warpui::r#async::{SpawnedFutureHandle, Timer};
 use warpui::{
@@ -49,6 +49,7 @@ pub(crate) use self::environment_selector::sort_environments_by_recency;
 pub(crate) use self::environment_selector::{
     EnvironmentSelector, EnvironmentSelectorEvent, EnvironmentSelectorTarget,
 };
+use crate::ai::agent::UserQueryMode;
 use crate::ai::blocklist::agent_view::is_in_cloud_context;
 use crate::ai::blocklist::history_model::{BlocklistAIHistoryEvent, BlocklistAIHistoryModel};
 use crate::ai::blocklist::prompt::prompt_alert::{PromptAlertEvent, PromptAlertView};
@@ -87,7 +88,9 @@ use crate::terminal::input::models::InlineModelSelectorTab;
 use crate::terminal::input::{HandoffComposeState, MenuPositioningProvider};
 #[cfg(not(target_family = "wasm"))]
 use crate::terminal::local_shell::LocalShellState;
-use crate::terminal::profile_model_selector::{ProfileModelSelector, ProfileModelSelectorEvent};
+use crate::terminal::profile_model_selector::{
+    ProfileModelSelector, ProfileModelSelectorEvent, SelectorSections,
+};
 use crate::terminal::session_settings::{
     SessionSettings, SessionSettingsChangedEvent, ToolbarChipSelection,
 };
@@ -207,6 +210,10 @@ pub struct AgentInputFooter {
     stop_remote_control_button: ViewHandle<ActionButton>,
     context_window_button: ViewHandle<ActionButton>,
     model_selector: ViewHandle<ProfileModelSelector>,
+    /// Profile-only selector rendered on the controls row below the editor. The
+    /// combined `model_selector` above renders the model/agent picker only, so
+    /// the profile picker lives here instead of beside the editor.
+    profile_selector: ViewHandle<ProfileModelSelector>,
     environment_selector: Option<ViewHandle<EnvironmentSelector>>,
     handoff_environment_selector: ViewHandle<EnvironmentSelector>,
     prompt_alert: ViewHandle<PromptAlertView>,
@@ -286,13 +293,11 @@ impl AgentInputFooter {
 
         let nld_button = ctx.add_typed_action_view(|ctx| {
             let is_nld_enabled = AISettings::as_ref(ctx).is_ai_autodetection_enabled(ctx);
-            // Match the `A+` glyph to a text button's label (e.g. `/remote-control`)
-            // instead of filling the whole square button, so it reads at the same
-            // size/weight as the neighboring toolbar text.
-            let nld_icon_size = Appearance::as_ref(ctx).monospace_font_size() + 2.0;
-            let mut button = ActionButton::new("", NLDButtonTheme)
-                .with_icon(Icon::NLD)
-                .with_icon_size(nld_icon_size)
+            // Render autodetection as a plain "A" letter rather than the bold
+            // `A+` glyph image, so it reads at the same font/size/weight as the
+            // neighboring toolbar text (ui font, `monospace + 2`, normal weight
+            // via `ButtonSize::AgentInputButton`).
+            let mut button = ActionButton::new("A", NLDButtonTheme)
                 .with_size(button_size)
                 .with_tooltip_alignment(TooltipAlignment::Left)
                 .on_click(|ctx| {
@@ -620,7 +625,7 @@ impl AgentInputFooter {
                 .with_size(cli_button_size)
                 .with_tooltip_alignment(TooltipAlignment::Left)
                 .on_click(|ctx| {
-                    ctx.dispatch_typed_action(AgentInputFooterAction::StartRemoteControl);
+                    ctx.dispatch_typed_action(TerminalAction::StartRemoteControlChip);
                 })
         });
 
@@ -632,19 +637,40 @@ impl AgentInputFooter {
                 .with_size(cli_button_size)
                 .with_tooltip_alignment(TooltipAlignment::Left)
                 .on_click(|ctx| {
-                    ctx.dispatch_typed_action(AgentInputFooterAction::StopRemoteControl);
+                    ctx.dispatch_typed_action(TerminalAction::StopRemoteControlChip);
                 })
         });
 
         let context_window_button = ctx.add_typed_action_view(|_ctx| {
-            ActionButton::new("", AgentInputButtonTheme)
-                .with_icon(Icon::ContextRemaining100)
+            ActionButton::new("", ContextUsageButtonTheme)
+                .with_icon(Icon::ContextRemaining0)
                 .with_tooltip("Context window usage")
                 .with_size(button_size)
                 .with_tooltip_alignment(TooltipAlignment::Left)
         });
 
         let profile_model_selector_full = ctx.add_typed_action_view(|ctx| {
+            let mut selector = ProfileModelSelector::new(
+                menu_positioning_provider.clone(),
+                terminal_view_id,
+                ai_input_model.clone(),
+                ambient_agent_view_model.clone(),
+                terminal_model.clone(),
+                None,
+                ctx,
+            );
+            selector.set_render_compact(false, ctx);
+            // The model/agent picker stays on the row with the editor; the
+            // profile picker is rendered separately on the controls row below.
+            selector.set_sections(SelectorSections::ModelOnly, ctx);
+            selector
+        });
+
+        ctx.subscribe_to_view(&profile_model_selector_full, |me, _, event, ctx| {
+            me.handle_profile_model_selector_event(event, ctx);
+        });
+
+        let profile_selector = ctx.add_typed_action_view(|ctx| {
             let mut selector = ProfileModelSelector::new(
                 menu_positioning_provider.clone(),
                 terminal_view_id,
@@ -655,10 +681,11 @@ impl AgentInputFooter {
                 ctx,
             );
             selector.set_render_compact(false, ctx);
+            selector.set_sections(SelectorSections::ProfileOnly, ctx);
             selector
         });
 
-        ctx.subscribe_to_view(&profile_model_selector_full, |me, _, event, ctx| {
+        ctx.subscribe_to_view(&profile_selector, |me, _, event, ctx| {
             me.handle_profile_model_selector_event(event, ctx);
         });
 
@@ -882,6 +909,7 @@ impl AgentInputFooter {
             plugin_chip_ready: false,
             context_window_button,
             model_selector: profile_model_selector_full,
+            profile_selector,
             environment_selector,
             handoff_environment_selector,
             prompt_alert,
@@ -2378,6 +2406,44 @@ impl AgentInputFooter {
     /// Shared builder for the standard agent toolbar row. `include` selects which
     /// items to render, so the same layout backs both the combined toolbar
     /// (`|_| true`) and the split "outside" row (everything but inside controls).
+    /// Whether the active conversation's most recent turn was submitted in
+    /// `/plan` mode. Sourced from the latest exchange's [`UserQueryMode`] so the
+    /// pill persists across the research-only plan turn.
+    fn is_plan_mode_active(&self, app: &AppContext) -> bool {
+        BlocklistAIHistoryModel::as_ref(app)
+            .active_conversation(self.terminal_view_id)
+            .and_then(|conversation| conversation.latest_exchange())
+            .is_some_and(|exchange| {
+                exchange
+                    .input
+                    .iter()
+                    .any(|input| matches!(input.user_query_mode(), Some(UserQueryMode::Plan)))
+            })
+    }
+
+    /// A small magenta "Plan" pill matching the composer chip styling, used as
+    /// the persistent plan-mode indicator.
+    fn render_plan_mode_pill(&self, app: &AppContext) -> Box<dyn Element> {
+        let appearance = Appearance::as_ref(app);
+        let theme = appearance.theme();
+        let text_color = theme.ansi_fg_magenta();
+        let bg_color = coloru_with_opacity(text_color, 10);
+
+        let label = Text::new("Plan".to_string(), appearance.ui_font_family(), 12.)
+            .with_color(text_color)
+            .soft_wrap(false)
+            .finish();
+
+        Container::new(label)
+            .with_padding_left(8.)
+            .with_padding_right(8.)
+            .with_padding_top(2.)
+            .with_padding_bottom(2.)
+            .with_background_color(bg_color)
+            .with_corner_radius(CornerRadius::with_all(Radius::Pixels(6.)))
+            .finish()
+    }
+
     fn render_standard_toolbar(
         &self,
         include: &dyn Fn(&AgentToolbarItemKind) -> bool,
@@ -2420,6 +2486,25 @@ impl AgentInputFooter {
         );
         let is_conversation_transcript_context =
             is_conversation_transcript_context(self.terminal_view_id, &terminal_model, app);
+
+        // Persistent Plan-mode pill: shown while the active conversation's latest
+        // turn was submitted in /plan mode, so the indicator stays visible through
+        // the (research-only) plan turn.
+        if self.is_plan_mode_active(app) {
+            left_buttons.add_child(self.render_plan_mode_pill(app));
+        }
+
+        // Profile picker lives on this row (below the editor); the model/agent
+        // picker stays on the editor row. Only render when the profile-only
+        // selector actually has something to show (multiple profiles, not a
+        // viewer, not an ambient/cloud pane).
+        if self
+            .profile_selector
+            .as_ref(app)
+            .will_render(shared_status.is_viewer(), app)
+        {
+            left_buttons.add_child(ChildView::new(&self.profile_selector).finish());
+        }
 
         for item in &left_items {
             if !include(item) {
@@ -2568,8 +2653,6 @@ pub enum AgentInputFooterAction {
     OpenPluginInstallInstructionsPane,
     OpenPluginUpdateInstructionsPane,
     DismissPluginChip,
-    StartRemoteControl,
-    StopRemoteControl,
     OpenCodingAgentSettings,
     /// User clicked the "Hand off to cloud" footer chip. The terminal `Input`
     /// subscriber decides whether to dispatch the immediate empty-prompt
@@ -2755,12 +2838,6 @@ impl TypedActionView for AgentInputFooter {
                 }
                 ctx.notify();
             }
-            AgentInputFooterAction::StartRemoteControl => {
-                ctx.emit(AgentInputFooterEvent::StartRemoteControl);
-            }
-            AgentInputFooterAction::StopRemoteControl => {
-                ctx.emit(AgentInputFooterEvent::StopRemoteControl);
-            }
             AgentInputFooterAction::OpenCodingAgentSettings => {
                 #[cfg(not(target_family = "wasm"))]
                 ctx.dispatch_typed_action_deferred(WorkspaceAction::ScrollToSettingsWidget {
@@ -2800,8 +2877,6 @@ pub enum AgentInputFooterEvent {
     InsertIntoCLIRichInput(String),
     ToggleCodeReviewPane(CLIAgent),
     ToggleFileExplorer(CLIAgent),
-    StartRemoteControl,
-    StopRemoteControl,
     OpenRichInput,
     HideRichInput,
     ToggledChipMenu {
@@ -2887,6 +2962,50 @@ impl ActionButtonTheme for AgentInputButtonTheme {
         } else {
             None
         }
+    }
+}
+
+/// Theme for the context-window usage chip. Delegates its chrome (surface fill,
+/// border, font) to [`AgentInputButtonTheme`] but paints the glyph in the
+/// primary (near-white) text color instead of muted sub-text, so the
+/// used-context arc reads at a glance in the footer.
+pub(crate) struct ContextUsageButtonTheme;
+
+impl ActionButtonTheme for ContextUsageButtonTheme {
+    fn background(&self, hovered: bool, appearance: &Appearance) -> Option<Fill> {
+        AgentInputButtonTheme.background(hovered, appearance)
+    }
+
+    fn text_color(
+        &self,
+        _hovered: bool,
+        background: Option<Fill>,
+        appearance: &Appearance,
+    ) -> ColorU {
+        // Mirror `AgentInputButtonTheme`'s background blending so contrast is
+        // computed against the actually-rendered chip color, but use the
+        // primary (brighter) text color for high-contrast readability.
+        let base_bg = appearance.theme().surface_1();
+        let effective_bg = background
+            .map(|overlay| base_bg.blend(&overlay))
+            .unwrap_or(base_bg);
+
+        appearance
+            .theme()
+            .main_text_color(effective_bg)
+            .into_solid()
+    }
+
+    fn border(&self, appearance: &Appearance) -> Option<ColorU> {
+        AgentInputButtonTheme.border(appearance)
+    }
+
+    fn should_opt_out_of_contrast_adjustment(&self) -> bool {
+        AgentInputButtonTheme.should_opt_out_of_contrast_adjustment()
+    }
+
+    fn font_properties(&self) -> Option<warpui::fonts::Properties> {
+        AgentInputButtonTheme.font_properties()
     }
 }
 
@@ -3023,6 +3142,40 @@ impl ActionButtonTheme for GhostIconButtonTheme {
 
     fn should_opt_out_of_contrast_adjustment(&self) -> bool {
         true
+    }
+}
+
+/// Borderless, transparent variant of `AgentInputButtonTheme` used by the
+/// cloud-agent kickoff composer's environment ("New environment") and model
+/// ("Bang") selectors, so those labeled chips render flat without the surface
+/// "box" behind them while keeping the semibold label weight of the other v2
+/// cloud chips.
+pub(crate) struct CloudGhostChipTheme;
+
+impl ActionButtonTheme for CloudGhostChipTheme {
+    fn background(&self, _hovered: bool, _appearance: &Appearance) -> Option<Fill> {
+        None
+    }
+
+    fn text_color(
+        &self,
+        hovered: bool,
+        background: Option<Fill>,
+        appearance: &Appearance,
+    ) -> ColorU {
+        AgentInputButtonTheme.text_color(hovered, background, appearance)
+    }
+
+    fn border(&self, _appearance: &Appearance) -> Option<ColorU> {
+        None
+    }
+
+    fn should_opt_out_of_contrast_adjustment(&self) -> bool {
+        true
+    }
+
+    fn font_properties(&self) -> Option<warpui::fonts::Properties> {
+        AgentInputButtonTheme.font_properties()
     }
 }
 

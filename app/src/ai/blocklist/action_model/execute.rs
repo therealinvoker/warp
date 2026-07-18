@@ -598,6 +598,39 @@ impl BlocklistAIActionExecutor {
             };
         }
 
+        // If the terminal already has an active long-running command (for
+        // example one that blocked on a macOS permission prompt and never
+        // returned), we cannot start a new command in it. Deliver a
+        // deterministic result to the agent right now instead of parking the
+        // request awaiting a confirmation the user may not be able to give: a
+        // long-running block hides the input box, so a parked command would
+        // leave the agent hanging with no result and no way to proceed. The
+        // agent can wait for / read the running command via its dedicated
+        // tools; this guard only blocks *starting a new* command.
+        if matches!(
+            action.action,
+            AIAgentActionType::RequestCommandOutput { .. }
+        ) && self.terminal_has_active_long_running_block()
+        {
+            let action_id = action.id.clone();
+            let result = AIAgentActionResultType::RequestCommandOutput(
+                RequestCommandOutputResult::CancelledBeforeExecution,
+            );
+            ctx.emit(BlocklistAIActionExecutorEvent::ExecutingAction {
+                action_id: action_id.clone(),
+            });
+            ctx.emit(BlocklistAIActionExecutorEvent::FinishedAction {
+                result: Arc::new(AIAgentActionResult {
+                    id: action_id,
+                    task_id: action.task_id.clone(),
+                    result,
+                }),
+                conversation_id,
+                cancellation_reason: None,
+            });
+            return TryExecuteResult::ExecutedSync;
+        }
+
         let input = ExecuteActionInput {
             action: &action,
             conversation_id,
@@ -1024,6 +1057,18 @@ impl BlocklistAIActionExecutor {
 
     fn is_shared_session_viewer(&self) -> bool {
         self.terminal_model.lock().is_shared_session_viewer()
+    }
+
+    /// Whether the terminal's active block is a still-running long-running
+    /// command. Used to short-circuit new command requests so the agent gets a
+    /// deterministic result instead of hanging when the terminal is occupied
+    /// (e.g. a command blocked on an OS permission prompt).
+    fn terminal_has_active_long_running_block(&self) -> bool {
+        self.terminal_model
+            .lock()
+            .block_list()
+            .active_block()
+            .is_active_and_long_running()
     }
 }
 impl Entity for BlocklistAIActionExecutor {

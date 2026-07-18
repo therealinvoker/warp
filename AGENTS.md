@@ -2,10 +2,15 @@
 
 This file provides guidance when working with code in this repository.
 
-> **UI / design notes:** See [`doc/design.md`](doc/design.md) for durable,
+> **UI / design notes:** See [`docs/design.md`](docs/design.md) for durable,
 > non-obvious findings about the client UI (composer font sizing, icon-only
 > button glyph sizing, input-box padding, SVG icon masking, etc.). Read it before
 > doing composer/input UI work.
+>
+> **Voice client notes:** See [`docs/voice_client.md`](docs/voice_client.md) for
+> durable findings about the voice overlay (STT/Realtime, local Piper TTS,
+> spoken-text normalization, AEC/barge-in, response verbosity). Read it before
+> doing voice, TTS, transcription, or overlay work.
 
 ## Fork Notes — Personal Fork (Do Not Upstream)
 
@@ -89,6 +94,58 @@ Verifying edits recompiles the crate under test. The `warp` app crate is ~1M LOC
 - **Iterate with one scoped `cargo check`.** While iterating, run `cargo check -p <crate>` for the *smallest* crate that changed — e.g. `-p onboarding` for onboarding-slide work (fast), `-p warp` only when `app/src` is touched. Run `cargo fmt` freely; it is cheap.
 - **Defer the heavy checks to the end.** Run `cargo clippy` (the version in `./script/presubmit`) and the relevant `cargo nextest` tests once the change is complete — not on every intermediate edit. Run the full `./script/presubmit` before opening/updating a PR (see Pull Request Workflow).
 - **Scope tests while iterating.** Prefer `cargo nextest run -p <crate> <filter>` for the crate you changed over a whole-workspace run.
+
+### Local UI screenshot-and-review loop (macOS)
+
+For UI changes you can build the app, drive it to the relevant screen, screenshot
+it, and review the result yourself — without shipping an unverified change to the
+user. The whole loop runs **in the background without stealing window focus**.
+
+- **Build/run the dev build, not the snapshot.** `TERM=xterm-256color ./script/dev`
+  (re)builds and launches `bang-dev.app` (bundle id **`dev.warp.WarpOssDev`**, data
+  profile `bang-dev`, pointed at the local harness on `:8088`). The `script/snapshot`
+  daily driver is a *separate* app (`~/Applications/Bang.app`, bundle id
+  `dev.warp.WarpOss`); the user may also run the real upstream **Warp** (a different
+  bundle) at the same time. All are "Warp-branded", so identify the target by
+  **bundle id**, never by whatever is frontmost.
+- **Always set `TERM=xterm-256color` for builds.** Under the non-TTY agent shell a
+  post-build helper otherwise panics with `Result::unwrap() ... Term(ColorOutOfRange)`
+  (the build *compiles* fine, then dies in bundling). This bites `script/dev`,
+  `script/run`, and `script/snapshot`.
+- **Navigate without clicking, via the `warposs://` URL scheme.** Deep links open
+  without keyboard/mouse automation, e.g. the cloud composer:
+  `open -b dev.warp.WarpOssDev "warposs://action/new_cloud_agent_conversation"`.
+  Target a specific instance with `open -b <bundle-id>` since every Warp-family app
+  registers the same `warposs` scheme. (Deep-link actions live in `app/src/uri/mod.rs`.)
+- **Screenshot in the background with `script/ui-shot [bundle-id] [out.png]`.** It
+  resolves the app's pid from its bundle id, finds the window's `CGWindowID` (Swift),
+  and captures just that window via `screencapture -l` — so the window need **not** be
+  frontmost and focus is **not** stolen (verify with `lsappinfo front` before/after).
+  Then read the PNG back to review. Do **not** use full-screen `screencapture` +
+  `open`/activate: that steals focus and often grabs the wrong Warp-family window.
+- **Permissions.** `script/ui-shot` only needs **Screen Recording** for the controlling
+  app (e.g. Cursor). **Accessibility is intentionally not required** — do not rely on
+  `osascript`/System Events clicks or keystrokes; if Accessibility isn't granted to the
+  controlling app they fail with `-25211` / `1002`. Prefer URL-scheme navigation instead.
+- **Feature gating.** The v2 cloud composer (harness chip + `New environment` +
+  model selector) only renders when compiled with the `cloud_mode_input_v2` feature
+  (in the default set) **and** the ambient-agent pane is in its "configuring" state
+  (the empty "Kick off a cloud agent" screen). Otherwise you get the v1 `Default | Bang`
+  toolbar — check you're on the right screen before concluding a change didn't apply.
+- **Typical loop:**
+
+```bash
+TERM=xterm-256color ./script/dev                                             # build + launch bang-dev
+open -b dev.warp.WarpOssDev "warposs://action/new_cloud_agent_conversation"  # navigate (no clicks)
+./script/ui-shot dev.warp.WarpOssDev /tmp/bang-ui.png                        # capture in background
+```
+
+- **Faster rebuilds (optional).** The dev profile is already lean
+  (`debug = "line-tables-only"`, unpacked split-debuginfo). The dominant remaining
+  cost for an `app/src`-only change is **link time** on the ~1M-LOC binary. Installing a
+  fast linker gives the biggest win: `brew install llvm` (or `zld`/`mold`) and set the
+  macOS linker to `ld64.lld` via `RUSTFLAGS`/`.cargo/config.toml`. This forces one full
+  rebuild, after which every incremental link is much faster.
 
 ### Platform Setup
 - `./script/bootstrap` - Platform-specific setup plus common agent skill installation from `skills-lock.json`; prompts for project/global when an install or update is needed unless a target flag or environment override is provided.

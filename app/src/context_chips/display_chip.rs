@@ -222,6 +222,25 @@ fn add_git_branch_status_child(content: &mut Flex, child: Box<dyn Element>, marg
     );
 }
 
+/// Reduce a working-directory path to just its final component (the current
+/// folder name), so the chip reads e.g. `bang-client` instead of the full
+/// `~/Workspace/Bang/bang-client`. Preserves special roots (`~`, `/`) and
+/// falls back to the original text when there is no trailing component.
+fn last_dir_component(path: &str) -> String {
+    let trimmed = path.trim();
+    // Strip trailing separators, but keep a bare root/home marker intact.
+    let without_trailing = trimmed.trim_end_matches(['/', '\\']);
+    if without_trailing.is_empty() {
+        return trimmed.to_string();
+    }
+    without_trailing
+        .rsplit(['/', '\\'])
+        .next()
+        .filter(|component| !component.is_empty())
+        .unwrap_or(trimmed)
+        .to_string()
+}
+
 const PROMPT_CHIP_DISPLAY_ID: &str = "PromptChipDisplay";
 const DROP_SHADOW_COLOR: ColorU = ColorU {
     r: 0,
@@ -1758,7 +1777,7 @@ impl DisplayChip {
         let allow_show_menu = show_menu && !is_in_active_ambient_agent && !is_cli_agent_active;
 
         let button = if allow_show_menu {
-            let chip_text = self.text.clone();
+            let chip_text = last_dir_component(&self.text);
             let font_color = if self.is_in_agent_view {
                 agent_view_chip_color(appearance)
             } else {
@@ -1812,7 +1831,7 @@ impl DisplayChip {
                 theme.ansi_fg_cyan()
             };
 
-            let chip_text = self.text.clone();
+            let chip_text = last_dir_component(&self.text);
             let is_in_agent_view = self.is_in_agent_view;
 
             Hoverable::new(self.mouse_state.clone(), move |state| {

@@ -291,14 +291,20 @@ impl ViewSnapshot {
             .as_ref()
             .and_then(|state| state.current_autosuggestion_text.as_ref())
             .map(|current_autosuggestion_text| {
-                self.layout_ghosted_text(
+                let mut lines = self.layout_ghosted_text(
                     current_autosuggestion_text,
                     size,
                     soft_wrap,
                     Some(preceding_text_width),
                     font_cache,
                     layout_cache,
-                )
+                );
+                // Cap the ghost autosuggestion to a single visual row so a long
+                // suggested prompt (e.g. a prior agent-mode query pulled from
+                // history) doesn't wrap and expand the composer to multiple
+                // lines. Accepting the suggestion still inserts its full text.
+                lines.truncate(1);
+                lines
             })
             .unwrap_or_default()
     }

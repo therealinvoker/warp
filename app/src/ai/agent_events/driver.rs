@@ -113,6 +113,41 @@ pub(crate) enum AgentEventConsumerControlFlow {
     Stop,
 }
 
+/// Why [`run_agent_event_driver`] returned `Ok` (i.e. stopped its reconnect
+/// loop on purpose instead of retrying forever).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AgentEventDriverStop {
+    /// The consumer returned [`AgentEventConsumerControlFlow::Stop`].
+    ConsumerRequested,
+    /// The server reported that the stream's run(s) are gone / no longer
+    /// accessible (a terminal 404 "no accessible runs for the requested
+    /// filter"). Reconnecting cannot recover, so the driver dropped the dead
+    /// subscription rather than spinning on the same 404 forever.
+    RunGone,
+}
+
+/// Substring the harness includes in the 404 body when none of the requested
+/// runs are accessible (see `agentEvents` route). We match on it to treat a
+/// vanished run as a terminal condition instead of a retryable failure.
+const NO_ACCESSIBLE_RUNS_MARKER: &str = "no accessible runs for the requested filter";
+
+/// Classifies an SSE stream error as the *terminal* "the run(s) this stream
+/// filters on are gone / no longer accessible" condition.
+///
+/// This is intentionally narrow: it only matches a `404` whose body carries
+/// [`NO_ACCESSIBLE_RUNS_MARKER`], so genuinely transient failures (network
+/// blips, 5xx, other 4xx) keep their normal retry behavior and are never
+/// silently swallowed.
+pub(crate) fn is_terminal_run_gone_error(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        cause
+            .downcast_ref::<HttpStatusError>()
+            .is_some_and(|http_err| {
+                http_err.status == 404 && http_err.body.contains(NO_ACCESSIBLE_RUNS_MARKER)
+            })
+    })
+}
+
 /// High-level connection state updates emitted by the shared driver.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum AgentEventDriverState {
@@ -292,7 +327,7 @@ pub(crate) async fn run_agent_event_driver<S, C>(
     source: S,
     config: AgentEventDriverConfig,
     consumer: &mut C,
-) -> Result<()>
+) -> Result<AgentEventDriverStop>
 where
     S: AgentEventSource,
     C: AgentEventConsumer,
@@ -310,6 +345,9 @@ where
         let mut stream = match source.open_stream(&config.filter, since_sequence).await {
             Ok(stream) => stream,
             Err(err) => {
+                if is_terminal_run_gone_error(&err) {
+                    return stop_on_run_gone(&config.filter, &err);
+                }
                 failures += 1;
                 let backoff_steps = if is_transient_http_error(&err) {
                     config.reconnect_backoff_steps
@@ -392,10 +430,13 @@ where
                     }
 
                     if matches!(control_flow, AgentEventConsumerControlFlow::Stop) {
-                        return Ok(());
+                        return Ok(AgentEventDriverStop::ConsumerRequested);
                     }
                 }
                 NextDriverItem::StreamItem(Some(Err(err))) => {
+                    if is_terminal_run_gone_error(&err) {
+                        return stop_on_run_gone(&config.filter, &err);
+                    }
                     failures += 1;
                     let backoff_steps = if is_transient_http_error(&err) {
                         config.reconnect_backoff_steps
@@ -452,6 +493,20 @@ where
 enum NextDriverItem {
     StreamItem(Option<Result<AgentEventSourceItem>>),
     ProactiveReconnect,
+}
+
+/// Logs the terminal "run gone" condition once and reports it to the caller so
+/// the dead subscription is dropped instead of retried forever.
+fn stop_on_run_gone(
+    filter: &AgentEventFilter,
+    err: &anyhow::Error,
+) -> Result<AgentEventDriverStop> {
+    log::warn!(
+        "Agent event stream for {} is gone (server reports no accessible runs); \
+         dropping subscription and not retrying: {err:#}",
+        filter.log_label()
+    );
+    Ok(AgentEventDriverStop::RunGone)
 }
 
 async fn notify_driver_state<C: AgentEventConsumer>(

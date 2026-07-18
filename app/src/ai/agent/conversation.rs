@@ -33,7 +33,7 @@ use super::task::{
 use super::task_store::TaskStore;
 use super::{
     AIAgentAction, AIAgentActionId, AIAgentContext, AIAgentExchange, AIAgentExchangeId,
-    AIAgentInput, AIAgentOutput, AIAgentOutputStatus, AIAgentTodo, AIAgentTodoId,
+    AIAgentInput, AIAgentOutput, AIAgentOutputStatus, AIAgentText, AIAgentTodo, AIAgentTodoId,
     FinishedAIAgentOutput, MessageId, OutputModelInfo, RenderableAIError, RequestCost,
     ServerOutputId, Shared, SuggestedLoggingId, Suggestions,
 };
@@ -3080,6 +3080,35 @@ impl AIConversation {
 
     pub fn get_task(&self, task_id: &TaskId) -> Option<&Task> {
         self.task_store.get(task_id)
+    }
+
+    /// Collects a research subagent's streamed steps into a single markdown
+    /// [`AIAgentText`] for its expandable thread. Research subtasks get no
+    /// auto-rendered block (see `CreateTask` handling), so the view pulls the
+    /// live step messages (each an `agent_output`) from the subtask directly and
+    /// renders them inside a collapsible block. Returns `None` when the subtask
+    /// has no textual steps yet.
+    pub fn subagent_thread_text(&self, subagent_task_id: &TaskId) -> Option<AIAgentText> {
+        let source = self.task_store.get(subagent_task_id)?.source()?;
+        let mut buf = String::new();
+        for message in &source.messages {
+            let Some(api::message::Message::AgentOutput(output)) = message.message.as_ref() else {
+                continue;
+            };
+            if output.text.trim().is_empty() {
+                continue;
+            }
+            if !buf.is_empty() {
+                buf.push_str("\n\n");
+            }
+            buf.push_str(&output.text);
+        }
+        if buf.is_empty() {
+            return None;
+        }
+        Some(AIAgentText {
+            sections: crate::ai::agent::util::parse_markdown_into_text_and_code_sections(&buf),
+        })
     }
 
     /// Optimistically creates a subtask for the CLISubagent task when a user query is sent while

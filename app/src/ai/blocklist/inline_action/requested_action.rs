@@ -73,6 +73,11 @@ pub struct RenderableAction {
     pub background_color: ColorU,
     pub should_highlight_border: bool,
     should_override_with_content_item_spacing: bool,
+    /// When set, renders a minimal flat body: no fill box/border, no leading icon,
+    /// no horizontal padding, and no outer spacing margin. Used when the action is
+    /// shown as the expanded detail of a flat collapsible summary row so the body
+    /// lines up with the shared agent content margin (matching "Ran command").
+    flat: bool,
 }
 
 impl RenderableAction {
@@ -90,6 +95,7 @@ impl RenderableAction {
             background_color: neutral_2(theme),
             should_highlight_border: false,
             should_override_with_content_item_spacing: false,
+            flat: false,
         }
     }
 
@@ -105,6 +111,7 @@ impl RenderableAction {
             background_color: neutral_2(theme),
             should_highlight_border: false,
             should_override_with_content_item_spacing: false,
+            flat: false,
         }
     }
 
@@ -120,7 +127,14 @@ impl RenderableAction {
             background_color: neutral_2(theme),
             should_highlight_border: false,
             should_override_with_content_item_spacing: false,
+            flat: false,
         }
+    }
+
+    /// Renders a minimal flat body (see [`Self::flat`]).
+    pub fn with_flat(mut self) -> Self {
+        self.flat = true;
+        self
     }
 
     pub fn with_icon(mut self, icon: Box<dyn Element>) -> Self {
@@ -171,6 +185,27 @@ impl RenderableAction {
         let appearance = Appearance::as_ref(app);
         let theme = appearance.theme();
 
+        if self.flat {
+            // Flat body: drop the fill box, border, leading icon, horizontal padding,
+            // and outer spacing margin so the content lines up with the shared agent
+            // content margin provided by the enclosing collapsible summary column.
+            let body_element = match self.body {
+                FormattedTextOrElement::FormattedText(formatted_text) => {
+                    formatted_text.set_selectable(true).finish()
+                }
+                FormattedTextOrElement::Element(element) => element,
+            };
+            let mut column = Flex::column().with_cross_axis_alignment(CrossAxisAlignment::Stretch);
+            column.add_child(body_element);
+            if let Some(action_button) = self.action_button {
+                column.add_child(Container::new(action_button).with_margin_top(6.).finish());
+            }
+            if let Some(footer) = self.footer {
+                column.add_child(Container::new(footer).with_margin_top(6.).finish());
+            }
+            return Container::new(column.finish());
+        }
+
         let mut has_header = false;
         let mut content = Flex::column().with_cross_axis_alignment(CrossAxisAlignment::Stretch);
         if let Some(header) = self.header {
@@ -212,7 +247,7 @@ impl RenderableAction {
         if has_header || self.should_override_with_content_item_spacing {
             container.finish().with_content_item_spacing()
         } else {
-            container.finish().with_agent_output_item_spacing(app)
+            container.finish().with_agent_output_item_spacing()
         }
     }
 }

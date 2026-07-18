@@ -6,16 +6,18 @@ use std::sync::Arc;
 
 use lazy_static::lazy_static;
 use parking_lot::FairMutex;
-use pathfinder_geometry::vector::vec2f;
+use pathfinder_geometry::vector::{vec2f, Vector2F};
 use settings::Setting as _;
 use warp_core::ui::appearance::Appearance;
 use warp_core::ui::Icon;
 use warp_editor::render::element::VerticalExpansionBehavior;
+use warpui::assets::asset_cache::AssetSource;
 use warpui::elements::{
     Align, Border, ChildView, Clipped, ConstrainedBox, Container, CornerRadius, CrossAxisAlignment,
-    Expanded, Flex, MainAxisSize, MouseStateHandle, OffsetPositioning, ParentElement, Radius,
-    ScrollbarWidth, SelectableArea, SelectionHandle, Stack, Text,
+    Expanded, Flex, Image as WarpImage, MainAxisSize, MouseStateHandle, OffsetPositioning,
+    ParentElement, Radius, ScrollbarWidth, SelectableArea, SelectionHandle, Stack, Text,
 };
+use warpui::image_cache::CacheOption;
 use warpui::keymap::{Context, EditableBinding, FixedBinding, Keystroke};
 use warpui::ui_components::components::UiComponent as _;
 use warpui::{
@@ -23,7 +25,7 @@ use warpui::{
     TypedActionView, UpdateView, View, ViewContext, ViewHandle,
 };
 
-use super::inline_action_icons::{self, icon_size};
+use super::inline_action_icons;
 use crate::ai::agent::conversation::ConversationStatus;
 use crate::ai::agent::{
     icons, AIAgentActionId, AIAgentActionResult, AIAgentActionResultType, AIAgentActionType,
@@ -36,7 +38,7 @@ use crate::ai::blocklist::block::cli_controller::{
 use crate::ai::blocklist::block::view_impl::output::action_icon;
 use crate::ai::blocklist::block::view_impl::{
     render_autonomy_checkbox_setting_speedbump_footer, render_citation, render_citation_chips,
-    CONTENT_HORIZONTAL_PADDING, CONTENT_ITEM_VERTICAL_MARGIN,
+    AGENT_CONTENT_LEFT_MARGIN, AGENT_TOOL_BLOCK_BOTTOM_MARGIN, CONTENT_HORIZONTAL_PADDING,
 };
 use crate::ai::blocklist::block::{AIBlockAction, AutonomySettingSpeedbump};
 use crate::ai::blocklist::inline_action::inline_action_header::{
@@ -55,6 +57,7 @@ use crate::menu::{Event as MenuEvent, Menu, MenuItemFields, MenuVariant};
 use crate::settings::InputModeSettings;
 use crate::terminal::block_list_viewport::InputMode;
 use crate::terminal::model::block::Block;
+use crate::terminal::model::grid::grid_handler::InlineImagePlacement;
 use crate::terminal::TerminalModel;
 use crate::ui_components::blended_colors;
 use crate::util::bindings::keybinding_name_to_keystroke;
@@ -264,9 +267,12 @@ pub struct RequestedCommandView {
     autoexecute_readonly_commands_speedbump_checkbox_handle: MouseStateHandle,
     manage_autonomy_settings_link_handle: MouseStateHandle,
 
-    // Selection support for MCP tool call detail text
-    mcp_content_selection_handle: SelectionHandle,
-    mcp_content_selected_text: Arc<std::sync::RwLock<Option<String>>>,
+    // Selection support for expanded detail text rendered inline in the row body
+    // (MCP/GitHub tool call details, and — for commands whose separate terminal
+    // block would render detached — the inline command output). A given view is
+    // either a command or a tool, so a single handle serves both.
+    detail_content_selection_handle: SelectionHandle,
+    detail_content_selected_text: Arc<std::sync::RwLock<Option<String>>>,
 }
 
 impl RequestedCommandView {
@@ -428,6 +434,16 @@ impl RequestedCommandView {
                                             me.set_is_header_expanded(false, ctx);
                                         }
                                     }
+                                } else if me.is_header_expanded {
+                                    // A command that finishes while expanded transitions from the
+                                    // live connected terminal block to the inline detail (see
+                                    // `detail_renders_as_connected_block`). Re-emit the expansion
+                                    // state so the AI block hides the now-finished separate block;
+                                    // otherwise the connected block and the inline detail would
+                                    // both render.
+                                    ctx.emit(RequestedCommandViewEvent::UpdatedExpansionState {
+                                        is_expanded: true,
+                                    });
                                 }
                                 ctx.notify();
                             }
@@ -499,8 +515,8 @@ impl RequestedCommandView {
             position_id_prefix,
             terminal_model,
             ai_block_view_id,
-            mcp_content_selection_handle: SelectionHandle::default(),
-            mcp_content_selected_text: Arc::new(std::sync::RwLock::new(None)),
+            detail_content_selection_handle: SelectionHandle::default(),
+            detail_content_selected_text: Arc::new(std::sync::RwLock::new(None)),
         }
     }
 
@@ -651,6 +667,68 @@ impl RequestedCommandView {
 
     pub fn is_header_expanded(&self) -> bool {
         self.is_header_expanded
+    }
+
+    /// Whether expanding this command reveals its detail through the *separate*
+    /// live terminal command block rendered connected directly beneath this row.
+    ///
+    /// This is now only used while the command is actively *running*
+    /// (`RunningAsync`), where the live terminal block streams output and hosts
+    /// the long-running command controls. A *finished* command's detail is
+    /// rendered inline in the row body instead (see [`View::render`]) so its
+    /// expanded presentation matches the middle-command inline detail and the
+    /// lighter read-files style — the heavy terminal chrome (toolbar, CWD /
+    /// duration header, `Lines·Size` footer, ANSI colors) is dropped. The
+    /// separate block for a finished command therefore stays hidden.
+    ///
+    /// A running command is always the last-in-output command (only the last
+    /// command in an exchange executes), so its block renders connected directly
+    /// beneath this row rather than detached at the bottom.
+    pub(crate) fn detail_renders_as_connected_block(&self, app: &AppContext) -> bool {
+        if !self.is_header_expanded || !self.action_type.is_requested_command() {
+            return false;
+        }
+
+        let action_status = self
+            .action_model
+            .as_ref(app)
+            .get_action_status(&self.action_id);
+        // Only the actively-running command uses the separate live terminal block;
+        // a finished command renders its detail inline (see the doc comment above).
+        let is_running = action_status
+            .as_ref()
+            .is_some_and(|status| status.is_running());
+        if !is_running {
+            return false;
+        }
+
+        if *InputModeSettings::as_ref(app).input_mode.value() == InputMode::PinnedToTop {
+            return false;
+        }
+
+        let is_last_output_message_in_output = self
+            .block_model
+            .status(app)
+            .output_to_render()
+            .is_some_and(|output| {
+                output.get().messages.last().is_some_and(|message| {
+                    matches!(
+                        &message.message,
+                        AIAgentOutputMessageType::Action(action) if action.id == self.action_id
+                    )
+                })
+            });
+        if !is_last_output_message_in_output {
+            return false;
+        }
+
+        let terminal_model = self.terminal_model.lock();
+        terminal_model
+            .block_list()
+            .is_requested_command_block_immediately_after_ai_block(
+                self.ai_block_view_id,
+                &self.action_id,
+            )
     }
 
     /// We use the requested command footer to show citations.
@@ -979,10 +1057,10 @@ impl RequestedCommandView {
 
     /// Returns the currently selected text.
     pub fn selected_text(&self, ctx: &AppContext) -> Option<String> {
-        // Check MCP content selection first, then fall back to editor selection.
-        if let Ok(mcp_selection) = self.mcp_content_selected_text.read() {
-            if mcp_selection.is_some() {
-                return mcp_selection.clone();
+        // Check inline detail selection first, then fall back to editor selection.
+        if let Ok(detail_selection) = self.detail_content_selected_text.read() {
+            if detail_selection.is_some() {
+                return detail_selection.clone();
             }
         }
         self.editor
@@ -991,10 +1069,10 @@ impl RequestedCommandView {
     }
 
     pub fn clear_selection(&mut self, ctx: &mut ViewContext<Self>) {
-        // Clear MCP content selection if it exists, else fall back to editor selection.
-        self.mcp_content_selection_handle.clear();
-        if let Ok(mut mcp_selection) = self.mcp_content_selected_text.write() {
-            *mcp_selection = None;
+        // Clear inline detail selection if it exists, else fall back to editor selection.
+        self.detail_content_selection_handle.clear();
+        if let Ok(mut detail_selection) = self.detail_content_selected_text.write() {
+            *detail_selection = None;
         } else if let Some(editor) = &self.editor {
             editor.update(ctx, |editor, ctx| {
                 editor.clear_selection(ctx);
@@ -1012,9 +1090,39 @@ impl RequestedCommandView {
         }
     }
 
+    /// Renders a single inline output image at its grid placement size. Used by
+    /// the inline command-detail path so a middle command whose terminal output
+    /// contains an image doesn't render text-only (the separate/connected block
+    /// path composites these through the grid paint path; this mirrors that by
+    /// resolving the raw image from the shared asset cache).
+    fn render_inline_output_image(placement: &InlineImagePlacement) -> Box<dyn Element> {
+        let image = WarpImage::new(
+            AssetSource::Raw {
+                id: placement.image_id.to_string(),
+            },
+            CacheOption::BySize,
+        )
+        .contain()
+        .with_corner_radius(CornerRadius::with_all(Radius::Pixels(4.)));
+
+        let mut constrained = ConstrainedBox::new(Box::new(image));
+        let size: Vector2F = placement.image_size;
+        if size.x() > 0. {
+            constrained = constrained.with_width(size.x());
+        }
+        if size.y() > 0. {
+            constrained = constrained.with_height(size.y());
+        }
+
+        Container::new(Align::new(constrained.finish()).left().finish())
+            .with_margin_top(8.)
+            .finish()
+    }
+
     fn render_header(
         &self,
         should_round_bottom_corners: bool,
+        flat: bool,
         app: &AppContext,
     ) -> Box<dyn Element> {
         let appearance = Appearance::as_ref(app);
@@ -1096,6 +1204,11 @@ impl RequestedCommandView {
                                     header_message_for_user_take_over_reason(reason).into()
                                 }
                             }
+                        } else if is_finished_command {
+                            // A finished command expanded inline keeps the same flat
+                            // "Ran command" label as when collapsed — only the chevron
+                            // flips to point down. The command + output render below.
+                            self.collapsed_summary_label(true).into()
                         } else {
                             VIEWING_COMMAND_DETAIL_MESSAGE.into()
                         }
@@ -1312,6 +1425,13 @@ impl RequestedCommandView {
             }
         };
 
+        // A collapsed command/tool summary renders as a minimal "command line": no
+        // fill box, no leading status glyph, dimmer text, flush-left with the prose,
+        // and an expand chevron that only appears on hover.
+        if flat {
+            config = config.with_flat();
+        }
+
         config.render(app)
     }
 
@@ -1435,23 +1555,60 @@ impl View for RequestedCommandView {
         // When expanded details are rendered using a regular block, having a non-zero horizontal
         // margin while toggled expanded will cause the body to look wider than the header.
         // The expanded details should also appear connected to the header, so we remove bottom margin in this case.
-        let is_rendered_above_expanded_command_block = {
-            let terminal_model = self.terminal_model.lock();
+        let is_rendered_above_expanded_command_block = self.detail_renders_as_connected_block(app);
 
-            is_last_output_message_in_output
-                && self.action_type.is_requested_command()
-                && action_status.as_ref().is_some_and(|status| {
-                    status.is_running() || (status.is_success() || status.is_failed())
-                })
-                && !is_input_pinned_to_top
-                && self.is_header_expanded
-                && terminal_model
+        // A finished command's detail always renders inline in the row body (the
+        // separate live terminal block is only used while the command is actively
+        // running — see `detail_renders_as_connected_block`). Rendering the command
+        // + output inline gives every finished command — adjacent or middle — the
+        // same lighter presentation, and avoids a middle command's block appearing
+        // detached at the bottom of the conversation. The separate block stays
+        // hidden (see `AIBlock`'s expansion handler).
+        let inline_command_output = if self.is_header_expanded
+            && self.action_type.is_requested_command()
+            && !is_rendered_above_expanded_command_block
+        {
+            let resolved = {
+                let terminal_model = self.terminal_model.lock();
+                terminal_model
                     .block_list()
-                    .is_requested_command_block_immediately_after_ai_block(
-                        self.ai_block_view_id,
-                        &self.action_id,
-                    )
+                    .block_for_ai_action_id(&self.action_id)
+                    .filter(|block| block.finished())
+                    .map(|block| {
+                        let (command, output) =
+                            block.command_and_output_with_secret_obfuscated(false);
+                        // Mirror the connected/separate terminal block's image handling:
+                        // surface the block's inline output images so a middle command's
+                        // image output isn't dropped when its detail renders inline. The
+                        // separate-block path composites these through the grid paint path;
+                        // here we resolve them declaratively from the shared asset cache.
+                        let images = if warp_core::features::FeatureFlag::ITermImages.is_enabled() {
+                            block.output_grid_image_placements()
+                        } else {
+                            Vec::new()
+                        };
+                        (command, output, images)
+                    })
+            };
+            // Never leave an expanded command box empty. When the finished terminal
+            // block can't be resolved (e.g. the command ran in a different execution
+            // context) or yields no command/output, fall back to the command text the
+            // widget already knows, so the command lives inside its "Ran command" box
+            // rather than only appearing in the agent's prose stream.
+            let resolved_has_content =
+                resolved.as_ref().is_some_and(|(command, output, images)| {
+                    !command.trim().is_empty() || !output.trim().is_empty() || !images.is_empty()
+                });
+            if resolved_has_content {
+                resolved
+            } else {
+                let command = self.command_text().trim().to_string();
+                (!command.is_empty()).then(|| (command, String::new(), Vec::new()))
+            }
+        } else {
+            None
         };
+        let should_render_command_output_inline = inline_command_output.is_some();
 
         // When the requested command is expanded but there is no subsequent block containing
         // command details beneath, then the command details must be rendered inline.
@@ -1471,11 +1628,34 @@ impl View for RequestedCommandView {
 
         let has_citations_footer =
             !self.derived_from_citations.is_empty() && !self.block_model.status(app).is_streaming();
+
+        // A command summary row renders as a minimal flat "command line" — no
+        // bordered box, no leading status glyph, dim text, flush-left with the
+        // surrounding prose, and a hover-revealed chevron beside the label. This
+        // flat treatment is kept when a finished command is expanded inline so the
+        // expanded header is visually identical to the collapsed one (only the
+        // chevron flips to point down); the command + output render in the body
+        // below. Pending-approval cards (`Blocked`), the still-running connected
+        // terminal block, and expanded MCP/GitHub detail keep their bordered
+        // container.
+        let is_finished_command = matches!(action_status, Some(AIActionStatus::Finished(..)));
+        let is_expanded_inline_command = self.is_header_expanded
+            && self.action_type.is_requested_command()
+            && is_finished_command
+            && !is_rendered_above_expanded_command_block;
+        let is_flat_command_row = !action_status
+            .as_ref()
+            .is_some_and(|status| status.is_blocked())
+            && !is_rendered_above_expanded_command_block
+            && (!self.is_header_expanded || is_expanded_inline_command);
+
         let header_element = self.render_header(
             !should_render_editor
                 && !should_render_mcp_content
+                && !should_render_command_output_inline
                 && !is_rendered_above_expanded_command_block
                 && !has_citations_footer,
+            is_flat_command_row,
             app,
         );
 
@@ -1540,12 +1720,12 @@ impl View for RequestedCommandView {
             .with_selectable(true)
             .finish();
 
-            let mcp_selected_text = self.mcp_content_selected_text.clone();
+            let detail_selected_text = self.detail_content_selected_text.clone();
             let selectable_text = SelectableArea::new(
-                self.mcp_content_selection_handle.clone(),
+                self.detail_content_selection_handle.clone(),
                 #[allow(clippy::unwrap_used)]
                 move |selection_args, _, _| {
-                    *mcp_selected_text.write().unwrap() = selection_args.selection;
+                    *detail_selected_text.write().unwrap() = selection_args.selection;
                 },
                 text_element,
             )
@@ -1557,6 +1737,66 @@ impl View for RequestedCommandView {
             content.add_child(
                 Container::new(selectable_text)
                     .with_horizontal_padding(INLINE_ACTION_HORIZONTAL_PADDING)
+                    .with_vertical_padding(REQUESTED_COMMAND_BODY_VERTICAL_PADDING)
+                    .with_background(theme.background())
+                    .with_corner_radius(CornerRadius::with_bottom(Radius::Pixels(8.)))
+                    .finish(),
+            );
+        }
+
+        if let Some((command, output, images)) = inline_command_output {
+            let command = command.trim_end();
+            let output = output.trim_end();
+            let content_text = if output.is_empty() {
+                command.to_string()
+            } else if command.is_empty() {
+                output.to_string()
+            } else {
+                format!("{command}\n{output}")
+            };
+
+            let text_element = Text::new(
+                content_text,
+                appearance.monospace_font_family(),
+                appearance.monospace_font_size(),
+            )
+            .with_color(blended_colors::text_main(theme, theme.background()))
+            .with_selectable(true)
+            .finish();
+
+            let detail_selected_text = self.detail_content_selected_text.clone();
+            let selectable_text = SelectableArea::new(
+                self.detail_content_selection_handle.clone(),
+                #[allow(clippy::unwrap_used)]
+                move |selection_args, _, _| {
+                    *detail_selected_text.write().unwrap() = selection_args.selection;
+                },
+                text_element,
+            )
+            .on_selection_updated(|ctx, _| {
+                ctx.dispatch_typed_action(RequestedCommandViewAction::SelectText);
+            })
+            .finish();
+
+            // The text and any inline images share a single bordered card so the
+            // detail reads as one connected block beneath the header. Images are
+            // rendered declaratively from the asset cache (already staged by the
+            // terminal on image completion) at their grid placement size.
+            let mut inline_body = Flex::column()
+                .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
+                .with_child(selectable_text);
+
+            for placement in &images {
+                inline_body.add_child(Self::render_inline_output_image(placement));
+            }
+
+            content.add_child(
+                // Drop the left inner padding so the inline command/output text
+                // starts at the same x as the flat "Ran command" header label and
+                // the agent prose (both at `AGENT_CONTENT_LEFT_MARGIN` via the outer
+                // container's left margin). Keep the right padding for breathing room.
+                Container::new(inline_body.finish())
+                    .with_padding_right(INLINE_ACTION_HORIZONTAL_PADDING)
                     .with_vertical_padding(REQUESTED_COMMAND_BODY_VERTICAL_PADDING)
                     .with_background(theme.background())
                     .with_corner_radius(CornerRadius::with_bottom(Radius::Pixels(8.)))
@@ -1608,13 +1848,16 @@ impl View for RequestedCommandView {
                     }))
                 && !is_input_pinned_to_top);
 
-        let container = Container::new(content.finish())
+        let mut container_builder = Container::new(content.finish())
             .with_margin_left(if is_rendered_above_expanded_command_block {
+                // The detail renders as a separate, connected terminal block below, so
+                // the header connects flush to it (no left margin).
                 0.
-            } else if action_status.is_some_and(|status| status.is_blocked()) {
-                CONTENT_HORIZONTAL_PADDING
             } else {
-                CONTENT_HORIZONTAL_PADDING + icon_size(app) + 16.
+                // Everything else — flat collapsed rows, pending-approval cards, and
+                // expanded inline detail — shares the agent content left margin so it
+                // lines up with the user's message text and the agent prose.
+                AGENT_CONTENT_LEFT_MARGIN
             })
             .with_margin_right(if is_rendered_above_expanded_command_block {
                 0.
@@ -1624,15 +1867,21 @@ impl View for RequestedCommandView {
             .with_margin_bottom(if should_remove_bottom_margin {
                 0.
             } else {
-                CONTENT_ITEM_VERTICAL_MARGIN
-            })
-            .with_corner_radius(if is_rendered_above_expanded_command_block {
-                CornerRadius::with_top(Radius::Pixels(8.))
-            } else {
-                CornerRadius::with_all(Radius::Pixels(8.))
-            })
-            .with_border(Border::all(1.).with_border_fill(border_color))
-            .finish();
+                AGENT_TOOL_BLOCK_BOTTOM_MARGIN
+            });
+
+        // Flat command rows drop the bordered box entirely so they read as a plain
+        // command line rather than a card.
+        if !is_flat_command_row {
+            container_builder = container_builder
+                .with_corner_radius(if is_rendered_above_expanded_command_block {
+                    CornerRadius::with_top(Radius::Pixels(8.))
+                } else {
+                    CornerRadius::with_all(Radius::Pixels(8.))
+                })
+                .with_border(Border::all(1.).with_border_fill(border_color));
+        }
+        let container = container_builder.finish();
 
         let mut root_stack = Stack::new();
         root_stack.add_child(container);

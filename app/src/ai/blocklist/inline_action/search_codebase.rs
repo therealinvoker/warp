@@ -285,7 +285,6 @@ impl SearchCodebaseView {
         header_row: Box<dyn Element>,
         header_background: warp_core::ui::theme::Fill,
         corner_radius: CornerRadius,
-        app: &AppContext,
     ) -> Box<dyn Element> {
         Container::new(header_row)
             .with_horizontal_padding(INLINE_ACTION_HORIZONTAL_PADDING)
@@ -293,7 +292,7 @@ impl SearchCodebaseView {
             .with_background(header_background)
             .with_corner_radius(corner_radius)
             .finish()
-            .with_agent_output_item_spacing(app)
+            .with_agent_output_item_spacing()
             .finish()
     }
 
@@ -313,7 +312,6 @@ impl SearchCodebaseView {
             header_row.finish(),
             header_background,
             CornerRadius::with_all(Radius::Pixels(8.)),
-            app,
         )
     }
 
@@ -467,7 +465,7 @@ impl View for SearchCodebaseView {
                 };
                 let loading_icon = yellow_running_icon(appearance);
                 self.render_header(appearance, loading_text, loading_icon, app)
-                    .with_agent_output_item_spacing(app)
+                    .with_agent_output_item_spacing()
                     .finish()
             }
             Some(AIActionStatus::Finished(result)) if result.result.is_cancelled() => {
@@ -481,12 +479,12 @@ impl View for SearchCodebaseView {
                 };
                 let cancelled_icon = cancelled_icon(appearance);
                 self.render_header(appearance, cancelled_text, cancelled_icon, app)
-                    .with_agent_output_item_spacing(app)
+                    .with_agent_output_item_spacing()
                     .finish()
             }
             Some(AIActionStatus::Finished(_)) => self
                 .render_finished(appearance, &self.file_contexts, app)
-                .with_agent_output_item_spacing(app)
+                .with_agent_output_item_spacing()
                 .finish(),
             _ => {
                 let text = if let Some(repo_name) = &self.repo_name {
@@ -498,7 +496,7 @@ impl View for SearchCodebaseView {
                     format!("Searched codebase for \"{}\"", self.search_query)
                 };
                 self.render_simple_header(text, app)
-                    .with_agent_output_item_spacing(app)
+                    .with_agent_output_item_spacing()
                     .finish()
             }
         }

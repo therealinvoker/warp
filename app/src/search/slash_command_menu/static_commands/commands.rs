@@ -238,6 +238,15 @@ pub const OPEN_PROJECT_RULES: StaticCommand = StaticCommand {
     argument: None,
 };
 
+pub static REMEMBER: LazyLock<StaticCommand> = LazyLock::new(|| StaticCommand {
+    name: "/remember",
+    description: "Save a durable fact to this project's memory (.bang/memory.md)",
+    icon_path: "bundled/svg/book-open.svg",
+    availability: Availability::LOCAL.union(Availability::AI_ENABLED),
+    auto_enter_ai_mode: false,
+    argument: Some(Argument::required().with_hint_text("<fact to remember>")),
+});
+
 pub const OPEN_MCP_SERVERS: StaticCommand = StaticCommand {
     name: "/open-mcp-servers",
     description: "Open MCP servers",
@@ -381,6 +390,43 @@ pub static ORCHESTRATE: LazyLock<StaticCommand> = LazyLock::new(|| StaticCommand
     argument: Some(Argument::optional().with_hint_text("<describe your task>")),
 });
 
+pub const MULTITASK_NAME: &str = "/multitask";
+
+/// Familiar-named alias for [`ORCHESTRATE`]. It resolves to the same orchestrate
+/// query mode (there is no separate proto marker), so behavior is identical; the
+/// distinct name + description exist to tell the user their task will be queued
+/// out to parallel agents rather than answered inline.
+pub static MULTITASK: LazyLock<StaticCommand> = LazyLock::new(|| StaticCommand {
+    name: MULTITASK_NAME,
+    description: "Queue this task to run in parallel across multiple agents",
+    icon_path: "bundled/svg/oz.svg",
+    availability: Availability::LOCAL | Availability::AI_ENABLED,
+    auto_enter_ai_mode: true,
+    argument: Some(Argument::optional().with_hint_text("<describe the task to queue>")),
+});
+
+/// Switches the agent input into terminal (shell) mode. Replaces the old
+/// Escape-to-terminal behavior.
+pub const TERMINAL: StaticCommand = StaticCommand {
+    name: "/terminal",
+    description: "Switch the input to terminal (shell) mode",
+    icon_path: "bundled/svg/terminal.svg",
+    availability: Availability::AI_ENABLED.union(Availability::NOT_CLOUD_AGENT),
+    auto_enter_ai_mode: false,
+    argument: None,
+};
+
+/// Toggles automatic terminal-command detection (NLD) on/off. Replaces the old
+/// "A" autodetection toggle button in the agent input footer.
+pub const AUTOTERMINAL: StaticCommand = StaticCommand {
+    name: "/autoterminal",
+    description: "Toggle automatic terminal-command detection on/off",
+    icon_path: "bundled/svg/psychology.svg",
+    availability: Availability::AI_ENABLED.union(Availability::NOT_CLOUD_AGENT),
+    auto_enter_ai_mode: false,
+    argument: None,
+};
+
 /// If `query` starts with the given command `name` followed by a space,
 /// returns the remainder of the query. Otherwise returns `None`.
 pub fn strip_command_prefix(query: &str, name: &str) -> Option<String> {
@@ -428,6 +474,27 @@ pub static QUEUE: LazyLock<StaticCommand> = LazyLock::new(|| StaticCommand {
         | Availability::NOT_CLOUD_AGENT,
     auto_enter_ai_mode: true,
     argument: Some(Argument::required().with_hint_text("<prompt to send when agent is done>")),
+});
+
+pub const STEER_NAME: &str = "/steer";
+
+/// Sibling to [`QUEUE`], but the opposite intent: rather than waiting for the
+/// agent to finish, `/steer` delivers the message to the running agent NOW via
+/// the conversation mailbox, and the harness folds it into the loop on its next
+/// step — redirecting the agent in place without cancelling and restarting. If
+/// nothing is running, it just submits as a normal query.
+pub static STEER: LazyLock<StaticCommand> = LazyLock::new(|| StaticCommand {
+    name: STEER_NAME,
+    description: "Redirect the agent while it's still working (sends now, no cancel/restart)",
+    icon_path: "bundled/svg/navigation.svg",
+    availability: Availability::AGENT_VIEW
+        | Availability::ACTIVE_CONVERSATION
+        | Availability::AI_ENABLED
+        | Availability::NOT_CLOUD_AGENT,
+    auto_enter_ai_mode: true,
+    argument: Some(
+        Argument::required().with_hint_text("<redirection to send to the running agent>"),
+    ),
 });
 
 pub static FORK_AND_COMPACT: LazyLock<StaticCommand> = LazyLock::new(|| {
@@ -634,6 +701,7 @@ fn all_commands() -> Vec<StaticCommand> {
         OPEN_PROJECT_RULES,
         OPEN_MCP_SERVERS,
         OPEN_RULES,
+        REMEMBER.clone(),
         AGENT.clone(),
         NEW.clone(),
         PLAN.clone(),
@@ -644,6 +712,8 @@ fn all_commands() -> Vec<StaticCommand> {
         CONVERSATIONS,
         EXPORT_TO_CLIPBOARD,
         MODEL.clone(),
+        TERMINAL,
+        AUTOTERMINAL,
     ];
 
     if FeatureFlag::LocalDockerSandbox.is_enabled() {
@@ -681,6 +751,10 @@ fn all_commands() -> Vec<StaticCommand> {
 
     if FeatureFlag::QueueSlashCommand.is_enabled() {
         commands.push(QUEUE.clone());
+    }
+
+    if FeatureFlag::SteerSlashCommand.is_enabled() {
+        commands.push(STEER.clone());
     }
 
     if !cfg!(target_family = "wasm") {
@@ -735,6 +809,9 @@ fn all_commands() -> Vec<StaticCommand> {
     }
 
     commands.push(ORCHESTRATE.clone());
+    // /multitask is a familiar-named alias for /orchestrate; register it right
+    // alongside so both surface (and gate) together.
+    commands.push(MULTITASK.clone());
 
     if FeatureFlag::SettingsFile.is_enabled() && cfg!(feature = "local_fs") {
         commands.push(OPEN_SETTINGS_FILE);

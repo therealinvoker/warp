@@ -12,7 +12,6 @@
 
 use std::sync::Arc;
 
-use crate::server::server_api::auth::AuthClient;
 use futures::SinkExt;
 use serde::Deserialize;
 use settings::Setting;
@@ -21,6 +20,7 @@ use warp_core::channel::ChannelState;
 use warpui::{Entity, ModelContext, SingletonEntity};
 use websocket::{Message, WebSocket, WebsocketMessage};
 
+use crate::server::server_api::auth::AuthClient;
 use crate::server::server_api::ServerApiProvider;
 
 /// Events surfaced from the harness Realtime proxy.

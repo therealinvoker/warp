@@ -696,7 +696,8 @@ async fn run_parent_bridge_forever(
         state_dir,
         server_api,
     };
-    run_agent_event_driver(source, config, &mut consumer).await
+    run_agent_event_driver(source, config, &mut consumer).await?;
+    Ok(())
 }
 
 async fn read_parent_bridge_resume_cursor(

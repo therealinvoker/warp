@@ -331,7 +331,9 @@ impl SlashCommandDataSource {
         if !command.is_active(context.session_context) {
             return false;
         }
-        if command.name == commands::ORCHESTRATE_NAME && !context.is_orchestration_enabled {
+        if (command.name == commands::ORCHESTRATE_NAME || command.name == commands::MULTITASK_NAME)
+            && !context.is_orchestration_enabled
+        {
             return false;
         }
         if command.name == commands::MOVE_TO_CLOUD.name && !context.is_cloud_handoff_enabled {

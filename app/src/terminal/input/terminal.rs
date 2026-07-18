@@ -8,7 +8,7 @@ use warpui::{AppContext, SingletonEntity};
 use super::common::{
     add_command_xray_overlay, add_input_suggestions_overlays, add_voltron_overlay,
     add_workflow_info_overlay, floating_input_box, should_show_terminal_input_message_bar,
-    wrap_input_with_terminal_padding_and_focus_handler,
+    wrap_input_with_terminal_padding_and_focus_handler, FLOATING_INPUT_MARGIN,
 };
 use super::{Input, InputAction, InputDropTargetData};
 use crate::appearance::Appearance;
@@ -16,8 +16,7 @@ use crate::context_chips::spacing;
 use crate::features::FeatureFlag;
 use crate::settings::{AppEditorSettings, InputModeSettings};
 use crate::terminal::block_list_viewport::InputMode;
-use crate::terminal::settings::TerminalSettings;
-use crate::terminal::view::TerminalAction;
+use crate::terminal::view::{TerminalAction, PADDING_LEFT};
 
 impl Input {
     /// Renders the terminal mode input when `FeatureFlag::AgentView` is enabled and there is no
@@ -51,36 +50,28 @@ impl Input {
 
         let show_message_bar = should_show_terminal_input_message_bar(&model, app);
 
-        // Prompt row (context chips: working directory, git branch, ...) renders
-        // above the editor.
-        let prompt_elements = self
-            .prompt_render_helper
-            .render_universal_developer_input_prompt(&model, appearance, true, app);
-        column.add_child(prompt_elements);
-
-        let terminal_spacing = TerminalSettings::as_ref(app)
-            .terminal_input_spacing(appearance.line_height_ratio(), app);
+        // Small, balanced vertical padding so the editor sits centered in the
+        // floating box with tight, equal space above/below — mirroring the Agent
+        // composer's `SPLIT_EDITOR_VPAD` treatment. Now that the context chips
+        // render *below* the box (rather than above the editor), the box only
+        // wraps the editor, so it should read as tight as the Agent box. Keep the
+        // vim-status path on the default padding since it needs the extra room.
+        const EDITOR_VPAD: f32 = 4.;
+        let editor_bottom_padding = if show_vim_status {
+            None
+        } else {
+            Some(EDITOR_VPAD)
+        };
         column.add_child(
-            Container::new(self.render_input_box(show_vim_status, None, appearance, app))
-                .with_margin_top(
-                    terminal_spacing.prompt_to_editor_padding
-                        * spacing::UDI_PROMPT_BOTTOM_PADDING_FACTOR,
-                )
-                .finish(),
+            Container::new(self.render_input_box(
+                show_vim_status,
+                editor_bottom_padding,
+                appearance,
+                app,
+            ))
+            .with_margin_top(EDITOR_VPAD)
+            .finish(),
         );
-
-        if !(matches!(input_mode, InputMode::PinnedToTop)
-            && self
-                .suggestions_mode_model
-                .as_ref(app)
-                .is_inline_menu_open())
-        {
-            column.add_child(
-                Container::new(Flex::row().finish())
-                    .with_margin_bottom(8.)
-                    .finish(),
-            );
-        }
 
         if matches!(input_mode, InputMode::PinnedToTop) {
             if let Some(banner) = self.render_input_banner(appearance, app, input_mode, false) {
@@ -160,7 +151,24 @@ impl Input {
         .with_background_color(crate::ui_components::blended_colors::neutral_2(
             appearance.theme(),
         ))
-        .with_padding_bottom(4.)
+        // The editor already carries `EDITOR_VPAD` bottom padding (mirroring the
+        // Agent composer), so the box itself adds none — keeping the box as tight
+        // vertically as the Agent input box.
+        .with_padding_bottom(0.)
+        .finish();
+
+        // Context chips (working directory, git branch, ...) render on their own
+        // row *below* the floating input box, matching the Agent composer (whose
+        // dir/repo chips render below the box via the footer's outside controls).
+        // Left-inset to line up with the box content (box margin + terminal
+        // padding); `apply_prompt_top_padding = false` since the chips are no
+        // longer sitting above the editor.
+        let prompt_below = Container::new(
+            self.prompt_render_helper
+                .render_universal_developer_input_prompt(&model, appearance, false, app),
+        )
+        .with_margin_left(FLOATING_INPUT_MARGIN + *PADDING_LEFT)
+        .with_margin_right(FLOATING_INPUT_MARGIN)
         .finish();
 
         // Contextual hints (e.g. "⌘↑ attach output as agent context") render above the input
@@ -210,6 +218,7 @@ impl Input {
                         Some(ChildView::new(&self.agent_status_view).finish()),
                         message_bar_above,
                         Some(input),
+                        Some(prompt_below),
                     ]
                     .into_iter()
                     .flatten(),
@@ -220,6 +229,7 @@ impl Input {
                     [
                         message_bar_above,
                         Some(input),
+                        Some(prompt_below),
                         Some(ChildView::new(&self.agent_status_view).finish()),
                         if hide_menu {
                             None
@@ -275,6 +285,7 @@ impl Input {
                         Some(ChildView::new(&self.agent_status_view).finish()),
                         message_bar_above,
                         Some(input),
+                        Some(prompt_below),
                     ]
                     .into_iter()
                     .flatten(),

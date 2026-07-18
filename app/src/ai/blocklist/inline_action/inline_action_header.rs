@@ -6,8 +6,8 @@ use warp_core::ui::appearance::Appearance;
 use warp_core::ui::theme::color::internal_colors;
 use warpui::elements::{
     Border, ConstrainedBox, Container, CornerRadius, CrossAxisAlignment, DispatchEventResult,
-    EventHandler, Expanded, Flex, FormattedTextElement, Hoverable, MainAxisAlignment, MainAxisSize,
-    MouseStateHandle, ParentElement, Radius, Shrinkable, SizeConstraintCondition,
+    Empty, EventHandler, Expanded, Flex, FormattedTextElement, Hoverable, MainAxisAlignment,
+    MainAxisSize, MouseStateHandle, ParentElement, Radius, Shrinkable, SizeConstraintCondition,
     SizeConstraintSwitch, Text,
 };
 use warpui::fonts::FamilyId;
@@ -119,6 +119,11 @@ pub struct HeaderConfig {
     pub font_color_override: Option<ColorU>,
     pub corner_radius_override: Option<CornerRadius>,
     pub soft_wrap_title: bool,
+    /// When set, renders a minimal "command line" style row: no background fill, no
+    /// leading icon, dimmer (secondary) text, flush-left with the surrounding prose
+    /// (no horizontal padding), and — for expandable rows — an expand chevron that
+    /// only appears on hover.
+    pub flat: bool,
 }
 
 impl HeaderConfig {
@@ -134,11 +139,18 @@ impl HeaderConfig {
             font_color_override: None,
             corner_radius_override: None,
             soft_wrap_title: false,
+            flat: false,
         }
     }
 
     pub fn with_soft_wrap_title(mut self) -> Self {
         self.soft_wrap_title = true;
+        self
+    }
+
+    /// Renders a minimal "command line" style row (see [`Self::flat`]).
+    pub fn with_flat(mut self) -> Self {
+        self.flat = true;
         self
     }
 
@@ -186,10 +198,11 @@ impl HeaderConfig {
     pub fn render_header(
         self,
         app: &AppContext,
-        interaction_mode_content: Option<Box<dyn Element>>,
+        mut interaction_mode_content: Option<Box<dyn Element>>,
     ) -> Box<dyn Element> {
         let appearance = Appearance::as_ref(app);
         let theme = appearance.theme();
+        let flat = self.flat;
         let header_background = theme.surface_2();
 
         let mut header_row = Flex::row()
@@ -201,22 +214,31 @@ impl HeaderConfig {
             .with_main_axis_alignment(MainAxisAlignment::Start)
             .with_cross_axis_alignment(CrossAxisAlignment::Center);
 
-        if let Some(icon) = self.icon {
-            left_content_container.add_child(
-                Container::new(
-                    ConstrainedBox::new(icon.finish())
-                        .with_width(icon_size(app))
-                        .with_height(icon_size(app))
-                        .finish(),
+        // Flat rows drop the leading status glyph/checkbox entirely.
+        if !flat {
+            if let Some(icon) = self.icon {
+                left_content_container.add_child(
+                    Container::new(
+                        ConstrainedBox::new(icon.finish())
+                            .with_width(icon_size(app))
+                            .with_height(icon_size(app))
+                            .finish(),
+                    )
+                    .with_margin_right(ICON_MARGIN)
+                    .finish(),
                 )
-                .with_margin_right(ICON_MARGIN)
-                .finish(),
-            )
+            }
         }
 
-        let text_color = self
-            .font_color_override
-            .unwrap_or_else(|| blended_colors::text_main(appearance.theme(), header_background));
+        let text_color = self.font_color_override.unwrap_or_else(|| {
+            if flat {
+                // Dimmer, secondary foreground so command lines read as muted next to
+                // normal agent response text.
+                blended_colors::text_sub(theme, theme.background())
+            } else {
+                blended_colors::text_main(theme, header_background)
+            }
+        });
 
         let mut title_element = Text::new_inline(
             self.title.clone(),
@@ -246,13 +268,23 @@ impl HeaderConfig {
             }
         }
 
-        left_content_container.add_child(
-            Expanded::new(
-                1.,
-                Container::new(title_element).with_margin_right(8.).finish(),
-            )
-            .finish(),
-        );
+        if flat {
+            // Flat rows keep the label at its natural width and place the expand
+            // chevron directly beside it (rather than pushing it to the far right).
+            left_content_container
+                .add_child(Container::new(title_element).with_margin_right(6.).finish());
+            if let Some(content) = interaction_mode_content.take() {
+                left_content_container.add_child(content);
+            }
+        } else {
+            left_content_container.add_child(
+                Expanded::new(
+                    1.,
+                    Container::new(title_element).with_margin_right(8.).finish(),
+                )
+                .finish(),
+            );
+        }
 
         if let Some(badge) = self.badge {
             left_content_container.add_child(
@@ -291,21 +323,31 @@ impl HeaderConfig {
                     }
                     InteractionMode::RightClickable(..) => false,
                 });
-        let container = Container::new(header_row.finish())
-            .with_padding_left(INLINE_ACTION_HORIZONTAL_PADDING)
-            .with_padding_right(INLINE_ACTION_HORIZONTAL_PADDING)
-            .with_vertical_padding(INLINE_ACTION_HEADER_VERTICAL_PADDING)
-            .with_background(header_background)
-            .with_corner_radius(
-                if let Some(corner_radius_override) = self.corner_radius_override {
-                    corner_radius_override
-                } else if looks_expanded_downwards {
-                    CornerRadius::with_top(Radius::Pixels(8.))
-                } else {
-                    CornerRadius::with_all(Radius::Pixels(8.))
-                },
-            )
-            .finish();
+        // Flat rows have no fill box and sit flush-left with the surrounding prose, so
+        // they line up with the user prompt and agent response text.
+        let horizontal_padding = if flat {
+            0.
+        } else {
+            INLINE_ACTION_HORIZONTAL_PADDING
+        };
+        let mut container_builder = Container::new(header_row.finish())
+            .with_padding_left(horizontal_padding)
+            .with_padding_right(horizontal_padding)
+            .with_vertical_padding(INLINE_ACTION_HEADER_VERTICAL_PADDING);
+        if !flat {
+            container_builder = container_builder
+                .with_background(header_background)
+                .with_corner_radius(
+                    if let Some(corner_radius_override) = self.corner_radius_override {
+                        corner_radius_override
+                    } else if looks_expanded_downwards {
+                        CornerRadius::with_top(Radius::Pixels(8.))
+                    } else {
+                        CornerRadius::with_all(Radius::Pixels(8.))
+                    },
+                );
+        }
+        let container = container_builder.finish();
 
         if let Some(InteractionMode::ManuallyExpandable(expansion_config)) = &self.interaction_mode
         {
@@ -382,15 +424,31 @@ impl HeaderConfig {
                     .finish()
                 }
                 InteractionMode::ManuallyExpandable(expansion_config) => {
-                    let expanded_icon = ConstrainedBox::new(render_expansion_icon(
-                        expansion_config.is_expanded,
-                        expansion_config.expands_upwards,
-                        appearance,
-                        app,
-                    ))
-                    .with_height(icon_size(app))
-                    .with_width(icon_size(app))
-                    .finish();
+                    // Flat rows only reveal the expand chevron on hover; the row is
+                    // wrapped in a `Hoverable` (see `render_header`) whose hover changes
+                    // call `ctx.notify()`, so re-reading the mouse state here re-renders
+                    // the chevron in/out. The icon-sized box is always reserved to avoid
+                    // any layout shift on hover.
+                    let show_chevron = !self.flat
+                        || expansion_config
+                            .toggle_mouse_state
+                            .lock()
+                            .unwrap()
+                            .is_hovered();
+                    let chevron: Box<dyn Element> = if show_chevron {
+                        render_expansion_icon(
+                            expansion_config.is_expanded,
+                            expansion_config.expands_upwards,
+                            appearance,
+                            app,
+                        )
+                    } else {
+                        Empty::new().finish()
+                    };
+                    let expanded_icon = ConstrainedBox::new(chevron)
+                        .with_height(icon_size(app))
+                        .with_width(icon_size(app))
+                        .finish();
 
                     self.render_header(app, Some(expanded_icon))
                 }

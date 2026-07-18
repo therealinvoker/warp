@@ -50,7 +50,7 @@ use warpui::elements::{
 };
 use warpui::fonts::{Properties, Weight};
 use warpui::platform::Cursor;
-use warpui::text_layout::{ClipConfig, TextStyle};
+use warpui::text_layout::TextStyle;
 use warpui::ui_components::components::UiComponent;
 use warpui::{AppContext, Element, SingletonEntity, View, ViewContext};
 
@@ -67,7 +67,6 @@ use crate::ai::blocklist::block::view_impl::header::{
 };
 use crate::ai::blocklist::block::{DetectedLinksState, RICH_CONTENT_LINK_FIRST_CHAR_POSITION_ID};
 use crate::ai::blocklist::history_model::BlocklistAIHistoryModel;
-use crate::ai::blocklist::inline_action::inline_action_icons::icon_size;
 use crate::ai::blocklist::model::AIBlockModelHelper;
 use crate::appearance::Appearance;
 use crate::cloud_object::model::persistence::CloudModel;
@@ -81,7 +80,6 @@ use crate::terminal::model::ObfuscateSecrets;
 use crate::terminal::safe_mode_settings::get_secret_obfuscation_mode;
 use crate::terminal::view::ambient_agent::is_cloud_agent_pre_first_exchange;
 use crate::terminal::view::TerminalAction;
-use crate::terminal::TerminalView;
 use crate::ui_components::blended_colors;
 use crate::ui_components::icons::Icon;
 use crate::util::link_detection::DetectedLinkType;
@@ -957,44 +955,21 @@ impl View for AIBlock {
                 contents.add_child(header.with_content_item_spacing().finish());
                 did_render_header = true;
             }
-            // Derive the display info for the participant who initiated this exchange.
-            // For non-shared sessions, this is just the current user.
-            // For shared sessions, this is the user who initiated the request.
-            let (avatar_display_name, profile_image_path, avatar_color) = self
-                .model
-                .response_initiator(app)
-                .and_then(|participant_id| {
-                    app.view_with_id::<TerminalView>(self.window_id, self.terminal_view_id)
-                        .and_then(|terminal_view| {
-                            terminal_view.read(app, |view, app| {
-                                view.shared_session_presence_manager().and_then(move |pm| {
-                                    pm.as_ref(app).get_participant(&participant_id).map(
-                                        |participant| {
-                                            // Get the display info from the participant
-                                            // who sent this query.
-                                            (
-                                                participant.info.profile_data.display_name.clone(),
-                                                participant.info.profile_data.photo_url.clone(),
-                                                Some(participant.color),
-                                            )
-                                        },
-                                    )
-                                })
-                            })
-                        })
-                })
-                // Fallback to the current user's info if this is not a shared session
-                // or the participant is not found.
-                .unwrap_or((
-                    self.user_display_name.clone(),
-                    self.profile_image_path.clone(),
-                    None,
-                ));
+            // The `⋮` overflow menu is rendered INSIDE the user bubble (right-aligned)
+            // rather than as a sibling floating outside it. It's only shown for the
+            // standalone query (no header rendered above it).
+            let overflow_menu = (!did_render_header).then(|| {
+                render_overflow_menu_button(
+                    self.state_handles.overflow_menu_handle.clone(),
+                    self.view_id,
+                    self.client_ids.client_exchange_id,
+                    self.client_ids.conversation_id,
+                    self.is_restored(),
+                    app,
+                )
+            });
             if let Some(rendered_query) = query::maybe_render(
                 query::Props {
-                    user_display_name: &avatar_display_name,
-                    profile_image_path: profile_image_path.as_ref(),
-                    avatar_color,
                     query_and_index: Some((&query_for_display, input_index)),
                     query_prefix_highlight_len,
                     detected_links_state: &self.detected_links_state,
@@ -1014,38 +989,27 @@ impl View for AIBlock {
                         },
                     ),
                 },
+                overflow_menu,
                 app,
             ) {
                 if did_render_header {
                     contents.add_child(rendered_query.with_content_item_spacing().finish());
                 } else {
-                    // The query element is designed to be exactly icon_size() height.
-                    let rendered_query_height = icon_size(app);
-                    let margin_bottom = (CONTENT_ITEM_VERTICAL_MARGIN
-                        - (OVERFLOW_BUTTON_SIZE - rendered_query_height).max(0.))
-                    .max(0.);
+                    // Stretch the bubble to the full content width (its `⋮` sits at the
+                    // right edge inside the bubble).
                     contents.add_child(
                         Flex::row()
-                            .with_cross_axis_alignment(CrossAxisAlignment::Start)
                             .with_child(Expanded::new(1., rendered_query).finish())
-                            .with_child(render_overflow_menu_button(
-                                self.state_handles.overflow_menu_handle.clone(),
-                                self.view_id,
-                                self.client_ids.client_exchange_id,
-                                self.client_ids.conversation_id,
-                                self.is_restored(),
-                                app,
-                            ))
                             .finish()
                             .with_content_item_spacing()
-                            .with_margin_bottom(margin_bottom)
+                            .with_margin_bottom(CONTENT_ITEM_VERTICAL_MARGIN)
                             .finish(),
                     );
                 }
             }
 
             if let Some(element) = elements_below_query {
-                contents.add_child(element.with_agent_output_item_spacing(app).finish());
+                contents.add_child(element.with_agent_output_item_spacing().finish());
             }
         }
 
@@ -1130,6 +1094,7 @@ impl View for AIBlock {
                     .as_ref(),
                 imported_comments: &self.imported_comments,
                 run_agents_card_views: &self.run_agents_card_views,
+                build_plan_card_views: &self.build_plan_card_views,
                 #[cfg(feature = "local_fs")]
                 resolved_code_block_paths: &self.resolved_code_block_paths,
                 #[cfg(feature = "local_fs")]
@@ -1223,7 +1188,14 @@ impl View for AIBlock {
             || (!is_previous_blocklist_item_ai_block && !self.is_passive_conversation(app));
 
         if should_add_top_padding {
-            content = content.with_padding_top(CONTENT_VERTICAL_PADDING);
+            // Give a little extra breathing room beneath an agent tool/command block
+            // (whose own bottom margin is removed so the following block owns the gap).
+            let top_padding = if renders_below_requested_command_view {
+                AGENT_TOOL_BLOCK_BOTTOM_MARGIN
+            } else {
+                CONTENT_VERTICAL_PADDING
+            };
+            content = content.with_padding_top(top_padding);
         }
 
         let semantic_selection = SemanticSelection::as_ref(app);
@@ -1299,6 +1271,36 @@ impl AIBlock {
     /// This mirrors the question portion of `render`, but is intentionally non-interactive (no text
     /// selection, links, or attachments) and single-line, so painting a second copy on top of the
     /// scrolling block doesn't duplicate event handlers or grow the header unbounded.
+    /// Whether this block is a genuine user-authored query that may own the sticky header.
+    ///
+    /// Cheap predicate mirroring [`Self::render_pinned_query`]'s gate without building any
+    /// elements, so the block list can classify every visible block each frame (to track the
+    /// ordered set of query blocks for the sticky header) without the cost of rendering.
+    pub(crate) fn has_pinnable_user_query(&self, app: &AppContext) -> bool {
+        if self.is_hidden(app) {
+            return false;
+        }
+        if BlocklistAIHistoryModel::as_ref(app)
+            .conversation(&self.client_ids.conversation_id)
+            .is_none()
+        {
+            return false;
+        }
+        let initial_conversation_query = self
+            .model
+            .conversation(app)
+            .and_then(|c| c.initial_user_query());
+        self.model
+            .inputs_to_render(app)
+            .iter()
+            .filter(|input| input.is_user_authored_prompt())
+            .any(|input| {
+                input
+                    .display_user_query(initial_conversation_query.as_ref())
+                    .is_some()
+            })
+    }
+
     pub(crate) fn render_pinned_query(&self, app: &AppContext) -> Option<Box<dyn Element>> {
         if self.is_hidden(app) {
             return None;
@@ -1310,58 +1312,90 @@ impl AIBlock {
             .model
             .conversation(app)
             .and_then(|c| c.initial_user_query());
+        // Only a genuine user-authored prompt may own the sticky header. Agent
+        // continuation blocks (tool/action results, agent-suggested prompts) can carry
+        // query-like display text, but must never be treated as a pinned/incoming query
+        // — otherwise a post-tool-call agent block would peel the current turn's header
+        // off before the next real user query arrives.
         let query_for_display = self
             .model
             .inputs_to_render(app)
             .iter()
+            .filter(|input| input.is_user_authored_prompt())
             .find_map(|input| input.display_user_query(initial_conversation_query.as_ref()))?;
 
         let appearance = Appearance::as_ref(app);
         let theme = appearance.theme();
 
-        let avatar = Container::new(common::render_user_avatar(
-            &self.user_display_name,
-            self.profile_image_path.as_ref(),
-            None,
-            app,
-        ))
-        .with_margin_right(16.)
-        .finish();
-
+        // Match the inline query text exactly: same font family/size/weight/colour and
+        // the same soft-wrapping (NO ellipsis clip). Wrapping is what lets a multi-line
+        // prompt's pinned header grow to the same height as its inline bubble instead of
+        // truncating to one line — the previous single-line clamp was the source of the
+        // "size pop" on hand-off.
         let query_text = Text::new(
             query_for_display,
-            appearance.monospace_font_family(),
-            appearance.monospace_font_size(),
+            appearance.ai_font_family(),
+            appearance.ui_font_size(),
         )
-        .with_style(Properties::default().weight(Weight::Bold))
+        .with_style(Properties::default().weight(Weight::Normal))
         .with_color(blended_colors::text_main(theme, theme.surface_1()))
-        .with_clip(ClipConfig::ellipsis())
         .finish();
 
+        // Mirror the inline bubble's content row *structure* so the two are pixel-identical
+        // in height for both single- and multi-line prompts. The inline bubble is a
+        // `Flex::row([Expanded(Flex::column([query text])), ⋮ overflow menu])` (see
+        // `query::render_query`), so its text wraps within `inner_width - OVERFLOW_BUTTON_SIZE`
+        // and its row is at least as tall as the menu. We reproduce that nesting exactly:
+        // the pinned text is wrapped in the same `Flex::column` inside `Expanded` (the inline
+        // column also carries the query text as its first child), and the trailing footprint is
+        // the same `OVERFLOW_BUTTON_SIZE` (26×26) reserved by the inline `⋮` — the inline menu is
+        // itself a `SavePosition`-wrapped `ConstrainedBox` of exactly 26×26 with no margin/gap,
+        // and both rows use `CrossAxisAlignment::Center` with the default (zero) inter-child
+        // spacing, so the reserved column footprint is identical. This makes the text wrap at
+        // the identical width and the row height `max(wrapped_text_height, OVERFLOW_BUTTON_SIZE)`
+        // — exactly the inline formula. No fixed `ConstrainedBox` height, so multi-line prompts
+        // grow in lock-step with the inline bubble.
+        let query_column = Flex::column().with_child(query_text).finish();
         let row = Flex::row()
             .with_cross_axis_alignment(CrossAxisAlignment::Center)
-            .with_child(avatar)
-            .with_child(Expanded::new(1., query_text).finish())
+            .with_child(Expanded::new(1., query_column).finish())
+            .with_child(
+                ConstrainedBox::new(Empty::new().finish())
+                    .with_width(OVERFLOW_BUTTON_SIZE)
+                    .with_height(OVERFLOW_BUTTON_SIZE)
+                    .finish(),
+            )
             .finish();
 
-        // Use the "textarea" grey (`surface_1`) with rounded corners to match the agent input
-        // styling. In the fullscreen agent view the theme `background()` is translucent, and
-        // `surface_1` inherits that alpha, so painting it standalone would let the scrolling
-        // answer bleed through. Force full opacity so the header fully occludes the content.
+        // Mirror the inline user-query bubble exactly so the pinned header sits over
+        // the scrolling question with no jump on handoff: same outer horizontal margin
+        // ([`CONTENT_HORIZONTAL_PADDING`], bubble left edge), same inner horizontal
+        // padding ([`USER_BUBBLE_HORIZONTAL_PADDING`], text left edge), same vertical
+        // padding ([`USER_BUBBLE_VERTICAL_PADDING`]), same corner radius, the same
+        // lightened bubble fill, and the same 1px outline. In the fullscreen agent view
+        // the theme surfaces are translucent, so force full opacity here so the header
+        // fully occludes the content beneath it.
         //
-        // Note: no border here on purpose. A border would inset the content by its width, shifting
-        // the avatar/query text by 1px relative to the block's natural (border-less) rendering and
-        // causing a visible jump as the header pins and hands off. Paddings must match the block's
-        // own content so the pinned header sits exactly over the scrolling question.
-        let grey = theme.surface_1().into_solid();
-        let opaque_grey = Fill::Solid(ColorU::new(grey.r, grey.g, grey.b, 255));
+        // The border matches the inline bubble's (`query::user_bubble_border`) so the
+        // content inset is identical on both — no 1px text jump as the header pins and
+        // hands off.
+        let bubble_fill = query::user_bubble_background(appearance);
+        let opaque_fill = Fill::Solid(ColorU::new(
+            bubble_fill.r,
+            bubble_fill.g,
+            bubble_fill.b,
+            255,
+        ));
         Some(
             Container::new(row)
-                .with_background(opaque_grey)
-                .with_corner_radius(CornerRadius::with_all(Radius::Pixels(8.)))
-                .with_horizontal_padding(CONTENT_HORIZONTAL_PADDING)
-                .with_padding_top(CONTENT_VERTICAL_PADDING)
-                .with_padding_bottom(12.)
+                .with_background(opaque_fill)
+                .with_border(
+                    Border::all(1.).with_border_color(query::user_bubble_border(appearance)),
+                )
+                .with_corner_radius(CornerRadius::with_all(Radius::Pixels(10.)))
+                .with_horizontal_margin(CONTENT_HORIZONTAL_PADDING)
+                .with_horizontal_padding(USER_BUBBLE_HORIZONTAL_PADDING)
+                .with_vertical_padding(USER_BUBBLE_VERTICAL_PADDING)
                 .finish(),
         )
     }
@@ -1378,6 +1412,22 @@ impl AIBlock {
 /// Each sub-component of the AI block (header, query, output) is responsible for implementing its
 /// own padding and margin using these values.
 pub(crate) const CONTENT_HORIZONTAL_PADDING: f32 = 20.;
+
+/// Horizontal padding inside the rounded user-comment bubble. The user's message
+/// text therefore starts at [`CONTENT_HORIZONTAL_PADDING`] +
+/// [`USER_BUBBLE_HORIZONTAL_PADDING`] from the pane edge.
+pub(crate) const USER_BUBBLE_HORIZONTAL_PADDING: f32 = 14.7;
+
+/// Vertical padding inside the rounded user-comment bubble.
+pub(crate) const USER_BUBBLE_VERTICAL_PADDING: f32 = 10.5;
+
+/// Shared left margin for all agent-side content (prose, tool/command summary
+/// rows, command output, expanded detail). It matches the user's message text
+/// left edge (bubble left margin + bubble padding) so the whole conversation
+/// column — user text and agent content alike — starts at the same x. The bubble
+/// background itself extends further left by its padding, which is expected.
+pub(crate) const AGENT_CONTENT_LEFT_MARGIN: f32 =
+    CONTENT_HORIZONTAL_PADDING + USER_BUBBLE_HORIZONTAL_PADDING;
 
 /// The vertical padding applied to the AIBlock's content.
 ///
@@ -1397,6 +1447,12 @@ pub(crate) const CONTENT_VERTICAL_PADDING: f32 = 16.;
 /// own padding and margin using these values.
 pub(crate) const CONTENT_ITEM_VERTICAL_MARGIN: f32 = 16.;
 
+/// Bottom margin applied beneath agent tool/command blocks (e.g. the "Ran command"
+/// block and the collapsible "Reading files"/"Searched code" summary rows) so there
+/// is extra breathing room before the prose that follows them. Larger than the
+/// standard [`CONTENT_ITEM_VERTICAL_MARGIN`] used between plain output items.
+pub(crate) const AGENT_TOOL_BLOCK_BOTTOM_MARGIN: f32 = 24.;
+
 pub(crate) trait WithContentItemSpacing {
     /// Returns a [`Container`] with standard margin and padding values applied to be rendered as a
     /// "content item" in an AI block.
@@ -1405,10 +1461,11 @@ pub(crate) trait WithContentItemSpacing {
     /// of the top-level container.
     fn with_content_item_spacing(self) -> Container;
 
-    /// Returns a [`Container`] "content item" spacing with additional left margin to be specifically
-    /// applied to agent output items, intended to vertically align the left margin of agent output
-    /// items (text, reasoning, actions) with the user query.
-    fn with_agent_output_item_spacing(self, app: &AppContext) -> Container;
+    /// Returns a [`Container`] "content item" spacing applied to agent output items
+    /// (text, reasoning, actions). The left margin uses [`AGENT_CONTENT_LEFT_MARGIN`]
+    /// so agent content lines up with the user's message text (which is inset by the
+    /// bubble padding); the right margin stays at [`CONTENT_HORIZONTAL_PADDING`].
+    fn with_agent_output_item_spacing(self) -> Container;
 }
 
 impl WithContentItemSpacing for Box<dyn Element> {
@@ -1418,10 +1475,9 @@ impl WithContentItemSpacing for Box<dyn Element> {
             .with_margin_bottom(CONTENT_ITEM_VERTICAL_MARGIN)
     }
 
-    fn with_agent_output_item_spacing(self, app: &AppContext) -> Container {
-        let left_margin = CONTENT_HORIZONTAL_PADDING + icon_size(app) + 16.;
+    fn with_agent_output_item_spacing(self) -> Container {
         Container::new(self)
-            .with_margin_left(left_margin)
+            .with_margin_left(AGENT_CONTENT_LEFT_MARGIN)
             .with_margin_right(CONTENT_HORIZONTAL_PADDING)
             .with_margin_bottom(CONTENT_ITEM_VERTICAL_MARGIN)
     }

@@ -367,7 +367,7 @@ impl PlanAndTodoListView {
         let line_height_ratio = appearance.line_height_ratio();
 
         let completed_text = Text::new_inline(
-            format!("{}", num_completed_todo_items + 1),
+            format!("{num_completed_todo_items}"),
             appearance.ui_font_family(),
             chip_font_size,
         )

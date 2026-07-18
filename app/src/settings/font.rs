@@ -12,6 +12,13 @@ pub const DEFAULT_MONOSPACE_FONT_NAME: &str = "Hack";
 pub const DEFAULT_MONOSPACE_FONT_SIZE: f32 = 11.0;
 pub const DEFAULT_MONOSPACE_FONT_WEIGHT: Weight = Weight::Normal;
 
+/// The default family for AI/agent prose. This is the bundled proportional UI
+/// sans (the same family `Appearance::ui_font_family` resolves to), so agent
+/// conversation text reads as sans (straight `l`) out of the box while inline
+/// and fenced code stay on the monospace family. Users can override this via
+/// Settings → Custom → Appearance → "Agent font".
+pub const DEFAULT_AI_FONT_NAME: &str = "Roboto";
+
 define_settings_group!(FontSettings,
     settings: [
         monospace_font_name: MonospaceFontName {
@@ -55,7 +62,7 @@ define_settings_group!(FontSettings,
         },
         ai_font_name: AIFontName {
             type: String,
-            default: DEFAULT_MONOSPACE_FONT_NAME.to_string(),
+            default: DEFAULT_AI_FONT_NAME.to_string(),
             supported_platforms: SupportedPlatforms::ALL,
             sync_to_cloud: SyncToCloud::Never,
             private: false,
